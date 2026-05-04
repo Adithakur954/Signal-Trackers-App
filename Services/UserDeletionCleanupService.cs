@@ -56,12 +56,17 @@ namespace SignalTracker.Services
                     .UseMySql(connectionString, new MySqlServerVersion(new Version(8, 0, 29)), mysqlOptions =>
                     {
                         mysqlOptions.EnableRetryOnFailure(5, TimeSpan.FromSeconds(10), null);
-                    })
+                })
                     .Options;
 
                 await using var db = new ApplicationDbContext(options);
+                db.Database.SetCommandTimeout(300);
+
                 var dueUserIds = await db.tbl_user
+                    .AsNoTracking()
                     .Where(u => u.is_deleted && u.deletion_requested_at != null && u.deletion_requested_at <= DateTime.UtcNow.AddDays(-59))
+                    .OrderBy(u => u.deletion_requested_at)
+                    .ThenBy(u => u.id)
                     .Select(u => u.id)
                     .Take(100)
                     .ToListAsync(ct);

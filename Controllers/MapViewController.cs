@@ -1149,7 +1149,7 @@ public class ProjectPolygonItem
 
 
 
-        [HttpGet("GetAvailablePolygons")]
+[HttpGet("GetAvailablePolygons")]
 public async Task<IActionResult> GetAvailablePolygons(
     [FromQuery] int? sessionId = null,
     [FromQuery] int? company_id = null)
@@ -1161,6 +1161,11 @@ public async Task<IActionResult> GetAvailablePolygons(
     // =========================================================
     bool isSuperAdmin = _userScope.IsSuperAdmin(User);
     int targetCompanyId = GetTargetCompanyId(company_id);
+
+    if (isSuperAdmin && !sessionId.HasValue)
+    {
+        targetCompanyId = 0;
+    }
 
     if (!isSuperAdmin && targetCompanyId == 0)
         return Unauthorized(new { Status = 0, Message = "Unauthorized. Unable to resolve Company Context." });
@@ -1612,22 +1617,73 @@ public class AvailablePolygonsResponse
             public int? CompanyId { get; set; }
         }
 
+        private async Task<(int? CompanyId, string? Error)> ResolveProjectCompanyIdAsync(CreateProjectModel? model)
+        {
+            var isSuperAdmin = _userScope.IsSuperAdmin(User);
+            int? requestedCompanyId = model?.company_id ?? model?.CompanyId;
+            int targetCompanyId = _userScope.GetTargetCompanyId(User, requestedCompanyId);
+            int? projectCompanyId = targetCompanyId > 0 ? targetCompanyId : null;
+
+            if (!projectCompanyId.HasValue && model?.SessionIds != null && model.SessionIds.Any())
+            {
+                var inferredCompanyIds = await (
+                    from s in db.tbl_session
+                    join u in db.tbl_user on s.user_id equals u.id
+                    where s.id.HasValue
+                          && model.SessionIds.Contains(s.id.Value)
+                          && u.company_id.HasValue
+                          && u.company_id.Value > 0
+                    select u.company_id.Value
+                )
+                .Distinct()
+                .Take(2)
+                .ToListAsync();
+
+                if (inferredCompanyIds.Count == 1)
+                {
+                    projectCompanyId = inferredCompanyIds[0];
+                }
+                else if (inferredCompanyIds.Count > 1)
+                {
+                    if (isSuperAdmin && !requestedCompanyId.HasValue)
+                    {
+                        projectCompanyId = 0;
+                    }
+                    else
+                    {
+                        return (null, "Selected sessions belong to multiple companies. Please choose sessions from a single company.");
+                    }
+                }
+            }
+
+            if (!projectCompanyId.HasValue)
+            {
+                if (isSuperAdmin && !requestedCompanyId.HasValue)
+                {
+                    return (0, null);
+                }
+
+                return (null, "Company is required to create a project. Please select a company or choose sessions from one company.");
+            }
+
+            return (projectCompanyId, null);
+        }
+
         [HttpPost, Route("CreateProjectWithPolygons")]
 public async Task<JsonResult> CreateProjectWithPolygons([FromBody] CreateProjectModel model)
 {
     var message = new ReturnAPIResponse();
     int newProjectId = 0; 
 
-    // 1. Resolve Company ID (This was likely missing and causing the DB constraint to fail)
-    int targetCompanyId = 0;
-    try 
-    { 
-        int? requestedCompanyId = model?.company_id ?? model?.CompanyId;
-        targetCompanyId = _userScope.GetTargetCompanyId(User, requestedCompanyId); 
-    } 
-    catch 
-    { 
-        // Fallback or handle auth errors if necessary
+    if (model == null || string.IsNullOrWhiteSpace(model.ProjectName))
+    {
+        return Json(new { Status = 0, Message = "Project Name is required." });
+    }
+
+    var companyResolution = await ResolveProjectCompanyIdAsync(model);
+    if (!companyResolution.CompanyId.HasValue)
+    {
+        return Json(new { Status = 0, Message = companyResolution.Error });
     }
 
     // 2. Create the Execution Strategy
@@ -1640,12 +1696,10 @@ public async Task<JsonResult> CreateProjectWithPolygons([FromBody] CreateProject
             await using var transaction = await db.Database.BeginTransactionAsync();
             try
             {
-                int? projectCompanyId = targetCompanyId > 0 ? targetCompanyId : null;
-
                 var newProj = new tbl_project
                 {
                     project_name   = model.ProjectName,
-                    company_id     = projectCompanyId,
+                    company_id     = companyResolution.CompanyId.Value,
                     provider       = model.Provider,
                     tech           = model.Tech,
                     band           = model.Band,
@@ -6370,88 +6424,169 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
 
             cmd.CommandText = requestedVersion == "combined"
                 ? $@"
+                WITH optimized_sites AS (
+                    SELECT DISTINCT
+                        CONVERT(spo.site USING utf8mb4) COLLATE utf8mb4_unicode_ci AS site
+                    FROM site_prediction_optimized spo
+                    WHERE spo.tbl_project_id = @pid
+                      AND spo.site IS NOT NULL
+                      AND TRIM(CONVERT(spo.site USING utf8mb4)) <> ''
+                ),
+                optimized_rows AS (
+                    SELECT
+                        original_id,
+                        optimized_id,
+                        is_updated,
+                        version,
+                        status,
+                        created_at,
+                        updated_at,
+                        updated_by,
+                        site,
+                        site_name,
+                        sector,
+                        cell_id,
+                        sec_id,
+                        longitude,
+                        latitude,
+                        tac,
+                        pci,
+                        azimuth,
+                        height,
+                        bw,
+                        m_tilt,
+                        e_tilt,
+                        maximum_transmission_power_of_resource,
+                        real_transmit_power_of_resource,
+                        reference_signal_power,
+                        cellsize,
+                        frequency,
+                        band,
+                        uplink_center_frequency,
+                        downlink_frequency,
+                        earfcn,
+                        project_provider,
+                        original_cluster,
+                        optimized_cluster,
+                        cluster,
+                        tbl_project_id,
+                        tbl_upload_id,
+                        Technology
+                    FROM (
+                    SELECT
+                        COALESCE(spo.site_prediction_id, sp.id) AS original_id,
+                        spo.id AS optimized_id,
+                        1 AS is_updated,
+                        COALESCE(spo.version, 1) AS version,
+                        CONVERT(COALESCE(spo.status, 'updated') USING utf8mb4) COLLATE utf8mb4_unicode_ci AS status,
+                        spo.created_at,
+                        spo.updated_at,
+                        CONVERT(spo.updated_by USING utf8mb4) COLLATE utf8mb4_unicode_ci AS updated_by,
+                        CONVERT(COALESCE(spo.site, sp.site) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS site,
+                        CONVERT(COALESCE(spo.site_name, sp.site_name) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS site_name,
+                        CONVERT(COALESCE(spo.sector, sp.sector) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS sector,
+                        CONVERT(COALESCE(spo.cell_id, sp.cell_id) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS cell_id,
+                        CONVERT(COALESCE(spo.sec_id, sp.sec_id) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS sec_id,
+                        COALESCE(spo.longitude, sp.longitude) AS longitude,
+                        COALESCE(spo.latitude, sp.latitude) AS latitude,
+                        COALESCE(spo.tac, sp.tac) AS tac,
+                        COALESCE(spo.pci, sp.pci) AS pci,
+                        COALESCE(spo.azimuth, sp.azimuth) AS azimuth,
+                        COALESCE(spo.height, sp.height) AS height,
+                        COALESCE(spo.bw, sp.bw) AS bw,
+                        COALESCE(spo.m_tilt, sp.m_tilt) AS m_tilt,
+                        COALESCE(spo.e_tilt, sp.e_tilt) AS e_tilt,
+                        {mergedTxPowerExpr} AS maximum_transmission_power_of_resource,
+                        COALESCE(spo.real_transmit_power_of_resource, sp.real_transmit_power_of_resource) AS real_transmit_power_of_resource,
+                        COALESCE(spo.reference_signal_power, sp.reference_signal_power) AS reference_signal_power,
+                        COALESCE(spo.cellsize, sp.cellsize) AS cellsize,
+                        COALESCE(spo.frequency, sp.frequency) AS frequency,
+                        COALESCE(spo.band, sp.band) AS band,
+                        COALESCE(spo.uplink_center_frequency, sp.uplink_center_frequency) AS uplink_center_frequency,
+                        COALESCE(spo.downlink_frequency, sp.downlink_frequency) AS downlink_frequency,
+                        COALESCE(spo.earfcn, sp.earfcn) AS earfcn,
+                        CONVERT(p.provider USING utf8mb4) COLLATE utf8mb4_unicode_ci AS project_provider,
+                        CONVERT(sp.cluster USING utf8mb4) COLLATE utf8mb4_unicode_ci AS original_cluster,
+                        CONVERT(spo.cluster USING utf8mb4) COLLATE utf8mb4_unicode_ci AS optimized_cluster,
+                        CONVERT(COALESCE(spo.cluster, sp.cluster) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS cluster,
+                        COALESCE(spo.tbl_project_id, sp.tbl_project_id) AS tbl_project_id,
+                        COALESCE(spo.tbl_upload_id, sp.tbl_upload_id) AS tbl_upload_id,
+                        CONVERT(COALESCE(spo.Technology, sp.Technology) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS Technology,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY
+                                COALESCE(spo.site_prediction_id, 0),
+                                CONVERT(COALESCE(spo.site, sp.site, '') USING utf8mb4) COLLATE utf8mb4_unicode_ci,
+                                CONVERT(COALESCE(spo.sector, sp.sector, '') USING utf8mb4) COLLATE utf8mb4_unicode_ci,
+                                CONVERT(COALESCE(spo.cell_id, sp.cell_id, '') USING utf8mb4) COLLATE utf8mb4_unicode_ci
+                            ORDER BY spo.id DESC
+                        ) AS rn
+                    FROM site_prediction_optimized spo
+                    LEFT JOIN site_prediction sp ON sp.id = spo.site_prediction_id
+                    LEFT JOIN tbl_project p ON p.id = COALESCE(spo.tbl_project_id, sp.tbl_project_id)
+                    WHERE COALESCE(spo.tbl_project_id, sp.tbl_project_id) = @pid
+                    {filterClause}
+                    ) ranked_optimized
+                    WHERE rn = 1
+                ),
+                baseline_rows AS (
+                    SELECT
+                        sp.id AS original_id,
+                        NULL AS optimized_id,
+                        0 AS is_updated,
+                        0 AS version,
+                        'original' AS status,
+                        NULL AS created_at,
+                        NULL AS updated_at,
+                        NULL AS updated_by,
+                        CONVERT(sp.site USING utf8mb4) COLLATE utf8mb4_unicode_ci AS site,
+                        CONVERT(sp.site_name USING utf8mb4) COLLATE utf8mb4_unicode_ci AS site_name,
+                        CONVERT(sp.sector USING utf8mb4) COLLATE utf8mb4_unicode_ci AS sector,
+                        CONVERT(sp.cell_id USING utf8mb4) COLLATE utf8mb4_unicode_ci AS cell_id,
+                        CONVERT(sp.sec_id USING utf8mb4) COLLATE utf8mb4_unicode_ci AS sec_id,
+                        sp.longitude,
+                        sp.latitude,
+                        sp.tac,
+                        sp.pci,
+                        sp.azimuth,
+                        sp.height,
+                        sp.bw,
+                        sp.m_tilt,
+                        sp.e_tilt,
+                        {baselineTxPowerExpr} AS maximum_transmission_power_of_resource,
+                        sp.real_transmit_power_of_resource,
+                        sp.reference_signal_power,
+                        sp.cellsize,
+                        sp.frequency,
+                        sp.band,
+                        sp.uplink_center_frequency,
+                        sp.downlink_frequency,
+                        sp.earfcn,
+                        CONVERT(p.provider USING utf8mb4) COLLATE utf8mb4_unicode_ci AS project_provider,
+                        CONVERT(sp.cluster USING utf8mb4) COLLATE utf8mb4_unicode_ci AS original_cluster,
+                        NULL AS optimized_cluster,
+                        CONVERT(sp.cluster USING utf8mb4) COLLATE utf8mb4_unicode_ci AS cluster,
+                        sp.tbl_project_id,
+                        sp.tbl_upload_id,
+                        CONVERT(sp.Technology USING utf8mb4) COLLATE utf8mb4_unicode_ci AS Technology
+                    FROM site_prediction sp
+                    LEFT JOIN tbl_project p ON p.id = sp.tbl_project_id
+                    LEFT JOIN site_prediction_optimized spo ON 1 = 0
+                    WHERE sp.tbl_project_id = @pid
+                    {filterClause}
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM optimized_sites os
+                          WHERE os.site = CONVERT(sp.site USING utf8mb4) COLLATE utf8mb4_unicode_ci
+                      )
+                )
                 SELECT
-                    sp.id AS original_id,
-                    spo.id AS optimized_id,
-                    CASE WHEN spo.id IS NULL THEN 0 ELSE 1 END AS is_updated,
-                    COALESCE(spo.version, 0) AS version,
-                    CONVERT(COALESCE(spo.status, 'original') USING utf8mb4) COLLATE utf8mb4_unicode_ci AS status,
-                    spo.created_at,
-                    spo.updated_at,
-                    CONVERT(spo.updated_by USING utf8mb4) COLLATE utf8mb4_unicode_ci AS updated_by,
-                    CONVERT(COALESCE(spo.site, sp.site) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS site,
-                    CONVERT(COALESCE(spo.site_name, sp.site_name) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS site_name,
-                    CONVERT(COALESCE(spo.sector, sp.sector) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS sector,
-                    CONVERT(COALESCE(spo.cell_id, sp.cell_id) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS cell_id,
-                    CONVERT(COALESCE(spo.sec_id, sp.sec_id) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS sec_id,
-                    COALESCE(spo.longitude, sp.longitude) AS longitude,
-                    COALESCE(spo.latitude, sp.latitude) AS latitude,
-                    COALESCE(spo.tac, sp.tac) AS tac,
-                    COALESCE(spo.pci, sp.pci) AS pci,
-                    COALESCE(spo.azimuth, sp.azimuth) AS azimuth,
-                    COALESCE(spo.height, sp.height) AS height,
-                    COALESCE(spo.bw, sp.bw) AS bw,
-                    COALESCE(spo.m_tilt, sp.m_tilt) AS m_tilt,
-                    COALESCE(spo.e_tilt, sp.e_tilt) AS e_tilt,
-                    {mergedTxPowerExpr} AS maximum_transmission_power_of_resource,
-                    COALESCE(spo.real_transmit_power_of_resource, sp.real_transmit_power_of_resource) AS real_transmit_power_of_resource,
-                    COALESCE(spo.reference_signal_power, sp.reference_signal_power) AS reference_signal_power,
-                    COALESCE(spo.cellsize, sp.cellsize) AS cellsize,
-                    COALESCE(spo.frequency, sp.frequency) AS frequency,
-                    COALESCE(spo.band, sp.band) AS band,
-                    COALESCE(spo.uplink_center_frequency, sp.uplink_center_frequency) AS uplink_center_frequency,
-                    COALESCE(spo.downlink_frequency, sp.downlink_frequency) AS downlink_frequency,
-                    COALESCE(spo.earfcn, sp.earfcn) AS earfcn,
-                    CONVERT(p.provider USING utf8mb4) COLLATE utf8mb4_unicode_ci AS project_provider,
-                    CONVERT(sp.cluster USING utf8mb4) COLLATE utf8mb4_unicode_ci AS original_cluster,
-                    CONVERT(spo.cluster USING utf8mb4) COLLATE utf8mb4_unicode_ci AS optimized_cluster,
-                    CONVERT(COALESCE(spo.cluster, sp.cluster) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS cluster,
-                    sp.tbl_project_id,
-                    COALESCE(spo.tbl_upload_id, sp.tbl_upload_id) AS tbl_upload_id,
-                    CONVERT(COALESCE(spo.Technology, sp.Technology) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS Technology
-                FROM site_prediction sp
-                LEFT JOIN tbl_project p ON p.id = sp.tbl_project_id
-                LEFT JOIN site_prediction_optimized spo
-                    ON spo.id = (
-                        SELECT o.id
-                        FROM site_prediction_optimized o
-                        WHERE o.tbl_project_id = sp.tbl_project_id
-                          AND (
-                            o.site_prediction_id = sp.id
-                            OR (
-                                (o.site_prediction_id IS NULL OR o.site_prediction_id = 0 OR o.site_prediction_id = o.tbl_project_id)
-                                AND (
-                                    (
-                                        o.cell_id IS NOT NULL
-                                        AND sp.cell_id IS NOT NULL
-                                        AND CONVERT(o.cell_id USING utf8mb4) COLLATE utf8mb4_unicode_ci =
-                                            CONVERT(sp.cell_id USING utf8mb4) COLLATE utf8mb4_unicode_ci
-                                    )
-                                    OR (
-                                        o.site IS NOT NULL
-                                        AND sp.site IS NOT NULL
-                                        AND CONVERT(o.site USING utf8mb4) COLLATE utf8mb4_unicode_ci =
-                                            CONVERT(sp.site USING utf8mb4) COLLATE utf8mb4_unicode_ci
-                                        AND (
-                                            o.sector IS NULL
-                                            OR sp.sector IS NULL
-                                            OR (
-                                                CONVERT(o.sector USING utf8mb4) COLLATE utf8mb4_unicode_ci =
-                                                CONVERT(sp.sector USING utf8mb4) COLLATE utf8mb4_unicode_ci
-                                            )
-                                        )
-                                    )
-                                )
-                            )
-                          )
-                        ORDER BY
-                            CASE WHEN o.site_prediction_id = sp.id THEN 0 ELSE 1 END,
-                            o.id DESC
-                        LIMIT 1
-                    )
-                WHERE sp.tbl_project_id = @pid
-                {filterClause}
-                ORDER BY sp.id DESC;"
+                    *
+                FROM optimized_rows
+                UNION ALL
+                SELECT
+                    *
+                FROM baseline_rows
+                ORDER BY is_updated DESC, original_id DESC;"
                 : $@"
                 SELECT
                     sp.id AS original_id,
@@ -6542,28 +6677,6 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             if (projectId <= 0)
                 return BadRequest(new { Status = 0, Message = "projectId is required" });
 
-            var cacheKey = BuildMapViewCacheKey(
-                $"site-prediction-compare-{SitePredictionCacheVersion}",
-                projectId,
-                site,
-                cell_id,
-                cluster,
-                technology,
-                band,
-                pci);
-
-            var cachedRows = await TryGetMapViewCacheAsync<List<CompareSitePredictionCacheRow>>(cacheKey);
-            if (cachedRows != null)
-            {
-                var cachedPageRows = SliceCachedPage(cachedRows, Math.Clamp(limit, 1, 2000), Math.Max(offset, 0));
-                return Json(new
-                {
-                    Status = 1,
-                    baseline = cachedPageRows.Select(x => new { baseline = x.baseline }).ToList(),
-                    optimized = cachedPageRows.Select(x => new { optimized = x.optimized }).ToList()
-                });
-            }
-
             var conn = db.Database.GetDbConnection();
             if (conn.State != System.Data.ConnectionState.Open)
                 await conn.OpenAsync();
@@ -6627,51 +6740,50 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 }));
 
             cmd.CommandText = $@"
+                WITH latest_optimized AS (
+                    SELECT *
+                    FROM (
+                        SELECT
+                            spo.*,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY
+                                    COALESCE(spo.site_prediction_id, 0),
+                                    CONVERT(COALESCE(spo.site, '') USING utf8mb4) COLLATE utf8mb4_unicode_ci,
+                                    CONVERT(COALESCE(spo.sector, '') USING utf8mb4) COLLATE utf8mb4_unicode_ci,
+                                    CONVERT(COALESCE(spo.cell_id, '') USING utf8mb4) COLLATE utf8mb4_unicode_ci
+                                ORDER BY spo.id DESC
+                            ) AS rn
+                        FROM site_prediction_optimized spo
+                        WHERE spo.tbl_project_id = @pid
+                    ) ranked
+                    WHERE rn = 1
+                )
                 SELECT
                     {compareSelectColumns}
-                FROM site_prediction sp
-                LEFT JOIN tbl_project p ON p.id = sp.tbl_project_id
-                INNER JOIN site_prediction_optimized spo
-                    ON spo.id = (
-                        SELECT o.id
-                        FROM site_prediction_optimized o
-                        WHERE o.tbl_project_id = sp.tbl_project_id
-                          AND (
-                            o.site_prediction_id = sp.id
-                            OR (
-                                (o.site_prediction_id IS NULL OR o.site_prediction_id = 0 OR o.site_prediction_id = o.tbl_project_id)
-                                AND (
-                                    (
-                                        o.cell_id IS NOT NULL
-                                        AND sp.cell_id IS NOT NULL
-                                        AND CONVERT(o.cell_id USING utf8mb4) COLLATE utf8mb4_unicode_ci =
-                                            CONVERT(sp.cell_id USING utf8mb4) COLLATE utf8mb4_unicode_ci
-                                    )
-                                    OR (
-                                        o.site IS NOT NULL
-                                        AND sp.site IS NOT NULL
-                                        AND CONVERT(o.site USING utf8mb4) COLLATE utf8mb4_unicode_ci =
-                                            CONVERT(sp.site USING utf8mb4) COLLATE utf8mb4_unicode_ci
-                                        AND (
-                                            o.sector IS NULL
-                                            OR sp.sector IS NULL
-                                            OR (
-                                                CONVERT(o.sector USING utf8mb4) COLLATE utf8mb4_unicode_ci =
-                                                CONVERT(sp.sector USING utf8mb4) COLLATE utf8mb4_unicode_ci
-                                            )
-                                        )
-                                    )
-                                )
-                            )
-                          )
-                        ORDER BY
-                            CASE WHEN o.site_prediction_id = sp.id THEN 0 ELSE 1 END,
-                            o.id DESC
-                        LIMIT 1
+                FROM latest_optimized spo
+                LEFT JOIN site_prediction sp
+                    ON sp.id = spo.site_prediction_id
+                    OR (
+                        sp.tbl_project_id = spo.tbl_project_id
+                        AND CONVERT(sp.site USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+                            CONVERT(spo.site USING utf8mb4) COLLATE utf8mb4_unicode_ci
+                        AND (
+                            spo.sector IS NULL
+                            OR sp.sector IS NULL
+                            OR CONVERT(sp.sector USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+                                CONVERT(spo.sector USING utf8mb4) COLLATE utf8mb4_unicode_ci
+                        )
+                        AND (
+                            spo.cell_id IS NULL
+                            OR sp.cell_id IS NULL
+                            OR CONVERT(sp.cell_id USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+                                CONVERT(spo.cell_id USING utf8mb4) COLLATE utf8mb4_unicode_ci
+                        )
                     )
-                WHERE sp.tbl_project_id = @pid
+                LEFT JOIN tbl_project p ON p.id = COALESCE(sp.tbl_project_id, spo.tbl_project_id)
+                WHERE COALESCE(sp.tbl_project_id, spo.tbl_project_id) = @pid
                 {filterClause}
-                ORDER BY sp.id DESC;";
+                ORDER BY COALESCE(sp.id, spo.site_prediction_id, spo.id) DESC;";
 
             Add(cmd, "@pid", projectId);
             AddSitePredictionFilterParameters(cmd, site, cell_id, cluster, technology, band, pci);
@@ -6716,7 +6828,6 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 optimized = pagedRows.Select(x => new { optimized = x.optimized }).ToList()
             };
 
-            await SetMapViewCacheAsync(cacheKey, allRows);
             return Json(response);
         }
 
@@ -6797,13 +6908,22 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
 
                 await using var tx = await conn.BeginTransactionAsync();
 
+                var itemIndex = 0;
                 foreach (var item in items)
                 {
-                    if (!item.TryGetValue("id", StringComparison.OrdinalIgnoreCase, out var idToken) || !long.TryParse(idToken.ToString(), out long lookupId))
-                        continue;
+                    itemIndex++;
+                    long parsedLookupId = 0;
+                    var hasLookupId =
+                        item.TryGetValue("id", StringComparison.OrdinalIgnoreCase, out var idToken) &&
+                        long.TryParse(idToken.ToString(), out parsedLookupId) &&
+                        parsedLookupId > 0;
+                    var lookupId = hasLookupId ? parsedLookupId : itemIndex;
 
-                    currentItemId = lookupId;
-                    requestedIds.Add(lookupId);
+                    if (hasLookupId)
+                    {
+                        currentItemId = lookupId;
+                        requestedIds.Add(lookupId);
+                    }
 
                     long? explicitSourceId = null;
                     if (item.TryGetValue("source_id", StringComparison.OrdinalIgnoreCase, out var sourceIdToken) &&
@@ -6849,11 +6969,18 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                     var hasSiteSectorSelector =
                         !string.IsNullOrWhiteSpace(explicitSiteSelectorText) &&
                         !string.IsNullOrWhiteSpace(explicitSectorSelectorText);
+                    var moveEntireSite =
+                        item.TryGetValue("move_entire_site", StringComparison.OrdinalIgnoreCase, out var moveEntireSiteToken) &&
+                        bool.TryParse(moveEntireSiteToken.ToString(), out var parsedMoveEntireSite) &&
+                        parsedMoveEntireSite;
+                    var hasWholeSiteSelector =
+                        moveEntireSite &&
+                        !string.IsNullOrWhiteSpace(explicitSiteSelectorText);
 
                     long? sourceId = explicitSourceId;
                     long? siteId = explicitSiteId;
 
-                    if (!sourceId.HasValue && !siteId.HasValue)
+                    if (!sourceId.HasValue && !siteId.HasValue && hasLookupId)
                     {
                         // Backward-compatible resolution:
                         // 1) if id exists as site_prediction.id -> treat as source row id
@@ -6869,6 +6996,12 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                         else siteId = lookupId;
                     }
 
+                    if (!sourceId.HasValue && !siteId.HasValue && !hasSiteSectorSelector && !hasWholeSiteSelector)
+                    {
+                        skippedIds.Add(lookupId);
+                        continue;
+                    }
+
                     var updates = new List<string>();
                     var parameters = new Dictionary<string, object?>();
                     var seenDbColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -6878,6 +7011,9 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                         var key = prop.Name;
                         if (key.Equals("id", StringComparison.OrdinalIgnoreCase)) continue;
                         if (key.Equals("source_id", StringComparison.OrdinalIgnoreCase)) continue;
+                        if (key.Equals("project_id", StringComparison.OrdinalIgnoreCase)) continue;
+                        if (key.Equals("projectId", StringComparison.OrdinalIgnoreCase)) continue;
+                        if (key.Equals("move_entire_site", StringComparison.OrdinalIgnoreCase)) continue;
                         if (key.Equals("site_id_selector", StringComparison.OrdinalIgnoreCase)) continue;
                         if (key.Equals("site_selector", StringComparison.OrdinalIgnoreCase)) continue;
                         if (key.Equals("sector_selector", StringComparison.OrdinalIgnoreCase)) continue;
@@ -6923,6 +7059,34 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                                     @updatedBy
                                 FROM site_prediction sp
                                 WHERE sp.id = @sourceId
+                                  AND NOT EXISTS (
+                                      SELECT 1
+                                      FROM site_prediction_optimized spo
+                                      WHERE spo.site_prediction_id = sp.id
+                                  );"
+                            : hasWholeSiteSelector
+                                ? $@"
+                                INSERT INTO site_prediction_optimized (
+                                    site_prediction_id,
+                                    {insertColumnList},
+                                    is_updated,
+                                    version,
+                                    status,
+                                    created_at,
+                                    updated_at,
+                                    updated_by
+                                )
+                                SELECT
+                                    sp.id,
+                                    {selectColumnList},
+                                    1,
+                                    0,
+                                    'updated',
+                                    UTC_TIMESTAMP(),
+                                    UTC_TIMESTAMP(),
+                                    @updatedBy
+                                FROM site_prediction sp
+                                WHERE CONVERT(sp.site USING utf8mb4) COLLATE utf8mb4_unicode_ci = @targetSiteText
                                   AND NOT EXISTS (
                                       SELECT 1
                                       FROM site_prediction_optimized spo
@@ -6987,6 +7151,10 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
 
                         Add(seedCmd, "@updatedBy", updatedBy);
                         if (sourceId.HasValue) Add(seedCmd, "@sourceId", sourceId.Value);
+                        else if (hasWholeSiteSelector)
+                        {
+                            Add(seedCmd, "@targetSiteText", explicitSiteSelectorText!);
+                        }
                         else if (hasSiteSectorSelector)
                         {
                             Add(seedCmd, "@targetSiteText", explicitSiteSelectorText!);
@@ -7016,6 +7184,20 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                                       LIMIT 1
                                   ) AS latest_source
                               );"
+                        : hasWholeSiteSelector
+                            ? $@"
+                            UPDATE site_prediction_optimized spo
+                            LEFT JOIN site_prediction sp ON sp.id = spo.site_prediction_id
+                            SET {string.Join(", ", updates)},
+                                spo.is_updated = 1,
+                                spo.status = 'updated',
+                                spo.version = COALESCE(spo.version, 0) + 1,
+                                spo.updated_at = UTC_TIMESTAMP(),
+                                spo.updated_by = @updatedBy_{lookupId}
+                            WHERE (
+                                    CONVERT(spo.site USING utf8mb4) COLLATE utf8mb4_unicode_ci = @targetSiteText_{lookupId}
+                                    OR CONVERT(sp.site USING utf8mb4) COLLATE utf8mb4_unicode_ci = @targetSiteText_{lookupId}
+                                  );"
                         : hasSiteSectorSelector
                             ? $@"
                             UPDATE site_prediction_optimized spo
@@ -7073,6 +7255,10 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                     cmd.CommandText = sql;
                     Add(cmd, $"@updatedBy_{lookupId}", updatedBy);
                     if (sourceId.HasValue) Add(cmd, $"@sourceId_{lookupId}", sourceId.Value);
+                    else if (hasWholeSiteSelector)
+                    {
+                        Add(cmd, $"@targetSiteText_{lookupId}", explicitSiteSelectorText!);
+                    }
                     else if (hasSiteSectorSelector)
                     {
                         Add(cmd, $"@targetSiteText_{lookupId}", explicitSiteSelectorText!);
@@ -7339,38 +7525,10 @@ public async Task<IActionResult> CreateSimpleProject([FromBody] CreateProjectMod
     try
     {
         // 2. Security: Resolve the Company ID from the authenticated user context
-        int? requestedCompanyId = model?.company_id ?? model?.CompanyId;
-        int targetCompanyId = _userScope.GetTargetCompanyId(User, requestedCompanyId);
-        int? projectCompanyId = targetCompanyId > 0 ? targetCompanyId : null;
-
-        if (!projectCompanyId.HasValue && model.SessionIds != null && model.SessionIds.Any())
+        var companyResolution = await ResolveProjectCompanyIdAsync(model);
+        if (!companyResolution.CompanyId.HasValue)
         {
-            var inferredCompanyIds = await (
-                from s in db.tbl_session
-                join u in db.tbl_user on s.user_id equals u.id
-                where s.id.HasValue
-                      && model.SessionIds.Contains(s.id.Value)
-                      && u.company_id.HasValue
-                      && u.company_id.Value > 0
-                select (int)u.company_id.Value
-            )
-            .Distinct()
-            .Take(2)
-            .ToListAsync();
-
-            var inferredCompanyCount = inferredCompanyIds.Count();
-            if (inferredCompanyCount == 1)
-            {
-                projectCompanyId = inferredCompanyIds[0];
-            }
-            else if (inferredCompanyCount > 1)
-            {
-                return BadRequest(new
-                {
-                    Status = 0,
-                    Message = "Selected sessions belong to multiple companies. Please choose sessions from a single company."
-                });
-            }
+            return BadRequest(new { Status = 0, Message = companyResolution.Error });
         }
 
         // 3. Initialize the Project Entity
@@ -7379,7 +7537,7 @@ public async Task<IActionResult> CreateSimpleProject([FromBody] CreateProjectMod
             project_name = model.ProjectName,
             created_on = DateTime.UtcNow,
             status = 1,
-            company_id = projectCompanyId,
+            company_id = companyResolution.CompanyId.Value,
             
             // Store the Session IDs as a comma-separated string
             ref_session_id = (model.SessionIds != null && model.SessionIds.Any())

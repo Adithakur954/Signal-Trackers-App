@@ -284,6 +284,8 @@ namespace SignalTracker.Controllers
                     catch { }
                 }
 
+                _logger.LogError(ex, "Error during Home.UserLogin for {Email}", obj?.Email);
+
                 var writelog = new Writelog(_db);
                 writelog.write_exception_log(0, "Home", "UserLogin", DateTime.Now, ex);
                 return Json(new { success = false, message = "An error occurred. Please try again." });

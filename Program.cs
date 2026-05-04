@@ -80,7 +80,11 @@ internal class Program
         builder.Services.AddScoped<IOtpService, OtpService>();
         builder.Services.AddScoped<IUserDeletionService, UserDeletionService>();
         builder.Services.AddHttpClient<ISmsService, SmsService>();
-        builder.Services.AddHostedService<UserDeletionCleanupService>();
+
+        if (builder.Configuration.GetValue<bool>("UserDeletionCleanup:Enabled"))
+        {
+            builder.Services.AddHostedService<UserDeletionCleanupService>();
+        }
 
 
         builder.Services.AddHttpContextAccessor();
