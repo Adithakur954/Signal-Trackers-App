@@ -906,6 +906,7 @@ public class IndoorOutdoorLogDto
         public string? created_by_user_name { get; set; }
         public int status { get; set; }
         public string? grid_size { get; set; }
+        public string? log_grid { get; set; }
     }
 
     public class tbl_savepolygon
@@ -1136,6 +1137,9 @@ public class CreateProjectRequest
         public byte[] region { get; set; } = Array.Empty<byte>();
         public float? area { get; set; }
         public int status { get; set; }
+        public string? session_id { get; set; }
+        [NotMapped]
+        public int? created_by_user_id { get; set; }
     }
 
 

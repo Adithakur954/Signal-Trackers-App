@@ -811,6 +811,9 @@ public class ProjectPolygonItem
             public string WKT { get; set; } = string.Empty;
             public List<int>? SessionIds { get; set; } = new();
             public double? Area { get; set; }
+            public int? CompanyId { get; set; }
+            [JsonPropertyName("company_id")]
+            public int? company_id { get; set; }
         }
 
         public class ReturnAPIResponse
@@ -1078,6 +1081,12 @@ public class ProjectPolygonItem
             }
         }
 
+        [HttpPost("ImportPolygon")]
+        public Task<JsonResult> ImportPolygon([FromBody] SavePolygonModel model)
+        {
+            return SavePolygon(model);
+        }
+
         [HttpPost("SavePolygon")]
         public async Task<JsonResult> SavePolygon([FromBody] SavePolygonModel model)
         {
@@ -1092,14 +1101,32 @@ public class ProjectPolygonItem
                     return Json(message);
                 }
 
-                string sessionStr = string.Join(",", model.SessionIds ?? new List<int>());
+                bool isSuperAdmin = _userScope.IsSuperAdmin(User);
+                int currentUserId = _userScope.GetCurrentUserId(User);
+                int targetCompanyId = GetTargetCompanyId(model.CompanyId ?? model.company_id);
+                bool useUserScope = !isSuperAdmin && targetCompanyId == 0 && currentUserId > 0;
 
-                const string sql = @"
-                    INSERT INTO map_regions (tbl_project_id, name, region, status, session_id, area)
-                    VALUES (@pid, @name, ST_GeomFromText(@wkt, 4326), 1, @sids, @area);";
+                if (!isSuperAdmin && targetCompanyId == 0 && !useUserScope)
+                {
+                    message.Status = 0;
+                    message.Message = "Unauthorized. Unable to resolve Company Context.";
+                    return Json(message);
+                }
+
+                string sessionStr = string.Join(",", model.SessionIds ?? new List<int>());
 
                 var conn = db.Database.GetDbConnection();
                 if (conn.State != ConnectionState.Open) await conn.OpenAsync();
+
+                var mapRegionColumns = await GetTableColumnSetAsync(conn, "map_regions");
+                var hasCreatedByUserId = mapRegionColumns.Contains("created_by_user_id");
+                var sql = hasCreatedByUserId
+                    ? @"
+                    INSERT INTO map_regions (tbl_project_id, name, region, status, session_id, area, created_by_user_id)
+                    VALUES (@pid, @name, ST_GeomFromText(@wkt, 4326), 1, @sids, @area, @createdByUserId);"
+                    : @"
+                    INSERT INTO map_regions (tbl_project_id, name, region, status, session_id, area)
+                    VALUES (@pid, @name, ST_GeomFromText(@wkt, 4326), 1, @sids, @area);";
 
                 await using var cmd = conn.CreateCommand();
                 cmd.CommandText = sql;
@@ -1109,6 +1136,10 @@ public class ProjectPolygonItem
                 AddParam(cmd, "@wkt", model.WKT ?? string.Empty);
                 AddParam(cmd, "@sids", string.IsNullOrWhiteSpace(sessionStr) ? DBNull.Value : sessionStr);
                 AddParam(cmd, "@area", (object?)model.Area ?? DBNull.Value);
+                if (hasCreatedByUserId)
+                {
+                    AddParam(cmd, "@createdByUserId", currentUserId > 0 ? currentUserId : DBNull.Value);
+                }
 
                 await cmd.ExecuteNonQueryAsync();
 
@@ -1229,6 +1260,8 @@ public async Task<IActionResult> GetAvailablePolygons(
             }
 
             await using var cmd = conn.CreateCommand();
+            var mapRegionColumns = await GetTableColumnSetAsync(conn, "map_regions");
+            var hasCreatedByUserId = mapRegionColumns.Contains("created_by_user_id");
 
             // SQL STRATEGY
             string whereClause;
@@ -1236,25 +1269,38 @@ public async Task<IActionResult> GetAvailablePolygons(
             if (targetCompanyId == 0 || sessionId.HasValue)
             {
                 // FAST PATH: Super Admin OR Validated Single Session
-                whereClause = @"
+                var sessionClause = @"
                     (
                         @sid IS NULL
                         OR session_id IS NULL
                         OR session_id = ''
                         OR FIND_IN_SET(@sidStr, session_id) > 0
                     )";
+                whereClause = sessionClause;
             }
             else
             {
                 // SECURE PATH: Company Admin requesting ALL
-                whereClause = @"
+                whereClause = hasCreatedByUserId
+                    ? @"
                     (
+                        map_regions.created_by_user_id IN (
+                            SELECT u2.id FROM tbl_user u2 WHERE u2.company_id = @compId
+                        )
+                        OR
                         EXISTS (
                             SELECT 1 FROM tbl_session s
                             JOIN tbl_user u ON s.user_id = u.id
                             WHERE u.company_id = @compId
                             AND FIND_IN_SET(s.id, map_regions.session_id) > 0
                         )
+                    )"
+                    : @"
+                    EXISTS (
+                        SELECT 1 FROM tbl_session s
+                        JOIN tbl_user u ON s.user_id = u.id
+                        WHERE u.company_id = @compId
+                        AND FIND_IN_SET(s.id, map_regions.session_id) > 0
                     )";
             }
 
@@ -1321,6 +1367,96 @@ public async Task<IActionResult> GetAvailablePolygons(
     catch (Exception ex)
     {
         return StatusCode(500, new { error = "Failed to fetch polygons", details = ex.Message });
+    }
+}
+
+[HttpDelete("DeleteAvailablePolygon")]
+public async Task<IActionResult> DeleteAvailablePolygon(
+    [FromQuery] int polygonId,
+    [FromQuery] int? company_id = null)
+{
+    if (polygonId <= 0)
+        return BadRequest(new { Status = 0, Message = "Valid polygonId is required." });
+
+    try
+    {
+        bool isSuperAdmin = _userScope.IsSuperAdmin(User);
+        int targetCompanyId = GetTargetCompanyId(company_id);
+
+        if (!isSuperAdmin && targetCompanyId == 0)
+            return Unauthorized(new { Status = 0, Message = "Unauthorized. Unable to resolve Company Context." });
+
+        var conn = db.Database.GetDbConnection();
+        if (conn.State != ConnectionState.Open)
+            await conn.OpenAsync();
+
+        var mapRegionColumns = await GetTableColumnSetAsync(conn, "map_regions");
+        var hasCreatedByUserId = mapRegionColumns.Contains("created_by_user_id");
+
+        string ownershipClause = "1 = 1";
+        if (!isSuperAdmin)
+        {
+            ownershipClause = hasCreatedByUserId
+                ? @"
+                (
+                    map_regions.created_by_user_id IN (
+                        SELECT u2.id FROM tbl_user u2 WHERE u2.company_id = @compId
+                    )
+                    OR
+                    EXISTS (
+                        SELECT 1 FROM tbl_session s
+                        JOIN tbl_user u ON s.user_id = u.id
+                        WHERE u.company_id = @compId
+                        AND FIND_IN_SET(s.id, map_regions.session_id) > 0
+                    )
+                )"
+                : @"
+                EXISTS (
+                    SELECT 1 FROM tbl_session s
+                    JOIN tbl_user u ON s.user_id = u.id
+                    WHERE u.company_id = @compId
+                    AND FIND_IN_SET(s.id, map_regions.session_id) > 0
+                )";
+        }
+
+        await using (var existsCmd = conn.CreateCommand())
+        {
+            existsCmd.CommandText = $@"
+                SELECT COUNT(1)
+                FROM map_regions
+                WHERE id = @polygonId
+                  AND tbl_project_id IS NULL
+                  AND {ownershipClause};";
+            AddParam(existsCmd, "@polygonId", polygonId);
+            if (!isSuperAdmin)
+                AddParam(existsCmd, "@compId", targetCompanyId);
+
+            var existsRaw = await existsCmd.ExecuteScalarAsync();
+            var exists = existsRaw != null && existsRaw != DBNull.Value && Convert.ToInt32(existsRaw) > 0;
+            if (!exists)
+            {
+                return NotFound(new
+                {
+                    Status = 0,
+                    Message = "Polygon not found, already assigned to a project, or not available for your company."
+                });
+            }
+        }
+
+        await using (var deleteCmd = conn.CreateCommand())
+        {
+            deleteCmd.CommandText = "DELETE FROM map_regions WHERE id = @polygonId AND tbl_project_id IS NULL;";
+            AddParam(deleteCmd, "@polygonId", polygonId);
+            await deleteCmd.ExecuteNonQueryAsync();
+        }
+
+        await InvalidateMapViewCachesAsync();
+
+        return Ok(new { Status = 1, Message = "Polygon deleted successfully.", polygonId });
+    }
+    catch (Exception ex)
+    {
+        return StatusCode(500, new { Status = 0, Message = "Error deleting polygon: " + ex.Message });
     }
 }
 
@@ -1613,6 +1749,8 @@ public class AvailablePolygonsResponse
             public List<int>? PolygonIds { get; set; }
             public List<int>? SessionIds { get; set; }
             public string? GridSize { get; set; }
+            public string? LogGrid { get; set; }
+            public string? log_grid { get; set; }
             public int? company_id { get; set; }
             public int? CompanyId { get; set; }
         }
@@ -1712,7 +1850,8 @@ public async Task<JsonResult> CreateProjectWithPolygons([FromBody] CreateProject
                     ref_session_id = (model.SessionIds != null && model.SessionIds.Any())
                                         ? string.Join(",", model.SessionIds)
                                         : null,
-                    grid_size      = model.GridSize
+                    grid_size      = model.GridSize,
+                    log_grid       = model.LogGrid ?? model.log_grid
                 };
 
                 db.tbl_project.Add(newProj);
@@ -1760,6 +1899,7 @@ public async Task<JsonResult> CreateProjectWithPolygons([FromBody] CreateProject
                 p.earfcn,
                 p.apps,
                 p.grid_size,
+                p.log_grid,
                 p.created_on,
                 p.status
             })
@@ -1793,16 +1933,31 @@ public async Task<JsonResult> CreateProjectWithPolygons([FromBody] CreateProject
             var message = new ReturnAPIResponse();
             try
             {
-                var polygon = await db.map_regions.FindAsync(polygonId);
-                if (polygon == null)
+                var conn = db.Database.GetDbConnection();
+                if (conn.State != ConnectionState.Open) await conn.OpenAsync();
+
+                await using (var existsCmd = conn.CreateCommand())
                 {
-                    message.Status = 0;
-                    message.Message = "Polygon not found.";
-                    return Json(message);
+                    existsCmd.CommandText = "SELECT COUNT(1) FROM map_regions WHERE id = @polygonId;";
+                    AddParam(existsCmd, "@polygonId", polygonId);
+                    var existsRaw = await existsCmd.ExecuteScalarAsync();
+                    var exists = existsRaw != null && existsRaw != DBNull.Value && Convert.ToInt32(existsRaw) > 0;
+                    if (!exists)
+                    {
+                        message.Status = 0;
+                        message.Message = "Polygon not found.";
+                        return Json(message);
+                    }
                 }
 
-                polygon.tbl_project_id = projectId;
-                await db.SaveChangesAsync();
+                await using (var updateCmd = conn.CreateCommand())
+                {
+                    updateCmd.CommandText = "UPDATE map_regions SET tbl_project_id = @projectId WHERE id = @polygonId;";
+                    AddParam(updateCmd, "@projectId", projectId);
+                    AddParam(updateCmd, "@polygonId", polygonId);
+                    await updateCmd.ExecuteNonQueryAsync();
+                }
+
                 await InvalidateMapViewCachesAsync();
 
                 message.Status = 1;
@@ -7552,7 +7707,8 @@ public async Task<IActionResult> CreateSimpleProject([FromBody] CreateProjectMod
             apps = model.Apps,
             from_date = model.FromDate?.ToString("yyyy-MM-dd"),
             to_date = model.ToDate?.ToString("yyyy-MM-dd"),
-            grid_size = model.GridSize
+            grid_size = model.GridSize,
+            log_grid = model.LogGrid ?? model.log_grid
         };
 
         // 4. Save to Database
@@ -8392,6 +8548,7 @@ public async Task<IActionResult> GetProjects([FromQuery] int? company_id = null)
                         p.earfcn,
                         p.apps,
                         p.grid_size,
+                        p.log_grid,
                         p.created_on,
                         p.Download_path,
                         ST_AsText(p.polygon) AS project_polygon_wkt,
@@ -8450,6 +8607,7 @@ public async Task<IActionResult> GetProjects([FromQuery] int? company_id = null)
                             earfcn = ReadDb("earfcn"),
                             apps = ReadDb("apps"),
                             grid_size = ReadDb("grid_size"),
+                            log_grid = ReadDb("log_grid"),
                             created_on = ReadDb("created_on"),
                             Download_path = ReadDb("Download_path"),
                             project_polygon_wkt = ReadDb("project_polygon_wkt"),
