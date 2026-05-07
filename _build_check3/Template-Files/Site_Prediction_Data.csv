@@ -1,0 +1,2 @@
+site_id,site_name(optional),cell_id,lat,lon,tac(optional),pci,azimuth,antenna_height(optional),m_tilt,e_tilt,cell_size,bandwidth,frequency,earfcn,antenna(optional),Referenced Signal Power of Resource(Optional
+18,18-Belcon Terminal,0,-33.929387,18.625189,187,190,0,24,2,4,Macro,20M,L1800,1815.3,D4_65_XXXXXX_G15.5DUL17_COMM\D4,18.7

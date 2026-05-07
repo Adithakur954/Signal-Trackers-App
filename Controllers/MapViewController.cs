@@ -19,7 +19,7 @@ using System.Data.Common;   // DbCommand, DbConnection
 // alias to avoid any confusion with old nested type
 using TempPoint = SignalTracker.Models.TempPlainDto;
 using System.Diagnostics;
-using MySql.Data.MySqlClient;
+using MySqlConnector;
 using System.Linq;
 using SignalTracker.Services;
 using Microsoft.EntityFrameworkCore.Storage;
@@ -8517,16 +8517,20 @@ public async Task<IActionResult> GetNeighboursForPrimary(
 public async Task<IActionResult> GetProjects([FromQuery] int? company_id = null)
 {
     var message = new ReturnAPIResponse();
+    int targetCompanyId = 0;
+    bool isSuperAdmin = false;
+    int currentUserId = 0;
+    bool useUserScope = false;
 
     try
     {
         cf.SessionCheck();
 
         // 1. Resolve company securely (same pattern)
-        int targetCompanyId = GetTargetCompanyId(company_id);
-        bool isSuperAdmin = _userScope.IsSuperAdmin(User);
-        int currentUserId = GetCurrentUserId();
-        bool useUserScope = !isSuperAdmin && targetCompanyId == 0 && currentUserId > 0;
+        targetCompanyId = GetTargetCompanyId(company_id);
+        isSuperAdmin = _userScope.IsSuperAdmin(User);
+        currentUserId = GetCurrentUserId();
+        useUserScope = !isSuperAdmin && targetCompanyId == 0 && currentUserId > 0;
 
         // Super admin check
         if (targetCompanyId == 0 && !isSuperAdmin && !useUserScope)
@@ -8543,106 +8547,21 @@ public async Task<IActionResult> GetProjects([FromQuery] int? company_id = null)
         if (cached != null)
             return Json(cached);
 
-        // 2. Query with company filter + joined region geometry
-        var projects = new List<object>();
-        string connString = db.Database.GetConnectionString();
-
-        using (var conn = new MySqlConnection(connString))
+        // 2. Query with company filter + joined region geometry.
+        List<object> projects;
+        try
         {
-            await conn.OpenAsync();
-            var projectColumns = await GetTableColumnSetAsync(conn, "tbl_project");
-            var logGridSelect = projectColumns.Contains("log_grid")
-                ? "p.log_grid"
-                : "NULL AS log_grid";
-            var createdByUserFilter = projectColumns.Contains("created_by_user_id")
-                ? "OR (@uid > 0 AND p.created_by_user_id = @uid)"
-                : string.Empty;
-
-            using (var cmd = conn.CreateCommand())
-            {
-                cmd.CommandText = $@"
-                    SELECT
-                        p.id,
-                        p.project_name,
-                        p.ref_session_id,
-                        p.from_date,
-                        p.to_date,
-                        p.provider,
-                        p.tech,
-                        p.band,
-                        p.earfcn,
-                        p.apps,
-                        p.grid_size,
-                        {logGridSelect},
-                        p.created_on,
-                        p.Download_path,
-                        ST_AsText(p.polygon) AS project_polygon_wkt,
-                        mr.region_wkt,
-                        mr.region_blob_b64,
-                        COALESCE(ST_AsText(p.polygon), mr.region_wkt) AS geometry_wkt
-                    FROM tbl_project p
-                    LEFT JOIN (
-                        SELECT
-                            mr1.tbl_project_id,
-                            ST_AsText(mr1.region) AS region_wkt,
-                            TO_BASE64(mr1.region) AS region_blob_b64
-                        FROM map_regions mr1
-                        INNER JOIN (
-                            SELECT tbl_project_id, MAX(id) AS max_id
-                            FROM map_regions
-                            WHERE tbl_project_id IS NOT NULL
-                            GROUP BY tbl_project_id
-                        ) picked
-                          ON picked.tbl_project_id = mr1.tbl_project_id
-                         AND picked.max_id = mr1.id
-                    ) mr
-                      ON mr.tbl_project_id = p.id
-                    WHERE (p.status IS NULL OR p.status <> 0)
-                      AND (
-                            @global = 1
-                            OR p.company_id = @cid
-                            {createdByUserFilter}
-                          )
-                    ORDER BY p.id DESC;";
-
-                cmd.Parameters.AddWithValue("@global", isSuperAdmin && targetCompanyId == 0 ? 1 : 0);
-                cmd.Parameters.AddWithValue("@cid", targetCompanyId);
-                cmd.Parameters.AddWithValue("@uid", useUserScope ? currentUserId : 0);
-
-                using (var reader = await cmd.ExecuteReaderAsync())
-                {
-                    while (await reader.ReadAsync())
-                    {
-                        object? ReadDb(string name)
-                        {
-                            var value = reader[name];
-                            return value == DBNull.Value ? null : value;
-                        }
-
-                        projects.Add(new
-                        {
-                            id = ReadDb("id"),
-                            project_name = ReadDb("project_name"),
-                            ref_session_id = ReadDb("ref_session_id"),
-                            from_date = ReadDb("from_date"),
-                            to_date = ReadDb("to_date"),
-                            provider = ReadDb("provider"),
-                            tech = ReadDb("tech"),
-                            band = ReadDb("band"),
-                            earfcn = ReadDb("earfcn"),
-                            apps = ReadDb("apps"),
-                            grid_size = ReadDb("grid_size"),
-                            log_grid = ReadDb("log_grid"),
-                            created_on = ReadDb("created_on"),
-                            Download_path = ReadDb("Download_path"),
-                            project_polygon_wkt = ReadDb("project_polygon_wkt"),
-                            region_wkt = ReadDb("region_wkt"),
-                            region_blob_b64 = ReadDb("region_blob_b64"),
-                            geometry_wkt = ReadDb("geometry_wkt"),
-                        });
-                    }
-                }
-            }
+            projects = await GetProjectsFromRawSqlAsync(
+                targetCompanyId,
+                isSuperAdmin,
+                useUserScope,
+                currentUserId);
+        }
+        catch (Exception ex)
+        {
+            // Defensive fallback for schema/driver/cache inconsistencies across DBs (main/TW).
+            Console.WriteLine($"[GetProjects] Raw SQL path failed, using fallback. Error: {ex}");
+            projects = await GetProjectsFallbackAsync(targetCompanyId, isSuperAdmin, useUserScope, currentUserId);
         }
 
         message.Status = 1;
@@ -8651,11 +8570,217 @@ public async Task<IActionResult> GetProjects([FromQuery] int? company_id = null)
     }
     catch (Exception ex)
     {
+        if (ex is KeyNotFoundException ||
+            ex.Message.Contains("not present in the dictionary", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                var safeProjects = await GetProjectsFallbackAsync(targetCompanyId, isSuperAdmin, useUserScope, currentUserId);
+                message.Status = 1;
+                message.Data = safeProjects;
+                message.Message = "Project list returned with fallback.";
+                return Json(message);
+            }
+            catch (Exception fallbackEx)
+            {
+                Console.WriteLine($"[GetProjects] Outer fallback failed: {fallbackEx}");
+            }
+        }
+
         message.Status = 0;
         message.Message = DisplayMessage.ErrorMessage + " " + ex.Message;
     }
 
     return Json(message);
+}
+
+private async Task<List<object>> GetProjectsFromRawSqlAsync(
+    int targetCompanyId,
+    bool isSuperAdmin,
+    bool useUserScope,
+    int currentUserId)
+{
+    var projects = new List<object>();
+    string connString = db.Database.GetConnectionString();
+
+    using var conn = new MySqlConnection(connString);
+    await conn.OpenAsync();
+    var projectColumns = await GetTableColumnSetAsync(conn, "tbl_project");
+    var logGridSelect = projectColumns.Contains("log_grid")
+        ? "p.log_grid"
+        : "NULL AS log_grid";
+    var createdByUserFilter = projectColumns.Contains("created_by_user_id")
+        ? "OR (@uid > 0 AND p.created_by_user_id = @uid)"
+        : string.Empty;
+
+    using var cmd = conn.CreateCommand();
+    cmd.CommandText = $@"
+        SELECT
+            p.id,
+            p.project_name,
+            p.ref_session_id,
+            p.from_date,
+            p.to_date,
+            p.provider,
+            p.tech,
+            p.band,
+            p.earfcn,
+            p.apps,
+            p.grid_size,
+            {logGridSelect},
+            p.created_on,
+            p.Download_path,
+            ST_AsText(p.polygon) AS project_polygon_wkt,
+            mr.region_wkt,
+            mr.region_blob_b64,
+            COALESCE(ST_AsText(p.polygon), mr.region_wkt) AS geometry_wkt
+        FROM tbl_project p
+        LEFT JOIN (
+            SELECT
+                mr1.tbl_project_id,
+                ST_AsText(mr1.region) AS region_wkt,
+                TO_BASE64(mr1.region) AS region_blob_b64
+            FROM map_regions mr1
+            INNER JOIN (
+                SELECT tbl_project_id, MAX(id) AS max_id
+                FROM map_regions
+                WHERE tbl_project_id IS NOT NULL
+                GROUP BY tbl_project_id
+            ) picked
+              ON picked.tbl_project_id = mr1.tbl_project_id
+             AND picked.max_id = mr1.id
+        ) mr
+          ON mr.tbl_project_id = p.id
+        WHERE (p.status IS NULL OR p.status <> 0)
+          AND (
+                @global = 1
+                OR p.company_id = @cid
+                {createdByUserFilter}
+              )
+        ORDER BY p.id DESC;";
+
+    cmd.Parameters.AddWithValue("@global", isSuperAdmin && targetCompanyId == 0 ? 1 : 0);
+    cmd.Parameters.AddWithValue("@cid", targetCompanyId);
+    cmd.Parameters.AddWithValue("@uid", useUserScope ? currentUserId : 0);
+
+    using var reader = await cmd.ExecuteReaderAsync();
+    while (await reader.ReadAsync())
+    {
+        object? ReadDb(string name)
+        {
+            var value = reader[name];
+            return value == DBNull.Value ? null : value;
+        }
+
+        projects.Add(new
+        {
+            id = ReadDb("id"),
+            project_name = ReadDb("project_name"),
+            ref_session_id = ReadDb("ref_session_id"),
+            from_date = ReadDb("from_date"),
+            to_date = ReadDb("to_date"),
+            provider = ReadDb("provider"),
+            tech = ReadDb("tech"),
+            band = ReadDb("band"),
+            earfcn = ReadDb("earfcn"),
+            apps = ReadDb("apps"),
+            grid_size = ReadDb("grid_size"),
+            log_grid = ReadDb("log_grid"),
+            created_on = ReadDb("created_on"),
+            Download_path = ReadDb("Download_path"),
+            project_polygon_wkt = ReadDb("project_polygon_wkt"),
+            region_wkt = ReadDb("region_wkt"),
+            region_blob_b64 = ReadDb("region_blob_b64"),
+            geometry_wkt = ReadDb("geometry_wkt"),
+        });
+    }
+
+    return projects;
+}
+
+private async Task<List<object>> GetProjectsFallbackAsync(
+    int targetCompanyId,
+    bool isSuperAdmin,
+    bool useUserScope,
+    int currentUserId)
+{
+    var projects = new List<object>();
+    string connString = db.Database.GetConnectionString();
+
+    using var conn = new MySqlConnection(connString);
+    await conn.OpenAsync();
+
+    var projectColumns = await GetTableColumnSetAsync(conn, "tbl_project");
+    var logGridSelect = projectColumns.Contains("log_grid")
+        ? "p.log_grid"
+        : "NULL AS log_grid";
+    var createdByUserFilter = projectColumns.Contains("created_by_user_id")
+        ? "OR (@uid > 0 AND p.created_by_user_id = @uid)"
+        : string.Empty;
+
+    using var cmd = conn.CreateCommand();
+    cmd.CommandText = $@"
+        SELECT
+            p.id,
+            p.project_name,
+            p.ref_session_id,
+            p.from_date,
+            p.to_date,
+            p.provider,
+            p.tech,
+            p.band,
+            p.earfcn,
+            p.apps,
+            p.grid_size,
+            {logGridSelect},
+            p.created_on,
+            p.Download_path
+        FROM tbl_project p
+        WHERE (p.status IS NULL OR p.status <> 0)
+          AND (
+                @global = 1
+                OR p.company_id = @cid
+                {createdByUserFilter}
+              )
+        ORDER BY p.id DESC;";
+
+    cmd.Parameters.AddWithValue("@global", isSuperAdmin && targetCompanyId == 0 ? 1 : 0);
+    cmd.Parameters.AddWithValue("@cid", targetCompanyId);
+    cmd.Parameters.AddWithValue("@uid", useUserScope ? currentUserId : 0);
+
+    using var reader = await cmd.ExecuteReaderAsync();
+    while (await reader.ReadAsync())
+    {
+        object? ReadDb(string name)
+        {
+            var value = reader[name];
+            return value == DBNull.Value ? null : value;
+        }
+
+        projects.Add(new
+        {
+            id = ReadDb("id"),
+            project_name = ReadDb("project_name"),
+            ref_session_id = ReadDb("ref_session_id"),
+            from_date = ReadDb("from_date"),
+            to_date = ReadDb("to_date"),
+            provider = ReadDb("provider"),
+            tech = ReadDb("tech"),
+            band = ReadDb("band"),
+            earfcn = ReadDb("earfcn"),
+            apps = ReadDb("apps"),
+            grid_size = ReadDb("grid_size"),
+            log_grid = ReadDb("log_grid"),
+            created_on = ReadDb("created_on"),
+            Download_path = ReadDb("Download_path"),
+            project_polygon_wkt = (object?)null,
+            region_wkt = (object?)null,
+            region_blob_b64 = (object?)null,
+            geometry_wkt = (object?)null
+        });
+    }
+
+    return projects;
 }
 
 
@@ -8912,6 +9037,18 @@ private async Task<Dictionary<int, Dictionary<int, double>>> GetPciDistributionG
         {
             // Step B: Divide by GRAND TOTAL (Not PCI Total)
             // This ensures the percentages represent the density across the entire drive test.
+            if (row.num_cells <= 0)
+            {
+                continue;
+            }
+
+            // Defensive guard: source data can occasionally contain outlier values
+            // beyond the usual 1..16 range; avoid KeyNotFound exceptions.
+            if (!pciDistribution.ContainsKey(row.num_cells))
+            {
+                pciDistribution[row.num_cells] = 0.0;
+            }
+
             pciDistribution[row.num_cells] = Math.Round(row.count / grandTotal, 4);
         }
         
