@@ -28,6 +28,32 @@ internal class Program
         return string.Equals(forwardedProto, "https", StringComparison.OrdinalIgnoreCase);
     }
 
+    private static string ResolveDataProtectionKeysPath(WebApplicationBuilder builder)
+    {
+        var configuredPath = builder.Configuration["DataProtection:KeysPath"]
+                             ?? Environment.GetEnvironmentVariable("DATAPROTECTION_KEYS_PATH");
+
+        if (string.IsNullOrWhiteSpace(configuredPath))
+        {
+            configuredPath = Path.Combine(builder.Environment.ContentRootPath, "App_Data", "DataProtectionKeys");
+        }
+
+        return Path.IsPathRooted(configuredPath)
+            ? configuredPath
+            : Path.GetFullPath(Path.Combine(builder.Environment.ContentRootPath, configuredPath));
+    }
+
+    private static int? GetHttpsRedirectionPort(IConfiguration configuration)
+    {
+        var configuredPort = configuration.GetValue<int?>("HttpsRedirection:HttpsPort");
+        if (configuredPort.HasValue) return configuredPort;
+
+        var envPort = Environment.GetEnvironmentVariable("ASPNETCORE_HTTPS_PORT")
+                      ?? Environment.GetEnvironmentVariable("HTTPS_PORT");
+
+        return int.TryParse(envPort, out var parsedPort) ? parsedPort : null;
+    }
+
     private static void ApplyPerRequestCookieSettings(HttpContext context, CookieOptions options)
     {
         var requestHost = context.Request.Host.Host;
@@ -133,16 +159,11 @@ Console.WriteLine("✅ Dynamic Database Provider configured");
         // ----------------------------------------------------
         // DATA PROTECTION
         // ----------------------------------------------------
-        var dpKeysPath = builder.Configuration["DataProtection:KeysPath"]
-                         ?? Environment.GetEnvironmentVariable("DATAPROTECTION_KEYS_PATH");
-
-        if (!string.IsNullOrWhiteSpace(dpKeysPath))
-        {
-            Directory.CreateDirectory(dpKeysPath);
-            builder.Services.AddDataProtection()
-                .PersistKeysToFileSystem(new DirectoryInfo(dpKeysPath))
-                .SetApplicationName("SignalTracker");
-        }
+        var dpKeysPath = ResolveDataProtectionKeysPath(builder);
+        Directory.CreateDirectory(dpKeysPath);
+        builder.Services.AddDataProtection()
+            .PersistKeysToFileSystem(new DirectoryInfo(dpKeysPath))
+            .SetApplicationName("SignalTracker");
 
         // Ensure the upload root exists both at runtime and in the deployed app.
         var uploadedExcelsPath = Path.Combine(builder.Environment.ContentRootPath, "UploadedExcels");
@@ -286,6 +307,15 @@ Console.WriteLine("✅ Dynamic Database Provider configured");
             options.KnownProxies.Clear();
         });
 
+        var httpsRedirectionPort = GetHttpsRedirectionPort(builder.Configuration);
+        if (httpsRedirectionPort.HasValue)
+        {
+            builder.Services.AddHttpsRedirection(options =>
+            {
+                options.HttpsPort = httpsRedirectionPort.Value;
+            });
+        }
+
         // ----------------------------------------------------
         // BUILD APP
         // ----------------------------------------------------
@@ -311,7 +341,10 @@ Console.WriteLine("✅ Dynamic Database Provider configured");
 
         // Forwarded headers must be applied before HTTPS redirection when running behind a proxy.
         app.UseForwardedHeaders();
-        app.UseHttpsRedirection();
+        if (!app.Environment.IsDevelopment() || httpsRedirectionPort.HasValue)
+        {
+            app.UseHttpsRedirection();
+        }
 
         app.UseStaticFiles();
         app.UseRouting();
