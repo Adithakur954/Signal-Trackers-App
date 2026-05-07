@@ -9,23 +9,17 @@ namespace SignalTracker.Models
 {
     public class ApplicationDbContext : DbContext
     {
-       private readonly IDbConnectionProvider _connectionProvider;
+       private readonly IDbConnectionProvider? _connectionProvider;
         internal object tbl_lte_prediction_results;
 
-        [ActivatorUtilitiesConstructor]
-        public ApplicationDbContext(IDbConnectionProvider connectionProvider)
-        {
-            _connectionProvider = connectionProvider;
-        }
-
-        internal ApplicationDbContext(DbContextOptions<ApplicationDbContext> options) : base(options)
+        public ApplicationDbContext(DbContextOptions<ApplicationDbContext> options) : base(options)
         {
         }
 
 
 protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
 {
-    if (!optionsBuilder.IsConfigured)
+    if (!optionsBuilder.IsConfigured && _connectionProvider != null)
     {
         var connectionString = _connectionProvider.GetConnectionString();
         var serverVersion = new MySqlServerVersion(new Version(8, 0, 29));

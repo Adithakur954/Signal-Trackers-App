@@ -151,7 +151,14 @@ builder.Services.AddScoped<IDbConnectionProvider, DbConnectionProvider>();
 
 // Register DbContext without passing options here; 
 // it will configure itself in its OnConfiguring method.
-builder.Services.AddDbContext<ApplicationDbContext>();
+builder.Services.AddDbContext<ApplicationDbContext>((sp, options) =>
+{
+    var connectionProvider = sp.GetRequiredService<IDbConnectionProvider>();
+    var connectionString = connectionProvider.GetConnectionString();
+    var serverVersion = new MySqlServerVersion(new Version(8, 0, 29));
+
+    options.UseMySql(connectionString, serverVersion);
+});
 
 Console.WriteLine("✅ Dynamic Database Provider configured");
         
