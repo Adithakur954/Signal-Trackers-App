@@ -1,0 +1,6 @@
+Latitude,Longitude,Network Type,Download Speed (KB/s),Upload Speed (KB/s),Total Rx (KB),Total Tx (KB), MOS, Jitter, Latency, Packet Loss, PCI, RSRP, RSRQ, SINR, DL THPT, UL THPT, EARFCN, BAND, Alpha Long, Alpha Short, No of neighbour  Cells,nodeb_id,cell_id,mRegistered ,cell locked
+28.647767,77.363021,LTE (4G),1.87,5.7,34228087,1563416,4.18,2.01,15.71,0,365,-95,-13,0,41.253,18,39294,38,airtel,airtel,8,2159,19,Yes,yes 
+28.647767,77.363021,LTE (4G),1.19,5.56,34228089,1563422,4.16,2.88,18.18,0,365,-95,-13,0,41.253,18,39294,38,airtel,airtel,8,2159,19,Yes,no 
+28.647767,77.363021,LTE (4G),1.13,5.46,34228090,1563428,4,28.13,34.27,0,365,-95,-13,0,41.253,18,39294,38,airtel,airtel,8,2159,19,Yes,yes 
+28.648015,77.363022,LTE (4G),0,6.94,34228090,1563435,4,28.13,34.27,0,365,-95,-13,0,6.926,3.028,39294,38,airtel,airtel,8,2159,19,Yes,no 
+28.648015,77.363022,LTE (4G),0,1.24,34228090,1563436,4,28.13,34.27,0,365,-95,-13,0,6.926,3.028,39294,38,airtel,airtel,8,2159,19,Yes,yes

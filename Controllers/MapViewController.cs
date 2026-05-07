@@ -30,7 +30,6 @@ namespace SignalTracker.Controllers
     [ApiController]
     public class MapViewController : BaseController
     {
-        private static readonly ConcurrentDictionary<string, HashSet<string>> TableColumnCache = new(StringComparer.OrdinalIgnoreCase);
         private readonly IWebHostEnvironment _env;
         private readonly ApplicationDbContext db;
         private readonly CommonFunction cf;
@@ -1101,7 +1100,7 @@ public class ProjectPolygonItem
                 }
 
                 bool isSuperAdmin = _userScope.IsSuperAdmin(User);
-                int currentUserId = _userScope.GetCurrentUserId(User);
+                int currentUserId = GetCurrentUserId();
                 int targetCompanyId = GetTargetCompanyId(model.CompanyId ?? model.company_id);
                 bool useUserScope = !isSuperAdmin && targetCompanyId == 0 && currentUserId > 0;
 
@@ -1850,14 +1849,14 @@ public async Task<JsonResult> CreateProjectWithPolygons([FromBody] CreateProject
                     ref_session_id = (model.SessionIds != null && model.SessionIds.Any())
                                         ? string.Join(",", model.SessionIds)
                                         : null,
-                    grid_size      = model.GridSize,
-                    log_grid       = model.LogGrid ?? model.log_grid
+                    grid_size      = model.GridSize
                 };
 
                 db.tbl_project.Add(newProj);
                 await db.SaveChangesAsync();
 
                 newProjectId = newProj.id; 
+                await TryUpdateProjectLogGridAsync(newProjectId, model.LogGrid ?? model.log_grid);
 
                 if (model.PolygonIds != null && model.PolygonIds.Any())
                 {
@@ -1899,7 +1898,6 @@ public async Task<JsonResult> CreateProjectWithPolygons([FromBody] CreateProject
                 p.earfcn,
                 p.apps,
                 p.grid_size,
-                p.log_grid,
                 p.created_on,
                 p.status
             })
@@ -4203,7 +4201,7 @@ public async Task<IActionResult> GetNeighbourLogsByDateRange(
         // =========================================================
         bool isSuperAdmin = _userScope.IsSuperAdmin(User);
         int targetCompanyId = GetTargetCompanyId(company_id);
-        int currentUserId = _userScope.GetCurrentUserId(User);
+        int currentUserId = GetCurrentUserId();
         bool useUserScope = !isSuperAdmin && targetCompanyId == 0 && currentUserId > 0;
 
         if (!isSuperAdmin && targetCompanyId == 0 && !useUserScope)
@@ -4478,7 +4476,7 @@ public async Task<IActionResult> GetLogsByDateRange(
         // =========================================================
         bool isSuperAdmin = _userScope.IsSuperAdmin(User);
         int targetCompanyId = GetTargetCompanyId(company_id);
-        int currentUserId = _userScope.GetCurrentUserId(User);
+        int currentUserId = GetCurrentUserId();
         bool useUserScope = !isSuperAdmin && targetCompanyId == 0 && currentUserId > 0;
 
         if (!isSuperAdmin && targetCompanyId == 0 && !useUserScope)
@@ -4688,6 +4686,59 @@ public async Task<IActionResult> GetLogsByDateRange(
     
     return _userScope.GetTargetCompanyId(User, company_id);
 }
+
+        private int GetCurrentUserId()
+        {
+            return TryParseInt(User?.FindFirst("UserId")?.Value)
+                ?? TryParseInt(User?.FindFirst("user_id")?.Value)
+                ?? HttpContext?.Session?.GetInt32("UserID")
+                ?? TryParseInt(HttpContext?.Session?.GetString("UserID"))
+                ?? 0;
+        }
+
+        private static int? TryParseInt(string? value)
+        {
+            return int.TryParse(value, out var parsed) ? parsed : null;
+        }
+
+        private async Task TryUpdateProjectLogGridAsync(int projectId, string? logGrid)
+        {
+            if (projectId <= 0 || string.IsNullOrWhiteSpace(logGrid))
+                return;
+
+            var conn = db.Database.GetDbConnection();
+            var shouldClose = false;
+            try
+            {
+                if (conn.State != ConnectionState.Open)
+                {
+                    await conn.OpenAsync();
+                    shouldClose = true;
+                }
+
+                var projectColumns = await GetTableColumnSetAsync(conn, "tbl_project");
+                if (!projectColumns.Contains("log_grid"))
+                    return;
+
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = "UPDATE tbl_project SET log_grid = @logGrid WHERE id = @projectId;";
+                if (db.Database.CurrentTransaction != null)
+                    cmd.Transaction = db.Database.CurrentTransaction.GetDbTransaction();
+
+                AddParam(cmd, "@logGrid", logGrid);
+                AddParam(cmd, "@projectId", projectId);
+                await cmd.ExecuteNonQueryAsync();
+            }
+            catch
+            {
+                // Older deployments may not have log_grid; project creation should still succeed.
+            }
+            finally
+            {
+                if (shouldClose && conn.State == ConnectionState.Open)
+                    await conn.CloseAsync();
+            }
+        }
 
         private string BuildDateRangeCacheKey(LogFilterModel filters, int companyId, int userId = 0)
 {
@@ -6384,12 +6435,6 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
 
         private static async Task<HashSet<string>> GetTableColumnSetAsync(DbConnection conn, string tableName)
         {
-            var cacheKey = $"{conn.Database}:{tableName}";
-            if (TableColumnCache.TryGetValue(cacheKey, out var cachedColumns))
-            {
-                return cachedColumns;
-            }
-
             var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = @"
@@ -6408,7 +6453,6 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                     columns.Add(name);
                 }
             }
-            TableColumnCache[cacheKey] = columns;
             return columns;
         }
 
@@ -7678,13 +7722,13 @@ public async Task<IActionResult> CreateSimpleProject([FromBody] CreateProjectMod
             apps = model.Apps,
             from_date = model.FromDate?.ToString("yyyy-MM-dd"),
             to_date = model.ToDate?.ToString("yyyy-MM-dd"),
-            grid_size = model.GridSize,
-            log_grid = model.LogGrid ?? model.log_grid
+            grid_size = model.GridSize
         };
 
         // 4. Save to Database
         db.tbl_project.Add(newProject);
         await db.SaveChangesAsync();
+        await TryUpdateProjectLogGridAsync(newProject.id, model.LogGrid ?? model.log_grid);
         await InvalidateMapViewCachesAsync();
 
         response.Status = 1;
@@ -8481,7 +8525,7 @@ public async Task<IActionResult> GetProjects([FromQuery] int? company_id = null)
         // 1. Resolve company securely (same pattern)
         int targetCompanyId = GetTargetCompanyId(company_id);
         bool isSuperAdmin = _userScope.IsSuperAdmin(User);
-        int currentUserId = _userScope.GetCurrentUserId(User);
+        int currentUserId = GetCurrentUserId();
         bool useUserScope = !isSuperAdmin && targetCompanyId == 0 && currentUserId > 0;
 
         // Super admin check
@@ -8506,9 +8550,17 @@ public async Task<IActionResult> GetProjects([FromQuery] int? company_id = null)
         using (var conn = new MySqlConnection(connString))
         {
             await conn.OpenAsync();
+            var projectColumns = await GetTableColumnSetAsync(conn, "tbl_project");
+            var logGridSelect = projectColumns.Contains("log_grid")
+                ? "p.log_grid"
+                : "NULL AS log_grid";
+            var createdByUserFilter = projectColumns.Contains("created_by_user_id")
+                ? "OR (@uid > 0 AND p.created_by_user_id = @uid)"
+                : string.Empty;
+
             using (var cmd = conn.CreateCommand())
             {
-                cmd.CommandText = @"
+                cmd.CommandText = $@"
                     SELECT
                         p.id,
                         p.project_name,
@@ -8521,7 +8573,7 @@ public async Task<IActionResult> GetProjects([FromQuery] int? company_id = null)
                         p.earfcn,
                         p.apps,
                         p.grid_size,
-                        p.log_grid,
+                        {logGridSelect},
                         p.created_on,
                         p.Download_path,
                         ST_AsText(p.polygon) AS project_polygon_wkt,
@@ -8549,7 +8601,7 @@ public async Task<IActionResult> GetProjects([FromQuery] int? company_id = null)
                       AND (
                             @global = 1
                             OR p.company_id = @cid
-                            OR (@uid > 0 AND p.created_by_user_id = @uid)
+                            {createdByUserFilter}
                           )
                     ORDER BY p.id DESC;";
 

@@ -6,6 +6,7 @@ using System.Text;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Diagnostics;
 using System.Security.Claims;
 using SignalTracker.Helper;
 using Microsoft.Extensions.Configuration;
@@ -490,7 +491,23 @@ namespace SignalTracker.Controllers
         [HttpGet("Error")]
         public IActionResult Error()
         {
-            return BadRequest(new { error = "An internal error occurred." });
+            var exceptionFeature = HttpContext.Features.Get<IExceptionHandlerPathFeature>();
+            var traceId = Activity.Current?.Id ?? HttpContext.TraceIdentifier;
+
+            if (exceptionFeature?.Error != null)
+            {
+                _logger.LogError(
+                    exceptionFeature.Error,
+                    "Unhandled exception at {Path}. TraceId: {TraceId}",
+                    exceptionFeature.Path,
+                    traceId);
+            }
+
+            return StatusCode(StatusCodes.Status500InternalServerError, new
+            {
+                error = "An internal error occurred.",
+                traceId
+            });
         }
     }
 }
