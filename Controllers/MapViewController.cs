@@ -37,7 +37,6 @@ namespace SignalTracker.Controllers
         private readonly RedisService _redis;
         private readonly UserScopeService _userScope;
         private const int MapViewCacheTtlSeconds = 300;
-        private const string SitePredictionCacheVersion = "carrierfix-v2";
         private static readonly string[] MapViewCacheInvalidationPatterns =
         {
             "mapview:*",
@@ -6084,6 +6083,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
     }
 
     await tx.CommitAsync();
+    await InvalidateMapViewCachesAsync();
 
     return Ok(new
     {
@@ -6479,37 +6479,6 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 return BadRequest(new { Status = 0, Message = "version must be 'original' or 'combined'" });
             }
 
-            var cacheKey = BuildMapViewCacheKey(
-                $"site-prediction-full-{SitePredictionCacheVersion}",
-                projectId,
-                site,
-                cell_id,
-                cluster,
-                technology,
-                band,
-                pci,
-                requestedVersion);
-
-            var cachedRows = await TryGetMapViewCacheAsync<List<Dictionary<string, object?>>>(cacheKey);
-            if (cachedRows != null)
-            {
-                foreach (var row in cachedRows)
-                {
-                    EnrichSitePredictionRow(row);
-                }
-
-                await SetMapViewCacheAsync(cacheKey, cachedRows);
-
-                var cachedPageRows = SliceCachedPage(cachedRows, Math.Clamp(limit, 1, 5000), Math.Max(offset, 0));
-                return Json(new
-                {
-                    Status = 1,
-                    Version = requestedVersion,
-                    Count = cachedPageRows.Count,
-                    Data = cachedPageRows
-                });
-            }
-
             var conn = db.Database.GetDbConnection();
             if (conn.State != System.Data.ConnectionState.Open)
                 await conn.OpenAsync();
@@ -6813,7 +6782,6 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 Data = pagedRows
             };
 
-            await SetMapViewCacheAsync(cacheKey, list);
             return Json(response);
         }
 
@@ -7529,6 +7497,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
 
                     var deletedOptimizedOnlyRows = await deleteOptimizedOnlyCmd.ExecuteNonQueryAsync();
                     await txOptimizedOnly.CommitAsync();
+                    await InvalidateMapViewCachesAsync();
 
                     return Ok(new
                     {
@@ -7643,6 +7612,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 }
 
                 await tx.CommitAsync();
+                await InvalidateMapViewCachesAsync();
 
                 return Ok(new
                 {
@@ -8046,6 +8016,7 @@ public async Task<IActionResult> AddSitePrediction([FromBody] AddSitePredictionM
             }
         }
 
+        await InvalidateMapViewCachesAsync();
         return Ok(new { Status = 1, Message = "Inserted successfully." });
     }
     catch (Exception ex)
@@ -8149,6 +8120,7 @@ public async Task<IActionResult> AddSitePrediction([FromBody] AddSitePredictionM
             }
 
             await tx.CommitAsync();
+            await InvalidateMapViewCachesAsync();
 
             return Ok(new
             {
@@ -9256,17 +9228,6 @@ public async Task<IActionResult> GetSitePredictionBase(
 
     try
     {
-        var cacheKey = BuildMapViewCacheKey(
-            "site-prediction-base",
-            projectId,
-            trimmedNodeBId ?? "all",
-            trimmedCellId ?? "all",
-            trimmedSector ?? "all",
-            trimmedSectorId ?? "all");
-        var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
-        if (cached != null)
-            return Ok(cached);
-
         const string tableName = "lte_prediction_baseline_results";
         var conn = db.Database.GetDbConnection();
         if (conn.State != System.Data.ConnectionState.Open)
@@ -9344,7 +9305,6 @@ public async Task<IActionResult> GetSitePredictionBase(
         if (lookupClauses.Count == 0)
         {
             var empty = new { Status = 1, Table = tableName, Count = 0, Data = Array.Empty<object>() };
-            await SetMapViewCacheAsync(cacheKey, empty);
             return Ok(empty);
         }
 
@@ -9407,7 +9367,6 @@ ORDER BY b.id DESC;";
             Count = items.Count,
             Data = items
         };
-        await SetMapViewCacheAsync(cacheKey, response);
         return Ok(response);
     }
     catch (Exception ex)
@@ -9448,17 +9407,6 @@ public async Task<IActionResult> GetSitePredictionOptimised(
             Message = "At least one lookup key is required (node_b_id, cell_id, sector, or sector_id)."
         });
     }
-
-    var cacheKey = BuildMapViewCacheKey(
-        "site-prediction-optimised",
-        projectId,
-        trimmedNodeBId ?? "all",
-        trimmedCellId ?? "all",
-        trimmedSector ?? "all",
-        trimmedSectorId ?? "all");
-    var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
-    if (cached != null)
-        return Ok(cached);
 
     try
     {
@@ -9670,7 +9618,6 @@ WHERE NOT EXISTS (SELECT 1 FROM optimized_rows);";
             Count = rows.Count,
             Data = rows
         };
-        await SetMapViewCacheAsync(cacheKey, response);
         return Ok(response);
     }
     catch (Exception ex)
