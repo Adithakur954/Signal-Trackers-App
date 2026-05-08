@@ -145,6 +145,21 @@ namespace SignalTracker.Controllers
             }
         }
 
+        private async Task InvalidateProjectListCachesAsync()
+        {
+            if (_redis?.IsConnected != true)
+                return;
+
+            try
+            {
+                await _redis.DeleteByPatternAsync("mapview:projects:*");
+            }
+            catch
+            {
+                // Best effort only.
+            }
+        }
+
         private static List<T> SliceCachedPage<T>(IReadOnlyList<T> rows, int limit, int offset)
         {
             if (rows.Count == 0)
@@ -1910,6 +1925,8 @@ public async Task<JsonResult> CreateProjectWithPolygons([FromBody] CreateProject
             projectId = newProjectId,
             project   = createdProjectData
         };
+
+        await InvalidateProjectListCachesAsync();
     }
     catch (Exception ex)
     {
@@ -7729,7 +7746,7 @@ public async Task<IActionResult> CreateSimpleProject([FromBody] CreateProjectMod
         db.tbl_project.Add(newProject);
         await db.SaveChangesAsync();
         await TryUpdateProjectLogGridAsync(newProject.id, model.LogGrid ?? model.log_grid);
-        await InvalidateMapViewCachesAsync();
+        await InvalidateProjectListCachesAsync();
 
         response.Status = 1;
         response.Message = "Project created successfully with associated sessions.";
