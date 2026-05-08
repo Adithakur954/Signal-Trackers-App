@@ -97,6 +97,41 @@ namespace SignalTracker.Controllers
         }
 
         [AllowAnonymous]
+        [HttpGet("GetSitePredictionOptimized")]
+        public async Task<IActionResult> GetSitePredictionOptimized(
+            [FromQuery] long projectId,
+            [FromQuery] string? operatorName,
+            [FromQuery(Name = "operator")] string? operatorAlias,
+            [FromQuery] int limit = 20000,
+            [FromQuery] int offset = 0)
+        {
+            var authResult = EnsureAuthorized();
+            if (authResult is not null) return authResult;
+
+            if (projectId <= 0)
+            {
+                return BadRequest(new { Status = 0, Message = "projectId is required." });
+            }
+
+            var result = await _pythonBridgeService.GetSitePredictionOptimizedAsync(
+                projectId,
+                operatorName ?? operatorAlias,
+                limit,
+                offset,
+                HttpContext.RequestAborted
+            );
+
+            return Ok(new
+            {
+                Status = 1,
+                Count = result.Rows.Count,
+                Limit = result.Limit,
+                Offset = result.Offset,
+                Data = result.Rows
+            });
+        }
+
+        [AllowAnonymous]
         [HttpPost("SavePredictionData")]
         public async Task<IActionResult> SavePredictionData([FromBody] PredictionDataBulkRequest request)
         {
@@ -171,6 +206,76 @@ namespace SignalTracker.Controllers
             }
 
             var inserted = await _pythonBridgeService.SaveLtePredictionRefinedAsync(
+                request,
+                HttpContext.RequestAborted
+            );
+
+            return Ok(new { Status = 1, Inserted = inserted });
+        }
+
+        [AllowAnonymous]
+        [HttpPost("SaveLtePredictionOptimisedResults")]
+        public async Task<IActionResult> SaveLtePredictionOptimisedResults([FromBody] LtePredictionOptimisedBulkRequest request)
+        {
+            var authResult = EnsureAuthorized();
+            if (authResult is not null) return authResult;
+
+            if (request == null || request.ProjectId <= 0)
+            {
+                return BadRequest(new { Status = 0, Message = "ProjectId is required." });
+            }
+
+            if (request.Rows == null || request.Rows.Count == 0)
+            {
+                return Ok(new { Status = 1, Inserted = 0 });
+            }
+
+            var inserted = await _pythonBridgeService.SaveLtePredictionOptimisedResultsAsync(
+                request,
+                HttpContext.RequestAborted
+            );
+
+            return Ok(new { Status = 1, Inserted = inserted });
+        }
+
+        [AllowAnonymous]
+        [HttpGet("GetNextRfOptimizationScenarioId")]
+        public async Task<IActionResult> GetNextRfOptimizationScenarioId([FromQuery] long projectId)
+        {
+            var authResult = EnsureAuthorized();
+            if (authResult is not null) return authResult;
+
+            if (projectId <= 0)
+            {
+                return BadRequest(new { Status = 0, Message = "projectId is required." });
+            }
+
+            var scenarioId = await _pythonBridgeService.GetNextRfOptimizationScenarioIdAsync(
+                projectId,
+                HttpContext.RequestAborted
+            );
+
+            return Ok(new { Status = 1, ScenarioId = scenarioId });
+        }
+
+        [AllowAnonymous]
+        [HttpPost("SaveRfOptimizationResults")]
+        public async Task<IActionResult> SaveRfOptimizationResults([FromBody] RfOptimizationBulkRequest request)
+        {
+            var authResult = EnsureAuthorized();
+            if (authResult is not null) return authResult;
+
+            if (request == null || request.ProjectId <= 0)
+            {
+                return BadRequest(new { Status = 0, Message = "ProjectId is required." });
+            }
+
+            if (request.Rows == null || request.Rows.Count == 0)
+            {
+                return Ok(new { Status = 1, Inserted = 0 });
+            }
+
+            var inserted = await _pythonBridgeService.SaveRfOptimizationResultsAsync(
                 request,
                 HttpContext.RequestAborted
             );
