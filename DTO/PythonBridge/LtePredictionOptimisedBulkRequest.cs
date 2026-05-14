@@ -21,5 +21,7 @@ namespace SignalTracker.DTO.PythonBridge
         public DateTime? created_at { get; set; }
         public string? site_id { get; set; }
         public string? nodeb_id_cell_id { get; set; }
+        public string? Technology { get; set; }
+        public int? scenario_id { get; set; }
     }
 }

@@ -97,6 +97,60 @@ namespace SignalTracker.Controllers
         }
 
         [AllowAnonymous]
+        [HttpGet("GetLteTiltAntennaRows")]
+        public async Task<IActionResult> GetLteTiltAntennaRows([FromQuery] LteTiltAntennaRowsRequest request)
+        {
+            var authResult = EnsureAuthorized();
+            if (authResult is not null) return authResult;
+
+            if (request == null || request.ProjectId <= 0)
+            {
+                return BadRequest(new { Status = 0, Message = "ProjectId is required." });
+            }
+
+            var result = await _pythonBridgeService.GetLteTiltAntennaRowsAsync(
+                request,
+                HttpContext.RequestAborted
+            );
+
+            return Ok(new
+            {
+                Status = 1,
+                Count = result.Rows.Count,
+                Limit = result.Limit,
+                Offset = result.Offset,
+                Data = result.Rows
+            });
+        }
+
+        [AllowAnonymous]
+        [HttpGet("GetLtePredictionGeoFeatures")]
+        public async Task<IActionResult> GetLtePredictionGeoFeatures([FromQuery] LtePredictionGeoFeatureRowsRequest request)
+        {
+            var authResult = EnsureAuthorized();
+            if (authResult is not null) return authResult;
+
+            if (request == null || request.ProjectId <= 0)
+            {
+                return BadRequest(new { Status = 0, Message = "ProjectId is required." });
+            }
+
+            var result = await _pythonBridgeService.GetLtePredictionGeoFeaturesAsync(
+                request,
+                HttpContext.RequestAborted
+            );
+
+            return Ok(new
+            {
+                Status = 1,
+                Count = result.Rows.Count,
+                Limit = result.Limit,
+                Offset = result.Offset,
+                Data = result.Rows
+            });
+        }
+
+        [AllowAnonymous]
         [HttpGet("GetSitePredictionOptimized")]
         public async Task<IActionResult> GetSitePredictionOptimized(
             [FromQuery] long projectId,
@@ -129,6 +183,66 @@ namespace SignalTracker.Controllers
                 Offset = result.Offset,
                 Data = result.Rows
             });
+        }
+
+        [AllowAnonymous]
+        [HttpGet("GetLteSitePredictionRows")]
+        public async Task<IActionResult> GetLteSitePredictionRows([FromQuery] LteSitePredictionRowsRequest request)
+        {
+            var authResult = EnsureAuthorized();
+            if (authResult is not null) return authResult;
+
+            if (request == null || request.ProjectId <= 0)
+            {
+                return BadRequest(new { Status = 0, Message = "ProjectId is required." });
+            }
+
+            var result = await _pythonBridgeService.GetLteSitePredictionRowsAsync(
+                request,
+                HttpContext.RequestAborted
+            );
+
+            return Ok(new { Status = 1, Count = result.Rows.Count, Limit = result.Limit, Offset = result.Offset, Data = result.Rows });
+        }
+
+        [AllowAnonymous]
+        [HttpGet("GetLteBuildingRows")]
+        public async Task<IActionResult> GetLteBuildingRows([FromQuery] LteBuildingRowsRequest request)
+        {
+            var authResult = EnsureAuthorized();
+            if (authResult is not null) return authResult;
+
+            if (request == null || request.ProjectId <= 0)
+            {
+                return BadRequest(new { Status = 0, Message = "ProjectId is required." });
+            }
+
+            var result = await _pythonBridgeService.GetLteBuildingRowsAsync(
+                request,
+                HttpContext.RequestAborted
+            );
+
+            return Ok(new { Status = 1, Count = result.Rows.Count, Limit = result.Limit, Offset = result.Offset, Data = result.Rows });
+        }
+
+        [AllowAnonymous]
+        [HttpGet("GetLteBaselineRows")]
+        public async Task<IActionResult> GetLteBaselineRows([FromQuery] LteBaselineRowsRequest request)
+        {
+            var authResult = EnsureAuthorized();
+            if (authResult is not null) return authResult;
+
+            if (request == null || request.ProjectId <= 0)
+            {
+                return BadRequest(new { Status = 0, Message = "ProjectId is required." });
+            }
+
+            var result = await _pythonBridgeService.GetLteBaselineRowsAsync(
+                request,
+                HttpContext.RequestAborted
+            );
+
+            return Ok(new { Status = 1, Count = result.Rows.Count, Limit = result.Limit, Offset = result.Offset, Data = result.Rows });
         }
 
         [AllowAnonymous]
@@ -239,6 +353,81 @@ namespace SignalTracker.Controllers
         }
 
         [AllowAnonymous]
+        [HttpPost("SaveLtePredictionBaselineResults")]
+        public async Task<IActionResult> SaveLtePredictionBaselineResults([FromBody] DictionaryRowsBulkRequest request)
+        {
+            var authResult = EnsureAuthorized();
+            if (authResult is not null) return authResult;
+
+            if (request == null || request.ProjectId <= 0)
+            {
+                return BadRequest(new { Status = 0, Message = "ProjectId is required." });
+            }
+
+            if (request.Rows == null || request.Rows.Count == 0)
+            {
+                return Ok(new { Status = 1, Inserted = 0 });
+            }
+
+            var inserted = await _pythonBridgeService.SaveLtePredictionBaselineResultsAsync(
+                request,
+                HttpContext.RequestAborted
+            );
+
+            return Ok(new { Status = 1, Inserted = inserted });
+        }
+
+        [AllowAnonymous]
+        [HttpPost("SaveLtePredictionGeoFeatures")]
+        public async Task<IActionResult> SaveLtePredictionGeoFeatures([FromBody] DictionaryRowsBulkRequest request)
+        {
+            var authResult = EnsureAuthorized();
+            if (authResult is not null) return authResult;
+
+            if (request == null || request.ProjectId <= 0)
+            {
+                return BadRequest(new { Status = 0, Message = "ProjectId is required." });
+            }
+
+            if (request.Rows == null || request.Rows.Count == 0)
+            {
+                return Ok(new { Status = 1, Inserted = 0 });
+            }
+
+            var inserted = await _pythonBridgeService.SaveLtePredictionGeoFeaturesAsync(
+                request,
+                HttpContext.RequestAborted
+            );
+
+            return Ok(new { Status = 1, Inserted = inserted });
+        }
+
+        [AllowAnonymous]
+        [HttpPost("DeleteLtePredictionGeoFeatures")]
+        public async Task<IActionResult> DeleteLtePredictionGeoFeatures([FromBody] DictionaryRowsBulkRequest request)
+        {
+            var authResult = EnsureAuthorized();
+            if (authResult is not null) return authResult;
+
+            if (request == null || request.ProjectId <= 0)
+            {
+                return BadRequest(new { Status = 0, Message = "ProjectId is required." });
+            }
+
+            if (request.Rows == null || request.Rows.Count == 0)
+            {
+                return Ok(new { Status = 1, Deleted = 0 });
+            }
+
+            var deleted = await _pythonBridgeService.DeleteLtePredictionGeoFeaturesAsync(
+                request,
+                HttpContext.RequestAborted
+            );
+
+            return Ok(new { Status = 1, Deleted = deleted });
+        }
+
+        [AllowAnonymous]
         [HttpGet("GetNextRfOptimizationScenarioId")]
         public async Task<IActionResult> GetNextRfOptimizationScenarioId([FromQuery] long projectId)
         {
@@ -256,6 +445,86 @@ namespace SignalTracker.Controllers
             );
 
             return Ok(new { Status = 1, ScenarioId = scenarioId });
+        }
+
+        [AllowAnonymous]
+        [HttpGet("GetLatestLteBaselineJobId")]
+        public async Task<IActionResult> GetLatestLteBaselineJobId([FromQuery] long projectId)
+        {
+            var authResult = EnsureAuthorized();
+            if (authResult is not null) return authResult;
+
+            if (projectId <= 0)
+            {
+                return BadRequest(new { Status = 0, Message = "projectId is required." });
+            }
+
+            var jobId = await _pythonBridgeService.GetLatestLteBaselineJobIdAsync(
+                projectId,
+                HttpContext.RequestAborted
+            );
+
+            return Ok(new { Status = 1, JobId = jobId });
+        }
+
+        [AllowAnonymous]
+        [HttpGet("GetNextLteOptimizationScenarioId")]
+        public async Task<IActionResult> GetNextLteOptimizationScenarioId([FromQuery] long projectId)
+        {
+            var authResult = EnsureAuthorized();
+            if (authResult is not null) return authResult;
+
+            if (projectId <= 0)
+            {
+                return BadRequest(new { Status = 0, Message = "projectId is required." });
+            }
+
+            var scenarioId = await _pythonBridgeService.GetNextLteOptimizationScenarioIdAsync(
+                projectId,
+                HttpContext.RequestAborted
+            );
+
+            return Ok(new { Status = 1, ScenarioId = scenarioId });
+        }
+
+        [AllowAnonymous]
+        [HttpPost("CreateLteOptimizationScenario")]
+        public async Task<IActionResult> CreateLteOptimizationScenario([FromBody] LteOptimizationScenarioCreateRequest request)
+        {
+            var authResult = EnsureAuthorized();
+            if (authResult is not null) return authResult;
+
+            if (request == null || request.ProjectId <= 0)
+            {
+                return BadRequest(new { Status = 0, Message = "ProjectId is required." });
+            }
+
+            var result = await _pythonBridgeService.CreateLteOptimizationScenarioAsync(
+                request,
+                HttpContext.RequestAborted
+            );
+
+            return Ok(new { Status = 1, ScenarioRowId = result.RowId, ScenarioId = result.ScenarioId });
+        }
+
+        [AllowAnonymous]
+        [HttpPost("UpdateLteOptimizationScenarioStatus")]
+        public async Task<IActionResult> UpdateLteOptimizationScenarioStatus([FromBody] LteOptimizationScenarioStatusRequest request)
+        {
+            var authResult = EnsureAuthorized();
+            if (authResult is not null) return authResult;
+
+            if (request == null || request.ScenarioRowId <= 0)
+            {
+                return BadRequest(new { Status = 0, Message = "ScenarioRowId is required." });
+            }
+
+            await _pythonBridgeService.UpdateLteOptimizationScenarioStatusAsync(
+                request,
+                HttpContext.RequestAborted
+            );
+
+            return Ok(new { Status = 1 });
         }
 
         [AllowAnonymous]
