@@ -2165,6 +2165,7 @@ public class MapFilter1
     public string NetworkType { get; set; } = "ALL";
     public DateTime? StartDate { get; set; }
     public DateTime? EndDate { get; set; }
+    public long? project_id { get; set; }
 
     public List<long> GetSessionIds()
     {
@@ -2205,7 +2206,13 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
             else if (p.StartsWith("v")) providerNormalized = "vodafone";
         }
 
-        string cacheKey = BuildNetworkLogCacheKey(sessionIds, providerNormalized, filters.StartDate, filters.EndDate);
+        string cacheKey = BuildNetworkLogCacheKey(
+            sessionIds,
+            providerNormalized,
+            filters.StartDate,
+            filters.EndDate,
+            filters.project_id
+        );
         string pageCacheKey = $"{cacheKey}:page:{page}:limit:{limit}";
 
         // 2. Check Cache
@@ -2264,26 +2271,36 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
             catch {}
         }
 
-        // =========================================================================
-        //  BATCHED PARALLEL EXECUTION (3 Tasks instead of 5)
-        // =========================================================================
-        
-        // Task 1: Main Data (full filtered set)
-        var taskData = GetMainDataOnlyEF(sessionIds, providerNormalized, filters);
-        
-        // Task 2: App Summary (Heavy Grouping)
-        var taskApps = GetAppSummaryRaw(connString, sessionIds, providerNormalized, filters);
+        async Task<(List<NetworkLogCacheRow> fullData, Dictionary<string, object> appSummary, CombinedStatsDto stats)> FetchBundleAsync(MapFilter1 activeFilters)
+        {
+            var taskData = GetMainDataOnlyRaw(connString, sessionIds, providerNormalized, activeFilters);
+            var taskApps = GetAppSummaryRaw(connString, sessionIds, providerNormalized, activeFilters);
+            var taskStats = GetCombinedStatsRaw(connString, sessionIds, providerNormalized, activeFilters);
+            await Task.WhenAll(taskData, taskApps, taskStats);
+            return (taskData.Result, taskApps.Result, taskStats.Result);
+        }
 
-        // Task 3: Combined Stats (Volume + IO + Sessions in ONE DB Call) 
-        var taskStats = GetCombinedStatsRaw(connString, sessionIds, providerNormalized, filters);
+        // Primary fetch: includes project polygon filter when available.
+        var bundle = await FetchBundleAsync(filters);
 
-        // Wait for all 3 tasks
-        await Task.WhenAll(taskData, taskApps, taskStats);
+        // Fallback: if project polygon filtering returned no rows, retry without project polygon constraint.
+        if (bundle.fullData.Count == 0 && filters.project_id.HasValue && filters.project_id.Value > 0)
+        {
+            var fallbackFilters = new MapFilter1
+            {
+                session_ids = filters.session_ids,
+                page = filters.page,
+                limit = filters.limit,
+                NetworkType = filters.NetworkType,
+                StartDate = filters.StartDate,
+                EndDate = filters.EndDate,
+                project_id = null
+            };
+            bundle = await FetchBundleAsync(fallbackFilters);
+        }
 
-        // Unpack Combined Stats
-        var statsResult = taskStats.Result;
-        long calculatedTotalCount = statsResult.Sessions.Sum(x => x.Count);
-        var fullData = taskData.Result;
+        long calculatedTotalCount = bundle.stats.Sessions.Sum(x => x.Count);
+        var fullData = bundle.fullData;
         var pageData = SliceCachedPage(fullData, limit, pageOffset);
 
         // =========================================================================
@@ -2292,12 +2309,12 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
         var responseObj = new
         {
             data = pageData,
-            app_summary = taskApps.Result,
-            io_summary = statsResult.IoSummary,
-            tpt_volume = statsResult.Volume,
+            app_summary = bundle.appSummary,
+            io_summary = bundle.stats.IoSummary,
+            tpt_volume = bundle.stats.Volume,
             total_count = calculatedTotalCount,
             session_count = sessionIds.Count,
-            sessions = statsResult.Sessions
+            sessions = bundle.stats.Sessions
         };
 
         // Cache Logic
@@ -2305,22 +2322,22 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
         {
              var cacheModel = new NetworkLogFullResponse {
                  data = fullData,
-                 app_summary = taskApps.Result,
-                 io_summary = statsResult.IoSummary,
-                 tpt_volume = statsResult.Volume,
+                 app_summary = bundle.appSummary,
+                 io_summary = bundle.stats.IoSummary,
+                 tpt_volume = bundle.stats.Volume,
                  TotalCount = (int)calculatedTotalCount,
-                 Sessions = statsResult.Sessions,
+                 Sessions = bundle.stats.Sessions,
                  CachedAt = DateTime.UtcNow
              };
              await _redis.SetObjectAsync(cacheKey, cacheModel, ttlSeconds: 300);
              await _redis.SetObjectAsync(pageCacheKey, new NetworkLogFullResponse
              {
                  data = pageData,
-                 app_summary = taskApps.Result,
-                 io_summary = statsResult.IoSummary,
-                 tpt_volume = statsResult.Volume,
+                 app_summary = bundle.appSummary,
+                 io_summary = bundle.stats.IoSummary,
+                 tpt_volume = bundle.stats.Volume,
                  TotalCount = (int)calculatedTotalCount,
-                 Sessions = statsResult.Sessions,
+                 Sessions = bundle.stats.Sessions,
                  CachedAt = cacheModel.CachedAt
              }, ttlSeconds: 300);
         }
@@ -2403,6 +2420,68 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyEF(
         })
         .ToListAsync();
 }
+
+private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
+    string connString, List<long> sessionIds, string provider, MapFilter1 filters)
+{
+    using var conn = new MySqlConnection(connString);
+    await conn.OpenAsync();
+
+    using var cmdConfig = new MySqlCommand("SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;", conn);
+    await cmdConfig.ExecuteNonQueryAsync();
+
+    var (whereClause, parameters) = await BuildSqlWhereAsync(sessionIds, provider, filters);
+    string sql = $@"
+        SELECT
+            id, session_id, timestamp, lat, lon, battery, Speed, level, apps, num_cells,
+            network, m_alpha_long, pci, rsrp, rsrq, sinr, mos, jitter, latency, tac,
+            packet_loss, dl_tpt, ul_tpt, band, image_path, indoor_outdoor, nodeb_id, cell_id
+        FROM tbl_network_log
+        WHERE {whereClause}
+        ORDER BY timestamp;";
+
+    var rows = new List<NetworkLogCacheRow>();
+    using var cmd = new MySqlCommand(sql, conn);
+    foreach (var p in parameters) cmd.Parameters.AddWithValue(p.Key, p.Value);
+
+    using var rd = await cmd.ExecuteReaderAsync();
+    while (await rd.ReadAsync())
+    {
+        rows.Add(new NetworkLogCacheRow
+        {
+            id = rd.IsDBNull(0) ? 0 : rd.GetInt32(0),
+            session_id = rd.IsDBNull(1) ? 0 : Convert.ToInt32(rd.GetInt64(1)),
+            timestamp = rd.IsDBNull(2) ? (DateTime?)null : rd.GetDateTime(2),
+            lat = rd.IsDBNull(3) ? (float?)null : rd.GetFloat(3),
+            lon = rd.IsDBNull(4) ? (float?)null : rd.GetFloat(4),
+            battery = rd.IsDBNull(5) ? (int?)null : rd.GetInt32(5),
+            Speed = rd.IsDBNull(6) ? (float?)null : rd.GetFloat(6),
+            level = rd.IsDBNull(7) ? (int?)null : rd.GetInt32(7),
+            apps = rd.IsDBNull(8) ? "" : rd.GetString(8),
+            num_cells = rd.IsDBNull(9) ? (int?)null : rd.GetInt32(9),
+            network = rd.IsDBNull(10) ? "" : rd.GetString(10),
+            m_alpha_long = rd.IsDBNull(11) ? "" : rd.GetString(11),
+            pci = rd.IsDBNull(12) ? "" : rd.GetString(12),
+            rsrp = rd.IsDBNull(13) ? (float?)null : rd.GetFloat(13),
+            rsrq = rd.IsDBNull(14) ? (float?)null : rd.GetFloat(14),
+            sinr = rd.IsDBNull(15) ? (float?)null : rd.GetFloat(15),
+            mos = rd.IsDBNull(16) ? (float?)null : rd.GetFloat(16),
+            jitter = rd.IsDBNull(17) ? (float?)null : rd.GetFloat(17),
+            latency = rd.IsDBNull(18) ? (float?)null : rd.GetFloat(18),
+            tac = rd.IsDBNull(19) ? "" : Convert.ToString(rd.GetValue(19), CultureInfo.InvariantCulture) ?? "",
+            packet_loss = rd.IsDBNull(20) ? (float?)null : rd.GetFloat(20),
+            dl_tpt = rd.IsDBNull(21) ? "0" : Convert.ToString(rd.GetValue(21), CultureInfo.InvariantCulture) ?? "0",
+            ul_tpt = rd.IsDBNull(22) ? "0" : Convert.ToString(rd.GetValue(22), CultureInfo.InvariantCulture) ?? "0",
+            band = rd.IsDBNull(23) ? "" : rd.GetString(23),
+            image_path = rd.IsDBNull(24) ? "" : rd.GetString(24),
+            indoor_outdoor = rd.IsDBNull(25) ? "" : rd.GetString(25),
+            nodeb_id = rd.IsDBNull(26) ? "" : rd.GetString(26),
+            cell_id = rd.IsDBNull(27) ? "" : rd.GetString(27)
+        });
+    }
+
+    return rows;
+}
 // ---------------------------------------------------------
 //  APP SUMMARY (Updated with Operator Name)
 // ---------------------------------------------------------
@@ -2419,7 +2498,7 @@ private async Task<Dictionary<string, object>> GetAppSummaryRaw(
     using var cmdConfig = new MySqlCommand("SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;", conn);
     await cmdConfig.ExecuteNonQueryAsync();
 
-    var (whereClause, parameters) = BuildSqlWhere(sessionIds, provider, filters);
+    var (whereClause, parameters) = await BuildSqlWhereAsync(sessionIds, provider, filters);
 
     // List of apps to track
     var baseApps = new[] { "Whatsapp", "Instagram", "YT", "Google Chrome", "Google Search", "FB", "Gmail", "Outlook", "Spotify", "Blinkit", "Jio Hotstar","Netflix", "Amazon Prime ", };
@@ -2519,7 +2598,7 @@ private async Task<CombinedStatsDto> GetCombinedStatsRaw(
     using var cmdConfig = new MySqlCommand("SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;", conn);
     await cmdConfig.ExecuteNonQueryAsync();
 
-    var (whereClause, parameters) = BuildSqlWhere(sessionIds, provider, filters);
+    var (whereClause, parameters) = await BuildSqlWhereAsync(sessionIds, provider, filters);
 
     // Multi-Statement Query
     string sql = $@"
@@ -2572,6 +2651,64 @@ private async Task<CombinedStatsDto> GetCombinedStatsRaw(
 // ---------------------------------------------------------
 // HELPERS
 // ---------------------------------------------------------
+private async Task<string?> ResolveProjectFilterWktAsync(long? projectId)
+{
+    if (!projectId.HasValue || projectId.Value <= 0)
+        return null;
+
+    string connString = db.Database.GetConnectionString();
+    using var conn = new MySqlConnection(connString);
+    await conn.OpenAsync();
+
+    using var cmd = conn.CreateCommand();
+    cmd.CommandText = @"
+        SELECT polygon_wkt
+        FROM (
+            SELECT
+                ST_AsText(p.polygon) AS polygon_wkt,
+                1 AS prio,
+                0 AS row_order
+            FROM tbl_project p
+            WHERE p.id = @pid
+
+            UNION ALL
+
+            SELECT
+                ST_AsText(mr.region) AS polygon_wkt,
+                2 AS prio,
+                mr.id AS row_order
+            FROM map_regions mr
+            WHERE mr.tbl_project_id = @pid
+        ) src
+        WHERE polygon_wkt IS NOT NULL AND polygon_wkt <> ''
+        ORDER BY prio ASC, row_order DESC
+        LIMIT 1;";
+    cmd.Parameters.AddWithValue("@pid", projectId.Value);
+
+    var result = await cmd.ExecuteScalarAsync();
+    var wkt = result == null || result == DBNull.Value
+        ? null
+        : Convert.ToString(result, CultureInfo.InvariantCulture);
+
+    return string.IsNullOrWhiteSpace(wkt) ? null : wkt.Trim();
+}
+
+private async Task<(string Clause, Dictionary<string, object> Params)> BuildSqlWhereAsync(
+    List<long> ids, string provider, MapFilter1 filters)
+{
+    var (clause, p) = BuildSqlWhere(ids, provider, filters);
+
+    var projectPolygonWkt = await ResolveProjectFilterWktAsync(filters?.project_id);
+    if (!string.IsNullOrWhiteSpace(projectPolygonWkt))
+    {
+        clause += " AND lat IS NOT NULL AND lon IS NOT NULL";
+        clause += " AND ST_Contains(ST_GeomFromText(@projectPolygonWkt, 4326), ST_SRID(POINT(lon, lat), 4326))";
+        p["@projectPolygonWkt"] = projectPolygonWkt;
+    }
+
+    return (clause, p);
+}
+
 private (string Clause, Dictionary<string, object> Params) BuildSqlWhere(
     List<long> ids, string provider, MapFilter1 filters)
 {
@@ -2646,14 +2783,18 @@ private string BuildNetworkLogCacheKey(
     List<long> sessionIds, 
     string provider, 
     DateTime? from, 
-    DateTime? to)
+    DateTime? to,
+    long? projectId = null)
 {
     var sortedSessionIds = string.Join("-", sessionIds.OrderBy(x => x));
     string providerKey = provider ?? "all";
     string fromKey = from?.ToString("yyyyMMdd") ?? "null";
     string toKey = to?.ToString("yyyyMMdd") ?? "null";
+    string projectKey = projectId.HasValue && projectId.Value > 0
+        ? projectId.Value.ToString(CultureInfo.InvariantCulture)
+        : "no_project";
 
-    return $"networklog:v2:{sortedSessionIds}:{providerKey}:{fromKey}:{toKey}";
+    return $"networklog:v2:{sortedSessionIds}:{providerKey}:{fromKey}:{toKey}:{projectKey}";
 }
 
 private void AddParameter(DbCommand cmd, string name, object value)
@@ -3649,7 +3790,7 @@ ORDER BY p.timestamp;
 
 
 [HttpGet("GetN78Neighbours")]
-public async Task<IActionResult> GetN78Neighbours([FromQuery] string session_ids)
+public async Task<IActionResult> GetN78Neighbours([FromQuery] string session_ids, [FromQuery] long? project_id = null)
 {
     // ================= 1. VALIDATION =================
     if (string.IsNullOrWhiteSpace(session_ids))
@@ -3666,7 +3807,11 @@ public async Task<IActionResult> GetN78Neighbours([FromQuery] string session_ids
         return BadRequest(new { Status = 0, Message = "No valid session_ids" });
 
     string sessionCsv = string.Join(",", parsedIds);
-    string cacheKey = $"n78_neighbours:{sessionCsv}";
+    string projectKey = project_id.HasValue && project_id.Value > 0
+        ? project_id.Value.ToString(CultureInfo.InvariantCulture)
+        : "no_project";
+    string cacheKey = $"n78_neighbours:{sessionCsv}:project:{projectKey}";
+    var projectPolygonWkt = await ResolveProjectFilterWktAsync(project_id);
 
     // ================= 2. REDIS READ =================
     if (_redis != null && _redis.IsConnected)
@@ -3691,7 +3836,11 @@ public async Task<IActionResult> GetN78Neighbours([FromQuery] string session_ids
     }
 
     // ================= 3. RAW SQL (all processing in DB via CTE) =================
-    var sql = $@"
+    string polygonFilterClause = !string.IsNullOrWhiteSpace(projectPolygonWkt)
+        ? "AND p.lat IS NOT NULL AND p.lon IS NOT NULL AND ST_Contains(ST_GeomFromText(@projectPolygonWkt, 4326), ST_SRID(POINT(p.lon, p.lat), 4326))"
+        : string.Empty;
+
+    string sql = $@"
 WITH PrimaryLogs AS (
     SELECT 
         id, session_id, timestamp, lat, lon, indoor_outdoor, 
@@ -3705,8 +3854,9 @@ WITH PrimaryLogs AS (
         mos,
         CAST(NULLIF(dl_tpt, '') AS DECIMAL(12,4)) AS dl_tpt,
         CAST(NULLIF(ul_tpt, '') AS DECIMAL(12,4)) AS ul_tpt
-    FROM tbl_network_log
-    WHERE session_id IN ({sessionCsv}) AND `primary` = 'yes'
+    FROM tbl_network_log p
+    WHERE p.session_id IN ({sessionCsv}) AND p.`primary` = 'yes'
+      {polygonFilterClause}
 ),
 JoinedData AS (
     SELECT 
@@ -3761,6 +3911,10 @@ ORDER BY timestamp;";
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = sql;
         cmd.CommandTimeout = 120;
+        if (!string.IsNullOrWhiteSpace(projectPolygonWkt))
+        {
+            AddParameter(cmd, "@projectPolygonWkt", projectPolygonWkt);
+        }
 
         await using var reader = await cmd.ExecuteReaderAsync();
         while (await reader.ReadAsync())
@@ -3807,6 +3961,68 @@ ORDER BY timestamp;";
     {
         if (shouldClose && conn.State == System.Data.ConnectionState.Open)
             await conn.CloseAsync();
+    }
+
+    // Fallback: if polygon filtering produced no rows, retry once without polygon filter.
+    if (data.Count == 0 && !string.IsNullOrWhiteSpace(projectPolygonWkt) && project_id.HasValue && project_id.Value > 0)
+    {
+        var fallbackSql = sql.Replace(
+            "AND p.lat IS NOT NULL AND p.lon IS NOT NULL AND ST_Contains(ST_GeomFromText(@projectPolygonWkt, 4326), ST_SRID(POINT(p.lon, p.lat), 4326))",
+            string.Empty
+        );
+
+        conn = db.Database.GetDbConnection();
+        shouldClose = false;
+        try
+        {
+            if (conn.State != System.Data.ConnectionState.Open)
+            {
+                await conn.OpenAsync();
+                shouldClose = true;
+            }
+
+            await using var fallbackCmd = conn.CreateCommand();
+            fallbackCmd.CommandText = fallbackSql;
+            fallbackCmd.CommandTimeout = 120;
+
+            await using var reader = await fallbackCmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                data.Add(new LTE5GNeighbourDto
+                {
+                    id = reader.IsDBNull(0) ? 0 : reader.GetInt32(0),
+                    session_id = reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
+                    timestamp = reader.IsDBNull(2) ? default : reader.GetDateTime(2),
+                    lat = reader.IsDBNull(3) ? 0d : Convert.ToDouble(reader.GetValue(3)),
+                    lon = reader.IsDBNull(4) ? 0d : Convert.ToDouble(reader.GetValue(4)),
+                    indoor_outdoor = reader.IsDBNull(5) ? null : reader.GetString(5),
+                    provider = reader.IsDBNull(6) ? null : reader.GetString(6),
+                    primary_network = reader.IsDBNull(7) ? null : reader.GetString(7),
+                    primary_band = reader.IsDBNull(8) ? null : reader.GetString(8),
+                    primary_pci = reader.IsDBNull(9) ? null : reader.GetString(9),
+                    primary_rsrp = reader.IsDBNull(10) ? null : (double?)Convert.ToDouble(reader.GetValue(10)),
+                    primary_rsrq = reader.IsDBNull(11) ? null : (double?)Convert.ToDouble(reader.GetValue(11)),
+                    primary_sinr = reader.IsDBNull(12) ? null : (double?)Convert.ToDouble(reader.GetValue(12)),
+                    mos = reader.IsDBNull(13) ? null : (double?)Convert.ToDouble(reader.GetValue(13)),
+                    dl_tpt = reader.IsDBNull(14) ? null : (decimal?)Convert.ToDecimal(reader.GetValue(14)),
+                    ul_tpt = reader.IsDBNull(15) ? null : (decimal?)Convert.ToDecimal(reader.GetValue(15)),
+                    neighbour_network = reader.IsDBNull(16) ? null : reader.GetString(16),
+                    neighbour_band = reader.IsDBNull(17) ? null : reader.GetString(17),
+                    neighbour_pci = reader.IsDBNull(18) ? null : reader.GetString(18),
+                    neighbour_rsrp = reader.IsDBNull(19) ? null : (double?)Convert.ToDouble(reader.GetValue(19)),
+                    neighbour_rsrq = reader.IsDBNull(20) ? null : (double?)Convert.ToDouble(reader.GetValue(20)),
+                    neighbour_sinr = reader.IsDBNull(21) ? null : (double?)Convert.ToDouble(reader.GetValue(21)),
+                    neighbour_provider = reader.IsDBNull(22) ? null : reader.GetString(22),
+                    neighbour_dl_tpt = reader.IsDBNull(23) ? null : (decimal?)Convert.ToDecimal(reader.GetValue(23)),
+                    neighbour_ul_tpt = reader.IsDBNull(24) ? null : (decimal?)Convert.ToDecimal(reader.GetValue(24)),
+                });
+            }
+        }
+        finally
+        {
+            if (shouldClose && conn.State == System.Data.ConnectionState.Open)
+                await conn.CloseAsync();
+        }
     }
 
     // ================= 5. REDIS WRITE =================
@@ -6165,17 +6381,28 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
         private static readonly Dictionary<string, string> SitePredictionColumnMap = new(StringComparer.OrdinalIgnoreCase)
         {
             ["site"] = "site",
+            ["site_id"] = "site",
+            ["siteId"] = "site",
             ["site_name"] = "site_name",
             ["sector"] = "sector",
+            ["sector_id"] = "sector",
+            ["sectorId"] = "sector",
             ["cell_id"] = "cell_id",
+            ["cellId"] = "cell_id",
             ["sec_id"] = "sec_id",
+            ["secId"] = "sec_id",
             ["longitude"] = "longitude",
+            ["lng"] = "longitude",
+            ["lon"] = "longitude",
             ["latitude"] = "latitude",
+            ["lat"] = "latitude",
             ["tac"] = "tac",
             ["pci"] = "pci",
             ["azimuth"] = "azimuth",
             ["height"] = "height",
             ["bw"] = "bw",
+            ["beamwidth"] = "bw",
+            ["bandwidth"] = "bw",
             ["m_tilt"] = "m_tilt",
             ["e_tilt"] = "e_tilt",
             ["maximum_transmission_power_of_resource"] = "tx_power",
@@ -6188,6 +6415,8 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             ["downlink_frequency"] = "downlink_frequency",
             ["earfcn"] = "earfcn",
             ["cluster"] = "cluster",
+            ["network"] = "cluster",
+            ["operator"] = "cluster",
             ["Technology"] = "Technology",
             ["technology"] = "Technology"
         };
@@ -6448,6 +6677,45 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 alterCmd.CommandText = $"ALTER TABLE site_prediction_optimized ADD COLUMN {column.Name} {column.Definition};";
                 await alterCmd.ExecuteNonQueryAsync();
             }
+
+            // Do not force AUTO_INCREMENT/PK shape here.
+            // Some deployed schemas already use a different auto column definition,
+            // and attempting to modify `id` can fail with:
+            // "there can be only one auto column and it must be defined as a key".
+
+            // Keep one optimized row per source row (sector-level from site_prediction row id).
+            await using (var dedupeCmd = conn.CreateCommand())
+            {
+                dedupeCmd.CommandText = @"
+                    DELETE dup
+                    FROM site_prediction_optimized dup
+                    INNER JOIN site_prediction_optimized keep
+                        ON keep.site_prediction_id = dup.site_prediction_id
+                       AND keep.id > dup.id
+                    WHERE dup.site_prediction_id IS NOT NULL;";
+                await dedupeCmd.ExecuteNonQueryAsync();
+            }
+
+            await using (var uniqueExistsCmd = conn.CreateCommand())
+            {
+                uniqueExistsCmd.CommandText = @"
+                    SELECT COUNT(*)
+                    FROM INFORMATION_SCHEMA.STATISTICS
+                    WHERE TABLE_SCHEMA = DATABASE()
+                      AND TABLE_NAME = 'site_prediction_optimized'
+                      AND INDEX_NAME = 'uq_spo_site_prediction_id';";
+                var uniqueExistsObj = await uniqueExistsCmd.ExecuteScalarAsync();
+                var uniqueExists = uniqueExistsObj != null &&
+                                   uniqueExistsObj != DBNull.Value &&
+                                   Convert.ToInt32(uniqueExistsObj) > 0;
+                if (!uniqueExists)
+                {
+                    await using var addUniqueCmd = conn.CreateCommand();
+                    addUniqueCmd.CommandText =
+                        "ALTER TABLE site_prediction_optimized ADD UNIQUE INDEX uq_spo_site_prediction_id (site_prediction_id);";
+                    await addUniqueCmd.ExecuteNonQueryAsync();
+                }
+            }
         }
 
         private static async Task<HashSet<string>> GetTableColumnSetAsync(DbConnection conn, string tableName)
@@ -6525,7 +6793,8 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             [FromQuery] int? pci = null,
             [FromQuery] int limit = 5000,
             [FromQuery] int offset = 0,
-            [FromQuery] string version = "combined")
+            [FromQuery] string version = "combined",
+            [FromQuery] int simple = 0)
         {
             if (projectId <= 0)
                 return BadRequest(new { Status = 0, Message = "projectId is required" });
@@ -6835,16 +7104,96 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 list.Add(row);
             }
 
-            var pagedRows = SliceCachedPage(list, Math.Clamp(limit, 1, 2000), Math.Max(offset, 0));
+            var pageSize = Math.Clamp(limit, 1, 2000);
+            var safeOffset = Math.Max(offset, 0);
+            var pagedRows = SliceCachedPage(list, pageSize, safeOffset);
+            var simplified = simple == 1;
+            List<object> resultRows = simplified
+                ? pagedRows.Select(ToSimpleSitePredictionRow).ToList<object>()
+                : pagedRows.Cast<object>().ToList();
             var response = new
             {
                 Status = 1,
                 Version = requestedVersion,
-                Count = pagedRows.Count,
-                Data = pagedRows
+                Count = resultRows.Count,
+                TotalCount = list.Count,
+                Data = resultRows
             };
 
             return Json(response);
+        }
+
+        private static object ToSimpleSitePredictionRow(Dictionary<string, object?> row)
+        {
+            static string? ReadString(Dictionary<string, object?> source, params string[] keys)
+            {
+                foreach (var key in keys)
+                {
+                    if (!source.TryGetValue(key, out var value) || value == null) continue;
+                    var text = Convert.ToString(value)?.Trim();
+                    if (!string.IsNullOrWhiteSpace(text)) return text;
+                }
+                return null;
+            }
+
+            static double? ReadDouble(Dictionary<string, object?> source, params string[] keys)
+            {
+                foreach (var key in keys)
+                {
+                    if (!source.TryGetValue(key, out var value) || value == null) continue;
+                    try
+                    {
+                        if (value is IConvertible) return Convert.ToDouble(value);
+                    }
+                    catch { }
+                }
+                return null;
+            }
+
+            static int? ReadInt(Dictionary<string, object?> source, params string[] keys)
+            {
+                foreach (var key in keys)
+                {
+                    if (!source.TryGetValue(key, out var value) || value == null) continue;
+                    try
+                    {
+                        if (value is IConvertible) return Convert.ToInt32(value);
+                    }
+                    catch { }
+                }
+                return null;
+            }
+
+            return new
+            {
+                id = ReadInt(row, "original_id", "id"),
+                optimizedId = ReadInt(row, "optimized_id"),
+                isUpdated = ReadInt(row, "is_updated") ?? 0,
+                status = ReadString(row, "status") ?? "original",
+                version = ReadInt(row, "version") ?? 0,
+                projectId = ReadInt(row, "tbl_project_id"),
+                site = ReadString(row, "site"),
+                siteName = ReadString(row, "site_name"),
+                sector = ReadString(row, "sector"),
+                secId = ReadString(row, "sec_id"),
+                cellId = ReadString(row, "cell_id"),
+                lat = ReadDouble(row, "latitude", "lat"),
+                lng = ReadDouble(row, "longitude", "lon", "lng"),
+                azimuth = ReadDouble(row, "azimuth"),
+                height = ReadDouble(row, "height"),
+                bw = ReadDouble(row, "bw"),
+                mTilt = ReadDouble(row, "m_tilt"),
+                eTilt = ReadDouble(row, "e_tilt"),
+                band = ReadString(row, "band"),
+                earfcn = ReadString(row, "earfcn"),
+                pci = ReadInt(row, "pci"),
+                tac = ReadString(row, "tac"),
+                technology = ReadString(row, "Technology", "technology"),
+                cluster = ReadString(row, "cluster"),
+                provider = ReadString(row, "provider", "operator_name", "project_provider", "cluster"),
+                txPower = ReadDouble(row, "maximum_transmission_power_of_resource", "tx_power"),
+                rsPower = ReadDouble(row, "reference_signal_power")
+            };
         }
 
         [HttpGet, Route("CompareSitePrediction")]
@@ -7203,7 +7552,21 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                         if (key.Equals("site_selector", StringComparison.OrdinalIgnoreCase)) continue;
                         if (key.Equals("sector_selector", StringComparison.OrdinalIgnoreCase)) continue;
 
-                        if (SitePredictionColumnMap.TryGetValue(key, out var dbColumn))
+                        string? dbColumn = null;
+                        if (SitePredictionColumnMap.TryGetValue(key, out var mappedColumn))
+                        {
+                            dbColumn = mappedColumn;
+                        }
+                        else if (!string.IsNullOrWhiteSpace(key) &&
+                                 optimizedColumns.Contains(key) &&
+                                 !reservedOptimizedColumns.Contains(key))
+                        {
+                            // Allow direct column updates for fields that exist in DB but are
+                            // not explicitly listed in SitePredictionColumnMap.
+                            dbColumn = key;
+                        }
+
+                        if (!string.IsNullOrWhiteSpace(dbColumn))
                         {
                             if (!seenDbColumns.Add(dbColumn)) continue;
                             string paramName = "@" + key + "_" + lookupId;
@@ -7358,17 +7721,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                                 spo.version = COALESCE(spo.version, 0) + 1,
                                 spo.updated_at = UTC_TIMESTAMP(),
                                 spo.updated_by = @updatedBy_{lookupId}
-                            WHERE spo.site_prediction_id = @sourceId_{lookupId}
-                              AND spo.id = (
-                                  SELECT latest_id
-                                  FROM (
-                                      SELECT o.id AS latest_id
-                                      FROM site_prediction_optimized o
-                                      WHERE o.site_prediction_id = @sourceId_{lookupId}
-                                      ORDER BY o.id DESC
-                                      LIMIT 1
-                                  ) AS latest_source
-                              );"
+                            WHERE spo.site_prediction_id = @sourceId_{lookupId};"
                         : hasWholeSiteSelector
                             ? $@"
                             UPDATE site_prediction_optimized spo
@@ -7402,27 +7755,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                                         CONVERT(sp.site USING utf8mb4) COLLATE utf8mb4_unicode_ci = @targetSiteText_{lookupId}
                                         AND CONVERT(sp.sector USING utf8mb4) COLLATE utf8mb4_unicode_ci = @targetSectorText_{lookupId}
                                     )
-                                  )
-                              AND spo.id = (
-                                  SELECT latest_id
-                                  FROM (
-                                      SELECT o.id AS latest_id
-                                      FROM site_prediction_optimized o
-                                      LEFT JOIN site_prediction spx ON spx.id = o.site_prediction_id
-                                      WHERE (
-                                              (
-                                                  CONVERT(o.site USING utf8mb4) COLLATE utf8mb4_unicode_ci = @targetSiteText_{lookupId}
-                                                  AND CONVERT(o.sector USING utf8mb4) COLLATE utf8mb4_unicode_ci = @targetSectorText_{lookupId}
-                                              )
-                                              OR (
-                                                  CONVERT(spx.site USING utf8mb4) COLLATE utf8mb4_unicode_ci = @targetSiteText_{lookupId}
-                                                  AND CONVERT(spx.sector USING utf8mb4) COLLATE utf8mb4_unicode_ci = @targetSectorText_{lookupId}
-                                              )
-                                            )
-                                      ORDER BY o.id DESC
-                                      LIMIT 1
-                                  ) AS latest_site_sector
-                              );"
+                                  );"
                         : $@"
                             UPDATE site_prediction_optimized spo
                             LEFT JOIN site_prediction sp ON sp.id = spo.site_prediction_id

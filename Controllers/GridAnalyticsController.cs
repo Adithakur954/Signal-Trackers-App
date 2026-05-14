@@ -69,7 +69,8 @@ namespace SignalTracker.Controllers
             [FromQuery] int projectId,
             [FromQuery] double? gridSize = null,
             [FromQuery] int? regionId = null,
-            [FromQuery] int? company_id = null)
+            [FromQuery] int? company_id = null,
+            [FromQuery] int? scenario_id = null)
         {
             if (!await CanUseGridFeatureAsync())
                 return StatusCode(403, new { Status = 0, Message = "Feature disabled in license: grid_fetch", Code = "FEATURE_NOT_ENABLED" });
@@ -103,6 +104,7 @@ namespace SignalTracker.Controllers
                             id INT AUTO_INCREMENT PRIMARY KEY,
                             project_id INT NOT NULL,
                             region_id INT,
+                            scenario_id INT NULL,
                             grid_size_meters DOUBLE NOT NULL,
                             grid_id VARCHAR(50) NOT NULL,
                             center_lat DOUBLE NOT NULL,
@@ -161,6 +163,7 @@ namespace SignalTracker.Controllers
                         ["optimized_best_operator_avg"] = "VARCHAR(100)",
                         ["optimized_best_operator_min"] = "VARCHAR(100)",
                         ["optimized_best_operator_max"] = "VARCHAR(100)",
+                        ["scenario_id"] = "INT NULL",
                     };
 
                     var existingColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -260,8 +263,14 @@ namespace SignalTracker.Controllers
                     // Baseline rows are included only when there is no matching optimized row
                     // across stable identifiers (nodeb_id_cell_id, node_b_id+cell_id, site_id+cell_id)
                     // with lat/lon + cell_id fallback matching.
+                    var resolvedScenarioId = await ResolveScenarioIdAsync(conn, projectId, scenario_id);
                     var baselinePts = await FetchPredictionData(conn, "lte_prediction_baseline_results", projectId);
-                    var optimizedRawPts = await FetchPredictionData(conn, "lte_prediction_optimised_results", projectId);
+                    var optimizedRawPts = await FetchPredictionData(
+                        conn,
+                        "lte_prediction_optimised_results",
+                        projectId,
+                        resolvedScenarioId
+                    );
                     var optimizedSelectionKeys = await FetchOptimizedSelectionKeys(conn, projectId);
                     var optimizedPts = BuildStatusAwareOptimizedPoints(
                         baselinePts,
@@ -400,6 +409,7 @@ namespace SignalTracker.Controllers
                         {
                             project_id = projectId,
                             region_id = regionId,
+                            scenario_id = resolvedScenarioId,
                             grid_size_meters = gridSizeMeters,
                             grid_id = cell.GridId,
                             center_lat = cell.CenterLat, center_lon = cell.CenterLon,
@@ -441,14 +451,16 @@ namespace SignalTracker.Controllers
                     {
                         if (regionId.HasValue && regionId.Value > 0)
                         {
-                            cmdDel.CommandText = "DELETE FROM grid_analytics_results WHERE project_id = @pid AND region_id = @rid";
+                            cmdDel.CommandText = "DELETE FROM grid_analytics_results WHERE project_id = @pid AND region_id = @rid AND ((@sid IS NULL AND scenario_id IS NULL) OR scenario_id = @sid)";
                             AddParam(cmdDel, "@rid", regionId.Value);
                             AddParam(cmdDel, "@pid", projectId);
+                            AddParam(cmdDel, "@sid", resolvedScenarioId.HasValue ? resolvedScenarioId.Value : DBNull.Value);
                         }
                         else
                         {
-                            cmdDel.CommandText = "DELETE FROM grid_analytics_results WHERE project_id = @pid AND (region_id IS NULL OR region_id <= 0)";
+                            cmdDel.CommandText = "DELETE FROM grid_analytics_results WHERE project_id = @pid AND (region_id IS NULL OR region_id <= 0) AND ((@sid IS NULL AND scenario_id IS NULL) OR scenario_id = @sid)";
                             AddParam(cmdDel, "@pid", projectId);
+                            AddParam(cmdDel, "@sid", resolvedScenarioId.HasValue ? resolvedScenarioId.Value : DBNull.Value);
                         }
                         await cmdDel.ExecuteNonQueryAsync();
                     }
@@ -460,7 +472,7 @@ namespace SignalTracker.Controllers
                     }
 
                     // Invalidate potentially cached read calls
-                    string cacheKey = $"gridanalytics:{projectId}:{regionId ?? 0}";
+                    string cacheKey = $"gridanalytics:{projectId}:{regionId ?? 0}:{resolvedScenarioId?.ToString() ?? "none"}";
                     if (_redis != null && _redis.IsConnected)
                     {
                         try { await _redis.DeleteAsync(cacheKey); } catch { }
@@ -555,7 +567,9 @@ namespace SignalTracker.Controllers
         public async Task<IActionResult> GetGridAnalytics(
             [FromQuery] int projectId,
             [FromQuery] int? regionId = null,
-            [FromQuery] int? company_id = null)
+            [FromQuery] int? company_id = null,
+            [FromQuery] string? version = null,
+            [FromQuery] int? scenario_id = null)
         {
             if (!await CanUseGridFeatureAsync())
                 return StatusCode(403, new { Status = 0, Message = "Feature disabled in license: grid_fetch", Code = "FEATURE_NOT_ENABLED" });
@@ -578,7 +592,17 @@ namespace SignalTracker.Controllers
                         return Unauthorized(new { Status = 0, Message = "Project does not belong to your company." });
                 }
 
-                string cacheKey = $"gridanalytics:{projectId}:{regionId ?? 0}";
+                var conn = _db.Database.GetDbConnection();
+                await conn.OpenAsync();
+                var normalizedVersion = (version ?? "original").Trim().ToLowerInvariant();
+                var effectiveScenarioId = await ResolveScenarioIdAsync(
+                    conn,
+                    projectId,
+                    (normalizedVersion == "updated" || normalizedVersion == "optimized" || normalizedVersion == "optimised" || normalizedVersion == "delta")
+                        ? scenario_id
+                        : null
+                );
+                string cacheKey = $"gridanalytics:{projectId}:{regionId ?? 0}:{normalizedVersion}:{effectiveScenarioId?.ToString() ?? "none"}";
                 if (_redis != null && _redis.IsConnected)
                 {
                     try
@@ -586,6 +610,7 @@ namespace SignalTracker.Controllers
                         var cached = await _redis.GetObjectAsync<GridAnalyticsResponse>(cacheKey);
                         if (cached != null)
                         {
+                            await conn.CloseAsync();
                             sw.Stop();
                             Response.Headers["X-Cache"] = "HIT";
                             return Ok(cached);
@@ -596,8 +621,6 @@ namespace SignalTracker.Controllers
 
                 // Check Table Exists
                 bool tableExists = false;
-                var conn = _db.Database.GetDbConnection();
-                await conn.OpenAsync();
                 await using (var cmdSchema = conn.CreateCommand())
                 {
                     cmdSchema.CommandText = "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'grid_analytics_results';";
@@ -610,22 +633,42 @@ namespace SignalTracker.Controllers
                     return Ok(new GridAnalyticsResponse { Status = 0, Message = "Table does not exist. Call ComputeAndStoreGridAnalytics first." });
                 }
 
+                // Backward-compat: ensure scenario_id exists before EF query materializes model.
+                await using (var cmdScenarioCol = conn.CreateCommand())
+                {
+                    cmdScenarioCol.CommandText = @"
+                        SELECT COUNT(*)
+                        FROM information_schema.columns
+                        WHERE table_schema = DATABASE()
+                          AND table_name = 'grid_analytics_results'
+                          AND column_name = 'scenario_id';";
+                    var scenarioColExists = Convert.ToInt32(await cmdScenarioCol.ExecuteScalarAsync() ?? 0) > 0;
+                    if (!scenarioColExists)
+                    {
+                        await using var cmdAlterScenarioCol = conn.CreateCommand();
+                        cmdAlterScenarioCol.CommandText =
+                            "ALTER TABLE grid_analytics_results ADD COLUMN scenario_id INT NULL AFTER region_id;";
+                        await cmdAlterScenarioCol.ExecuteNonQueryAsync();
+                    }
+                }
+
                 // Fetch directly from DB using EF
                 List<grid_analytics_results> storedResults;
+                var query = _db.grid_analytics_results.AsNoTracking().Where(g => g.project_id == projectId);
                 if (regionId.HasValue && regionId.Value > 0)
-                {
-                    storedResults = await _db.grid_analytics_results
-                        .AsNoTracking()
-                        .Where(g => g.project_id == projectId && g.region_id == regionId)
-                        .ToListAsync();
-                }
+                    query = query.Where(g => g.region_id == regionId);
                 else
+                    query = query.Where(g => g.region_id == null || g.region_id <= 0);
+
+                if (normalizedVersion == "updated" || normalizedVersion == "optimized" || normalizedVersion == "optimised" || normalizedVersion == "delta")
                 {
-                    storedResults = await _db.grid_analytics_results
-                        .AsNoTracking()
-                        .Where(g => g.project_id == projectId && (g.region_id == null || g.region_id <= 0))
-                        .ToListAsync();
+                    if (effectiveScenarioId.HasValue)
+                        query = query.Where(g => g.scenario_id == effectiveScenarioId.Value);
+                    else
+                        query = query.Where(g => g.scenario_id == null);
                 }
+
+                storedResults = await query.ToListAsync();
                 
                 await conn.CloseAsync();
 
@@ -1136,10 +1179,99 @@ namespace SignalTracker.Controllers
             return inside;
         }
 
-        private async Task<List<PredPoint>> FetchPredictionData(DbConnection conn, string table, int projectId)
+        [HttpGet("GetOptimizationScenarios")]
+        public async Task<IActionResult> GetOptimizationScenarios(
+            [FromQuery] int projectId,
+            [FromQuery] int? company_id = null)
+        {
+            if (!await CanUseGridFeatureAsync())
+                return StatusCode(403, new { Status = 0, Message = "Feature disabled in license: grid_fetch", Code = "FEATURE_NOT_ENABLED" });
+
+            int targetCompanyId = _userScope.GetTargetCompanyId(User, company_id);
+            bool isSuperAdmin = _userScope.IsSuperAdmin(User);
+            if (!isSuperAdmin && targetCompanyId == 0)
+                return Unauthorized(new { Status = 0, Message = "Unauthorized. Unable to resolve company context." });
+
+            if (projectId <= 0)
+                return BadRequest(new { Status = 0, Message = "projectId is required." });
+
+            if (targetCompanyId > 0)
+            {
+                bool access = await _db.tbl_project.AnyAsync(p => p.id == projectId && p.company_id == targetCompanyId);
+                if (!access)
+                    return Unauthorized(new { Status = 0, Message = "Project does not belong to your company." });
+            }
+
+            try
+            {
+                var conn = _db.Database.GetDbConnection();
+                if (conn.State != ConnectionState.Open)
+                    await conn.OpenAsync();
+
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = @"
+                    SELECT scenario_id, scenario_name, status, created_at
+                    FROM lte_optimization_scenarios
+                    WHERE project_id = @pid
+                    ORDER BY scenario_id DESC, id DESC
+                    LIMIT 6;";
+                AddParam(cmd, "@pid", projectId);
+
+                var rows = new List<object>();
+                await using var rdr = await cmd.ExecuteReaderAsync();
+                while (await rdr.ReadAsync())
+                {
+                    var scenarioId = rdr.IsDBNull(0) ? 0 : Convert.ToInt32(rdr.GetValue(0));
+                    var scenarioName = rdr.IsDBNull(1) ? "" : Convert.ToString(rdr.GetValue(1)) ?? "";
+                    var status = rdr.IsDBNull(2) ? "" : Convert.ToString(rdr.GetValue(2)) ?? "";
+                    var createdAt = rdr.IsDBNull(3) ? (DateTime?)null : Convert.ToDateTime(rdr.GetValue(3));
+                    rows.Add(new
+                    {
+                        scenario_id = scenarioId,
+                        scenario_name = scenarioName,
+                        status,
+                        created_at = createdAt
+                    });
+                }
+
+                return Ok(new
+                {
+                    Status = 1,
+                    Message = "Optimization scenarios fetched.",
+                    Data = rows
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { Status = 0, Message = "Error: " + ex.Message });
+            }
+        }
+
+        private async Task<int?> ResolveScenarioIdAsync(DbConnection conn, int projectId, int? scenarioId)
+        {
+            if (scenarioId.HasValue && scenarioId.Value > 0)
+                return scenarioId.Value;
+
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT scenario_id
+                FROM lte_optimization_scenarios
+                WHERE project_id = @pid
+                ORDER BY scenario_id DESC, id DESC
+                LIMIT 1;";
+            AddParam(cmd, "@pid", projectId);
+            var obj = await cmd.ExecuteScalarAsync();
+            if (obj == null || obj == DBNull.Value) return null;
+            var parsed = Convert.ToInt32(obj);
+            return parsed > 0 ? parsed : null;
+        }
+
+        private async Task<List<PredPoint>> FetchPredictionData(DbConnection conn, string table, int projectId, int? scenarioId = null)
         {
             var pts = new List<PredPoint>();
             await using var cmd = conn.CreateCommand();
+            var isOptimizedTable = string.Equals(table, "lte_prediction_optimised_results", StringComparison.OrdinalIgnoreCase);
+            var scenarioFilterClause = isOptimizedTable && scenarioId.HasValue ? " AND scenario_id = @sid" : "";
             var sourceQuery = $@"
 SELECT
     lat,
@@ -1154,9 +1286,9 @@ SELECT
     operator,
     created_at
 FROM `{table}`
-WHERE project_id = @pid";
+WHERE project_id = @pid{scenarioFilterClause}";
 
-            if (string.Equals(table, "lte_prediction_optimised_results", StringComparison.OrdinalIgnoreCase))
+            if (isOptimizedTable)
             {
                 cmd.CommandText = $@"
 WITH optimized_source AS (
@@ -1196,6 +1328,8 @@ WHERE rn = 1";
                 cmd.CommandText = sourceQuery;
             }
             AddParam(cmd, "@pid", projectId);
+            if (isOptimizedTable && scenarioId.HasValue)
+                AddParam(cmd, "@sid", scenarioId.Value);
 
             await using var rdr = await cmd.ExecuteReaderAsync();
             while (await rdr.ReadAsync())
