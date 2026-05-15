@@ -1,8 +1,0 @@
-C:\Program Files\dotnet\sdk\8.0.416\Microsoft.Common.CurrentVersion.targets(5321,5): error MSB3027: Could not copy "C:\Stracer_code\Signal-Trackers\obj\Debug\net8.0\apphost.exe" to "bin\Debug\net8.0\SignalTracker.exe". Exceeded retry count of 10. Failed. The file is locked by: "  (20844)" [C:\Stracer_code\Signal-Trackers\SignalTracker.csproj]
-C:\Program Files\dotnet\sdk\8.0.416\Microsoft.Common.CurrentVersion.targets(5321,5): error MSB3021: Unable to copy file "C:\Stracer_code\Signal-Trackers\obj\Debug\net8.0\apphost.exe" to "bin\Debug\net8.0\SignalTracker.exe". The process cannot access the file 'C:\Stracer_code\Signal-Trackers\bin\Debug\net8.0\SignalTracker.exe' because it is being used by another process. [C:\Stracer_code\Signal-Trackers\SignalTracker.csproj]
-
-Build FAILED.
-    10 Warning(s)
-    2 Error(s)
-
-Time Elapsed 00:00:16.75

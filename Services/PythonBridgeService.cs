@@ -5,20 +5,81 @@ using Microsoft.EntityFrameworkCore;
 using SignalTracker.DTO.PythonBridge;
 using SignalTracker.Helper;
 using SignalTracker.Models;
+using System.Diagnostics;
 
 namespace SignalTracker.Services
 {
     public class PythonBridgeService
     {
         private const int DefaultBatchSize = 2000;
+        private const int BridgeReadCacheTtlSeconds = 180;
 
         private readonly ApplicationDbContext _db;
         private readonly IConfiguration _configuration;
+        private readonly RedisService _redisService;
+        private readonly ILogger<PythonBridgeService> _logger;
 
-        public PythonBridgeService(ApplicationDbContext db, IConfiguration configuration)
+        private sealed class BridgeRowsCacheEntry
+        {
+            public int Limit { get; set; }
+            public int Offset { get; set; }
+            public List<Dictionary<string, object?>> Rows { get; set; } = new();
+        }
+
+        public PythonBridgeService(
+            ApplicationDbContext db,
+            IConfiguration configuration,
+            RedisService redisService,
+            ILogger<PythonBridgeService> logger)
         {
             _db = db;
             _configuration = configuration;
+            _redisService = redisService;
+            _logger = logger;
+        }
+
+        private static string BuildCacheKey(string scope, params object?[] parts)
+        {
+            var normalized = parts
+                .Select(p => p == null ? "null" : Convert.ToString(p)?.Trim()?.ToLowerInvariant() ?? "null");
+            return $"pybridge:{scope}:{string.Join(":", normalized)}";
+        }
+
+        private async Task<(int Limit, int Offset, List<Dictionary<string, object?>> Rows)> GetCachedOrLoadRowsAsync(
+            string cacheKey,
+            int limit,
+            int offset,
+            Func<Task<List<Dictionary<string, object?>>>> loader,
+            CancellationToken cancellationToken)
+        {
+            if (_redisService.IsConnected)
+            {
+                var cached = await _redisService.GetObjectAsync<BridgeRowsCacheEntry>(cacheKey);
+                if (cached != null)
+                {
+                    _logger.LogInformation("PythonBridge cache hit: {CacheKey} rows={RowCount}", cacheKey, cached.Rows.Count);
+                    return (cached.Limit, cached.Offset, cached.Rows);
+                }
+            }
+
+            var sw = Stopwatch.StartNew();
+            var rows = await loader();
+            sw.Stop();
+
+            _logger.LogInformation("PythonBridge DB fetch: {CacheKey} rows={RowCount} elapsedMs={ElapsedMs}", cacheKey, rows.Count, sw.ElapsedMilliseconds);
+
+            if (_redisService.IsConnected)
+            {
+                var cacheEntry = new BridgeRowsCacheEntry
+                {
+                    Limit = limit,
+                    Offset = offset,
+                    Rows = rows
+                };
+                await _redisService.SetObjectAsync(cacheKey, cacheEntry, BridgeReadCacheTtlSeconds);
+            }
+
+            return (limit, offset, rows);
         }
 
         public bool IsAuthorized(string? incomingKey)
@@ -254,15 +315,22 @@ namespace SignalTracker.Services
             var limit = Math.Clamp(request.Limit, 1, 50000);
             var offset = Math.Max(request.Offset, 0);
             var region = string.IsNullOrWhiteSpace(request.Region) ? "india" : request.Region.Trim().ToLowerInvariant();
+            var cacheKey = BuildCacheKey("lte_geo", request.ProjectId, region, limit, offset);
 
-            var conn = _db.Database.GetDbConnection();
-            if (conn.State != ConnectionState.Open)
-            {
-                await conn.OpenAsync(cancellationToken);
-            }
+            return await GetCachedOrLoadRowsAsync(
+                cacheKey,
+                limit,
+                offset,
+                async () =>
+                {
+                    var conn = _db.Database.GetDbConnection();
+                    if (conn.State != ConnectionState.Open)
+                    {
+                        await conn.OpenAsync(cancellationToken);
+                    }
 
-            await using var command = conn.CreateCommand();
-            command.CommandText = @"
+                    await using var command = conn.CreateCommand();
+                    command.CommandText = @"
                 SELECT
                     project_id,
                     region,
@@ -304,14 +372,15 @@ namespace SignalTracker.Services
                 ORDER BY nodeb_id_cell_id, lat, lon
                 LIMIT @lim OFFSET @off;";
 
-            PythonBridgeDbTool.AddParam(command, "@pid", request.ProjectId);
-            PythonBridgeDbTool.AddParam(command, "@region", region);
-            PythonBridgeDbTool.AddParam(command, "@lim", limit);
-            PythonBridgeDbTool.AddParam(command, "@off", offset);
+                    PythonBridgeDbTool.AddParam(command, "@pid", request.ProjectId);
+                    PythonBridgeDbTool.AddParam(command, "@region", region);
+                    PythonBridgeDbTool.AddParam(command, "@lim", limit);
+                    PythonBridgeDbTool.AddParam(command, "@off", offset);
 
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            var rows = await PythonBridgeDbTool.ReadRowsAsync(reader, cancellationToken);
-            return (limit, offset, rows);
+                    await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                    return await PythonBridgeDbTool.ReadRowsAsync(reader, cancellationToken);
+                },
+                cancellationToken);
         }
 
         public async Task<(int Limit, int Offset, List<Dictionary<string, object?>> Rows)> GetLteSitePredictionRowsAsync(
@@ -329,15 +398,22 @@ namespace SignalTracker.Services
             var operatorFilter = request.Operator?.Trim();
             var hasOperatorFilter = !string.IsNullOrWhiteSpace(operatorFilter)
                 && !string.Equals(operatorFilter, "all", StringComparison.OrdinalIgnoreCase);
+            var cacheKey = BuildCacheKey("lte_site_pred", request.ProjectId, operatorFilter ?? "all", limit, offset);
 
-            var conn = _db.Database.GetDbConnection();
-            if (conn.State != ConnectionState.Open)
-            {
-                await conn.OpenAsync(cancellationToken);
-            }
+            return await GetCachedOrLoadRowsAsync(
+                cacheKey,
+                limit,
+                offset,
+                async () =>
+                {
+                    var conn = _db.Database.GetDbConnection();
+                    if (conn.State != ConnectionState.Open)
+                    {
+                        await conn.OpenAsync(cancellationToken);
+                    }
 
-            await using var command = conn.CreateCommand();
-            command.CommandText = $@"
+                    await using var command = conn.CreateCommand();
+                    command.CommandText = $@"
                 SELECT *
                 FROM site_prediction
                 WHERE tbl_project_id = @pid
@@ -345,17 +421,18 @@ namespace SignalTracker.Services
                 ORDER BY id
                 LIMIT @lim OFFSET @off;";
 
-            PythonBridgeDbTool.AddParam(command, "@pid", request.ProjectId);
-            if (hasOperatorFilter)
-            {
-                PythonBridgeDbTool.AddParam(command, "@operator", operatorFilter!);
-            }
-            PythonBridgeDbTool.AddParam(command, "@lim", limit);
-            PythonBridgeDbTool.AddParam(command, "@off", offset);
+                    PythonBridgeDbTool.AddParam(command, "@pid", request.ProjectId);
+                    if (hasOperatorFilter)
+                    {
+                        PythonBridgeDbTool.AddParam(command, "@operator", operatorFilter!);
+                    }
+                    PythonBridgeDbTool.AddParam(command, "@lim", limit);
+                    PythonBridgeDbTool.AddParam(command, "@off", offset);
 
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            var rows = await PythonBridgeDbTool.ReadRowsAsync(reader, cancellationToken);
-            return (limit, offset, rows);
+                    await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                    return await PythonBridgeDbTool.ReadRowsAsync(reader, cancellationToken);
+                },
+                cancellationToken);
         }
 
         public async Task<(int Limit, int Offset, List<Dictionary<string, object?>> Rows)> GetLteBuildingRowsAsync(
@@ -413,27 +490,36 @@ namespace SignalTracker.Services
 
             var limit = Math.Clamp(request.Limit, 1, 50000);
             var offset = Math.Max(request.Offset, 0);
-            var conn = _db.Database.GetDbConnection();
-            if (conn.State != ConnectionState.Open)
-            {
-                await conn.OpenAsync(cancellationToken);
-            }
+            var cacheKey = BuildCacheKey("lte_baseline", request.ProjectId, limit, offset);
 
-            await using var command = conn.CreateCommand();
-            command.CommandText = @"
+            return await GetCachedOrLoadRowsAsync(
+                cacheKey,
+                limit,
+                offset,
+                async () =>
+                {
+                    var conn = _db.Database.GetDbConnection();
+                    if (conn.State != ConnectionState.Open)
+                    {
+                        await conn.OpenAsync(cancellationToken);
+                    }
+
+                    await using var command = conn.CreateCommand();
+                    command.CommandText = @"
                 SELECT *
                 FROM lte_prediction_baseline_results
                 WHERE project_id = @pid
                 ORDER BY id
                 LIMIT @lim OFFSET @off;";
 
-            PythonBridgeDbTool.AddParam(command, "@pid", request.ProjectId);
-            PythonBridgeDbTool.AddParam(command, "@lim", limit);
-            PythonBridgeDbTool.AddParam(command, "@off", offset);
+                    PythonBridgeDbTool.AddParam(command, "@pid", request.ProjectId);
+                    PythonBridgeDbTool.AddParam(command, "@lim", limit);
+                    PythonBridgeDbTool.AddParam(command, "@off", offset);
 
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            var rows = await PythonBridgeDbTool.ReadRowsAsync(reader, cancellationToken);
-            return (limit, offset, rows);
+                    await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                    return await PythonBridgeDbTool.ReadRowsAsync(reader, cancellationToken);
+                },
+                cancellationToken);
         }
 
         public async Task<(int Limit, int Offset, List<Dictionary<string, object?>> Rows)> GetSitePredictionOptimizedAsync(
@@ -454,15 +540,22 @@ namespace SignalTracker.Services
             var normalizedOperator = operatorName?.Trim();
             var hasOperatorFilter = !string.IsNullOrWhiteSpace(normalizedOperator)
                 && !string.Equals(normalizedOperator, "all", StringComparison.OrdinalIgnoreCase);
+            var cacheKey = BuildCacheKey("site_pred_opt", projectId, normalizedOperator ?? "all", limit, offset);
 
-            var conn = _db.Database.GetDbConnection();
-            if (conn.State != ConnectionState.Open)
-            {
-                await conn.OpenAsync(cancellationToken);
-            }
+            return await GetCachedOrLoadRowsAsync(
+                cacheKey,
+                limit,
+                offset,
+                async () =>
+                {
+                    var conn = _db.Database.GetDbConnection();
+                    if (conn.State != ConnectionState.Open)
+                    {
+                        await conn.OpenAsync(cancellationToken);
+                    }
 
-            await using var command = conn.CreateCommand();
-            command.CommandText = $@"
+                    await using var command = conn.CreateCommand();
+                    command.CommandText = $@"
                 SELECT *
                 FROM site_prediction_optimized
                 WHERE tbl_project_id = @pid
@@ -470,17 +563,18 @@ namespace SignalTracker.Services
                 ORDER BY id
                 LIMIT @lim OFFSET @off;";
 
-            PythonBridgeDbTool.AddParam(command, "@pid", projectId);
-            if (hasOperatorFilter)
-            {
-                PythonBridgeDbTool.AddParam(command, "@operator", normalizedOperator!);
-            }
-            PythonBridgeDbTool.AddParam(command, "@lim", limit);
-            PythonBridgeDbTool.AddParam(command, "@off", offset);
+                    PythonBridgeDbTool.AddParam(command, "@pid", projectId);
+                    if (hasOperatorFilter)
+                    {
+                        PythonBridgeDbTool.AddParam(command, "@operator", normalizedOperator!);
+                    }
+                    PythonBridgeDbTool.AddParam(command, "@lim", limit);
+                    PythonBridgeDbTool.AddParam(command, "@off", offset);
 
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            var rows = await PythonBridgeDbTool.ReadRowsAsync(reader, cancellationToken);
-            return (limit, offset, rows);
+                    await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                    return await PythonBridgeDbTool.ReadRowsAsync(reader, cancellationToken);
+                },
+                cancellationToken);
         }
 
         public async Task<int> SavePredictionDataAsync(

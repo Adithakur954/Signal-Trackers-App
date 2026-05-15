@@ -33,9 +33,26 @@ internal class Program
         var configuredPath = builder.Configuration["DataProtection:KeysPath"]
                              ?? Environment.GetEnvironmentVariable("DATAPROTECTION_KEYS_PATH");
 
-        if (string.IsNullOrWhiteSpace(configuredPath))
+        if (!string.IsNullOrWhiteSpace(configuredPath))
         {
-            configuredPath = Path.Combine(builder.Environment.ContentRootPath, "App_Data", "DataProtectionKeys");
+            // Expands environment variables like %LOCALAPPDATA% to avoid literal relative path bugs in IIS
+            configuredPath = Environment.ExpandEnvironmentVariables(configuredPath);
+        }
+        else
+        {
+            if (builder.Environment.IsDevelopment())
+            {
+                configuredPath = Path.Combine(builder.Environment.ContentRootPath, "App_Data", "DataProtectionKeys");
+            }
+            else
+            {
+                // Fallback specifically for production environment running on IIS
+                configuredPath = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), 
+                    "SignalTracker", 
+                    "DataProtectionKeys"
+                );
+            }
         }
 
         return Path.IsPathRooted(configuredPath)
@@ -98,8 +115,6 @@ internal class Program
         // ----------------------------------------------------
         // CONTROLLERS & JSON
         // ----------------------------------------------------
-
-        // Add this line to Program.cs
         builder.Services.AddScoped<UserScopeService>();
         builder.Services.AddScoped<LicenseFeatureService>();
         builder.Services.AddScoped<PythonBridgeService>();
@@ -111,7 +126,6 @@ internal class Program
         {
             builder.Services.AddHostedService<UserDeletionCleanupService>();
         }
-
 
         builder.Services.AddHttpContextAccessor();
         builder.Services.AddMemoryCache();
@@ -139,29 +153,20 @@ internal class Program
         });
 
         // ----------------------------------------------------
-       // ----------------------------------------------------
-        // DATABASE (DYNAMIC SELECTION) - UPDATED SECTION
+        // DATABASE (DYNAMIC SELECTION)
         // ----------------------------------------------------
-        // 1. Register the provider that chooses the connection string based on the user
-        ;
-       
-// Ensure there are no ++ or -- symbols at the end of these lines.
-builder.Services.AddScoped<IDbConnectionProvider, DbConnectionProvider>();
+        builder.Services.AddScoped<IDbConnectionProvider, DbConnectionProvider>();
 
+        builder.Services.AddDbContext<ApplicationDbContext>((sp, options) =>
+        {
+            var connectionProvider = sp.GetRequiredService<IDbConnectionProvider>();
+            var connectionString = connectionProvider.GetConnectionString();
+            var serverVersion = new MySqlServerVersion(new Version(8, 0, 29));
 
-// Register DbContext without passing options here; 
-// it will configure itself in its OnConfiguring method.
-builder.Services.AddDbContext<ApplicationDbContext>((sp, options) =>
-{
-    var connectionProvider = sp.GetRequiredService<IDbConnectionProvider>();
-    var connectionString = connectionProvider.GetConnectionString();
-    var serverVersion = new MySqlServerVersion(new Version(8, 0, 29));
+            options.UseMySql(connectionString, serverVersion);
+        });
 
-    options.UseMySql(connectionString, serverVersion);
-});
-
-Console.WriteLine("✅ Dynamic Database Provider configured");
-        
+        Console.WriteLine("✅ Dynamic Database Provider configured");
 
         // ----------------------------------------------------
         // DATA PROTECTION
@@ -201,7 +206,7 @@ Console.WriteLine("✅ Dynamic Database Provider configured");
                 redisOptions.ConfigCheckSeconds = 15;
                 redisOptions.ReconnectRetryPolicy = new ExponentialRetry(2000);
  
-                builder.Services.AddSingleton<IConnectionMultiplexer>(_ =>
+                builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>
                 {
                     var mux = ConnectionMultiplexer.Connect(redisOptions);
 
@@ -346,7 +351,6 @@ Console.WriteLine("✅ Dynamic Database Provider configured");
             app.UseHsts();
         }
 
-        // Forwarded headers must be applied before HTTPS redirection when running behind a proxy.
         app.UseForwardedHeaders();
         if (!app.Environment.IsDevelopment() || httpsRedirectionPort.HasValue)
         {
@@ -398,7 +402,7 @@ Console.WriteLine("✅ Dynamic Database Provider configured");
         // ----------------------------------------------------
         app.MapControllers();
 
-        Console.WriteLine("🚀 Application started successfully");
+        Console.WriteLine(" Application started successfully");
         app.Run();
     }
 }
