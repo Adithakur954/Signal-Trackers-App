@@ -2232,13 +2232,6 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
 
         // 1. Prepare Cache Key
         string providerNormalized = null;
-        if (!string.IsNullOrEmpty(filters.NetworkType) && !filters.NetworkType.Equals("ALL", StringComparison.OrdinalIgnoreCase))
-        {
-            string p = filters.NetworkType.ToLower().Trim();
-            if (p.StartsWith("j")) providerNormalized = "jio";
-            else if (p.StartsWith("a")) providerNormalized = "airtel";
-            else if (p.StartsWith("v")) providerNormalized = "vodafone";
-        }
 
         string cacheKey = BuildNetworkLogCacheKey(
             sessionIds,
@@ -2782,22 +2775,6 @@ private (string Clause, Dictionary<string, object> Params) BuildSqlWhere(
     }
     
     clauses.Add("primary_cell_info_1 LIKE '%mRegistered=YES%'");
-
-    // --- network type filter (4G/5G/etc) ---
-    if (!string.IsNullOrWhiteSpace(filters?.NetworkType) &&
-        !filters.NetworkType.Equals("All", StringComparison.OrdinalIgnoreCase))
-    {
-        var nt = filters.NetworkType.Trim();
-        if (nt.Equals("5G", StringComparison.OrdinalIgnoreCase) ||
-            nt.Equals("4G", StringComparison.OrdinalIgnoreCase) ||
-            nt.Equals("3G", StringComparison.OrdinalIgnoreCase) ||
-            nt.Equals("2G", StringComparison.OrdinalIgnoreCase))
-        {
-            string pname = "@netPattern";
-            clauses.Add("network LIKE " + pname);
-            p.Add(pname, $"%{nt}%");
-        }
-    }
 
     return (string.Join(" AND ", clauses), p);
 }
