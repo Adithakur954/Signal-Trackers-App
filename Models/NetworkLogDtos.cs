@@ -16,6 +16,7 @@ namespace SignalTracker.Models
         public double? lat { get; set; }
         public double? lon { get; set; }
         public DateTime? timestamp { get; set; }
+        public double? rssi { get; set; }
         public double? rsrp { get; set; }
         public double? rsrq { get; set; }
         public double? sinr { get; set; }

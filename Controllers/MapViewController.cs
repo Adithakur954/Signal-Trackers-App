@@ -1100,6 +1100,38 @@ public class ProjectPolygonItem
             return SavePolygon(model);
         }
 
+        private static async Task EnsureMapRegionsSessionIdCapacityAsync(DbConnection conn)
+        {
+            await using var inspect = conn.CreateCommand();
+            inspect.CommandText = @"
+                SELECT DATA_TYPE, COALESCE(CHARACTER_MAXIMUM_LENGTH, 0)
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = 'map_regions'
+                  AND COLUMN_NAME = 'session_id'
+                LIMIT 1;";
+
+            string dataType = "";
+            long maxLength = 0;
+            await using (var reader = await inspect.ExecuteReaderAsync())
+            {
+                if (await reader.ReadAsync())
+                {
+                    dataType = Convert.ToString(reader.GetValue(0))?.ToLowerInvariant() ?? "";
+                    maxLength = Convert.ToInt64(reader.GetValue(1));
+                }
+            }
+
+            if (dataType is "text" or "mediumtext" or "longtext" || maxLength >= 1024)
+            {
+                return;
+            }
+
+            await using var alter = conn.CreateCommand();
+            alter.CommandText = "ALTER TABLE map_regions MODIFY COLUMN session_id VARCHAR(1024) NULL;";
+            await alter.ExecuteNonQueryAsync();
+        }
+
         [HttpPost("SavePolygon")]
         public async Task<JsonResult> SavePolygon([FromBody] SavePolygonModel model)
         {
@@ -1130,6 +1162,8 @@ public class ProjectPolygonItem
 
                 var conn = db.Database.GetDbConnection();
                 if (conn.State != ConnectionState.Open) await conn.OpenAsync();
+
+                await EnsureMapRegionsSessionIdCapacityAsync(conn);
 
                 var mapRegionColumns = await GetTableColumnSetAsync(conn, "map_regions");
                 var hasCreatedByUserId = mapRegionColumns.Contains("created_by_user_id");
@@ -2402,6 +2436,7 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyEF(
             network = log.network ?? "",
             m_alpha_long = log.m_alpha_long ?? "",
             pci = log.pci ?? "",
+            rssi = log.rssi,
             rsrp = log.rsrp,
             rsrq = log.rsrq,
             sinr = log.sinr,
@@ -2434,7 +2469,7 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
     string sql = $@"
         SELECT
             id, session_id, timestamp, lat, lon, battery, Speed, level, apps, num_cells,
-            network, m_alpha_long, pci, rsrp, rsrq, sinr, mos, jitter, latency, tac,
+            network, m_alpha_long, pci, rssi, rsrp, rsrq, sinr, mos, jitter, latency, tac,
             packet_loss, dl_tpt, ul_tpt, band, image_path, indoor_outdoor, nodeb_id, cell_id
         FROM tbl_network_log
         WHERE {whereClause}
@@ -2462,21 +2497,22 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
             network = rd.IsDBNull(10) ? "" : rd.GetString(10),
             m_alpha_long = rd.IsDBNull(11) ? "" : rd.GetString(11),
             pci = rd.IsDBNull(12) ? "" : rd.GetString(12),
-            rsrp = rd.IsDBNull(13) ? (float?)null : rd.GetFloat(13),
-            rsrq = rd.IsDBNull(14) ? (float?)null : rd.GetFloat(14),
-            sinr = rd.IsDBNull(15) ? (float?)null : rd.GetFloat(15),
-            mos = rd.IsDBNull(16) ? (float?)null : rd.GetFloat(16),
-            jitter = rd.IsDBNull(17) ? (float?)null : rd.GetFloat(17),
-            latency = rd.IsDBNull(18) ? (float?)null : rd.GetFloat(18),
-            tac = rd.IsDBNull(19) ? "" : Convert.ToString(rd.GetValue(19), CultureInfo.InvariantCulture) ?? "",
-            packet_loss = rd.IsDBNull(20) ? (float?)null : rd.GetFloat(20),
-            dl_tpt = rd.IsDBNull(21) ? "0" : Convert.ToString(rd.GetValue(21), CultureInfo.InvariantCulture) ?? "0",
-            ul_tpt = rd.IsDBNull(22) ? "0" : Convert.ToString(rd.GetValue(22), CultureInfo.InvariantCulture) ?? "0",
-            band = rd.IsDBNull(23) ? "" : rd.GetString(23),
-            image_path = rd.IsDBNull(24) ? "" : rd.GetString(24),
-            indoor_outdoor = rd.IsDBNull(25) ? "" : rd.GetString(25),
-            nodeb_id = rd.IsDBNull(26) ? "" : rd.GetString(26),
-            cell_id = rd.IsDBNull(27) ? "" : rd.GetString(27)
+            rssi = rd.IsDBNull(13) ? (float?)null : rd.GetFloat(13),
+            rsrp = rd.IsDBNull(14) ? (float?)null : rd.GetFloat(14),
+            rsrq = rd.IsDBNull(15) ? (float?)null : rd.GetFloat(15),
+            sinr = rd.IsDBNull(16) ? (float?)null : rd.GetFloat(16),
+            mos = rd.IsDBNull(17) ? (float?)null : rd.GetFloat(17),
+            jitter = rd.IsDBNull(18) ? (float?)null : rd.GetFloat(18),
+            latency = rd.IsDBNull(19) ? (float?)null : rd.GetFloat(19),
+            tac = rd.IsDBNull(20) ? "" : Convert.ToString(rd.GetValue(20), CultureInfo.InvariantCulture) ?? "",
+            packet_loss = rd.IsDBNull(21) ? (float?)null : rd.GetFloat(21),
+            dl_tpt = rd.IsDBNull(22) ? "0" : Convert.ToString(rd.GetValue(22), CultureInfo.InvariantCulture) ?? "0",
+            ul_tpt = rd.IsDBNull(23) ? "0" : Convert.ToString(rd.GetValue(23), CultureInfo.InvariantCulture) ?? "0",
+            band = rd.IsDBNull(24) ? "" : rd.GetString(24),
+            image_path = rd.IsDBNull(25) ? "" : rd.GetString(25),
+            indoor_outdoor = rd.IsDBNull(26) ? "" : rd.GetString(26),
+            nodeb_id = rd.IsDBNull(27) ? "" : rd.GetString(27),
+            cell_id = rd.IsDBNull(28) ? "" : rd.GetString(28)
         });
     }
 
@@ -2841,6 +2877,7 @@ public class NetworkLogCacheRow
     public string network { get; set; } = "";
     public string m_alpha_long { get; set; } = "";
     public string pci { get; set; } = "";
+    public float? rssi { get; set; }
     public float? rsrp { get; set; }
     public float? rsrq { get; set; }
     public float? sinr { get; set; }
