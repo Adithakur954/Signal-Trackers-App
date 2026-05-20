@@ -8431,6 +8431,12 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             public int Scenario { get; set; }
         }
 
+        public class DeleteLtePredictionOptimisedScenarioRequest
+        {
+            public long ProjectId { get; set; }
+            public long ScenarioId { get; set; }
+        }
+
         [HttpPost, Route("DeleteSitePredictionScenario")]
         public async Task<IActionResult> DeleteSitePredictionScenario([FromBody] DeleteSitePredictionScenarioRequest? model)
         {
@@ -8490,6 +8496,69 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 {
                     Status = 0,
                     Message = "Error deleting site prediction scenario.",
+                    Details = ex.Message
+                });
+            }
+        }
+
+        [HttpPost, Route("DeleteLtePredictionOptimisedScenario")]
+        public async Task<IActionResult> DeleteLtePredictionOptimisedScenario([FromBody] DeleteLtePredictionOptimisedScenarioRequest? model)
+        {
+            if (model == null)
+                return BadRequest(new { Status = 0, Message = "Invalid payload." });
+
+            if (model.ProjectId <= 0)
+                return BadRequest(new { Status = 0, Message = "ProjectId is required." });
+
+            if (model.ScenarioId <= 0 || model.ScenarioId > 6)
+            {
+                return BadRequest(new
+                {
+                    Status = 0,
+                    Message = "scenario_id must be between 1 and 6"
+                });
+            }
+
+            try
+            {
+                var conn = db.Database.GetDbConnection();
+                if (conn.State != ConnectionState.Open)
+                    await conn.OpenAsync();
+
+                await using var tx = await conn.BeginTransactionAsync();
+                await using var deleteCmd = conn.CreateCommand();
+                deleteCmd.Transaction = tx;
+                deleteCmd.CommandText = @"
+                    DELETE FROM lte_prediction_optimised_results
+                    WHERE project_id = @pid
+                      AND scenario_id = @scenarioId;";
+                Add(deleteCmd, "@pid", model.ProjectId);
+                Add(deleteCmd, "@scenarioId", model.ScenarioId);
+
+                var deletedRows = await deleteCmd.ExecuteNonQueryAsync();
+                await tx.CommitAsync();
+                await InvalidateMapViewCachesAsync();
+
+                return Ok(new
+                {
+                    Status = 1,
+                    Message = deletedRows > 0
+                        ? $"LTE optimized Scenario {model.ScenarioId} deleted successfully."
+                        : $"No LTE optimized rows found for Scenario {model.ScenarioId}.",
+                    ProjectId = model.ProjectId,
+                    ScenarioId = model.ScenarioId,
+                    ScenarioName = $"Scenario {model.ScenarioId}",
+                    RowsAffected = deletedRows,
+                    DeletedOptimisedRows = deletedRows,
+                    Table = "lte_prediction_optimised_results"
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new
+                {
+                    Status = 0,
+                    Message = "Error deleting LTE optimized scenario.",
                     Details = ex.Message
                 });
             }
