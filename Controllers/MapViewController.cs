@@ -6778,6 +6778,8 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 await createCmd.ExecuteNonQueryAsync();
             }
 
+            await EnsureSitePredictionOptimizedScenarioColumnAsync(conn);
+
             var requiredColumns = new (string Name, string Definition)[]
             {
                 ("site_prediction_id", "INT NULL"),
@@ -6808,7 +6810,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 }
 
                 await using var alterCmd = conn.CreateCommand();
-                alterCmd.CommandText = $"ALTER TABLE site_prediction_optimized ADD COLUMN {column.Name} {column.Definition};";
+                alterCmd.CommandText = $"ALTER TABLE `site_prediction_optimized` ADD COLUMN `{column.Name}` {column.Definition};";
                 await alterCmd.ExecuteNonQueryAsync();
             }
 
@@ -6825,9 +6827,30 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                     FROM site_prediction_optimized dup
                     INNER JOIN site_prediction_optimized keep
                         ON keep.site_prediction_id = dup.site_prediction_id
+                       AND keep.scenario = dup.scenario
                        AND keep.id > dup.id
                     WHERE dup.site_prediction_id IS NOT NULL;";
                 await dedupeCmd.ExecuteNonQueryAsync();
+            }
+
+            await using (var oldUniqueExistsCmd = conn.CreateCommand())
+            {
+                oldUniqueExistsCmd.CommandText = @"
+                    SELECT COUNT(*)
+                    FROM INFORMATION_SCHEMA.STATISTICS
+                    WHERE TABLE_SCHEMA = DATABASE()
+                      AND TABLE_NAME = 'site_prediction_optimized'
+                      AND INDEX_NAME = 'uq_spo_site_prediction_id';";
+                var oldUniqueExistsObj = await oldUniqueExistsCmd.ExecuteScalarAsync();
+                var oldUniqueExists = oldUniqueExistsObj != null &&
+                                      oldUniqueExistsObj != DBNull.Value &&
+                                      Convert.ToInt32(oldUniqueExistsObj) > 0;
+                if (oldUniqueExists)
+                {
+                    await using var dropOldUniqueCmd = conn.CreateCommand();
+                    dropOldUniqueCmd.CommandText = "ALTER TABLE site_prediction_optimized DROP INDEX uq_spo_site_prediction_id;";
+                    await dropOldUniqueCmd.ExecuteNonQueryAsync();
+                }
             }
 
             await using (var uniqueExistsCmd = conn.CreateCommand())
@@ -6837,7 +6860,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                     FROM INFORMATION_SCHEMA.STATISTICS
                     WHERE TABLE_SCHEMA = DATABASE()
                       AND TABLE_NAME = 'site_prediction_optimized'
-                      AND INDEX_NAME = 'uq_spo_site_prediction_id';";
+                      AND INDEX_NAME = 'uq_spo_site_prediction_scenario';";
                 var uniqueExistsObj = await uniqueExistsCmd.ExecuteScalarAsync();
                 var uniqueExists = uniqueExistsObj != null &&
                                    uniqueExistsObj != DBNull.Value &&
@@ -6846,9 +6869,70 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 {
                     await using var addUniqueCmd = conn.CreateCommand();
                     addUniqueCmd.CommandText =
-                        "ALTER TABLE site_prediction_optimized ADD UNIQUE INDEX uq_spo_site_prediction_id (site_prediction_id);";
+                        "ALTER TABLE site_prediction_optimized ADD UNIQUE INDEX uq_spo_site_prediction_scenario (site_prediction_id, scenario);";
                     await addUniqueCmd.ExecuteNonQueryAsync();
                 }
+            }
+        }
+
+        private async Task<bool> EnsureSitePredictionOptimizedScenarioColumnAsync(DbConnection conn)
+        {
+            await using (var createCmd = conn.CreateCommand())
+            {
+                createCmd.CommandText = "CREATE TABLE IF NOT EXISTS `site_prediction_optimized` LIKE `site_prediction`;";
+                await createCmd.ExecuteNonQueryAsync();
+            }
+
+            await using var existsCmd = conn.CreateCommand();
+            existsCmd.CommandText = @"
+                SELECT COUNT(*)
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = 'site_prediction_optimized'
+                  AND COLUMN_NAME = 'scenario';";
+
+            var existsObj = await existsCmd.ExecuteScalarAsync();
+            var exists = existsObj != null && existsObj != DBNull.Value && Convert.ToInt32(existsObj) > 0;
+            if (exists)
+                return false;
+
+            await using var alterCmd = conn.CreateCommand();
+            alterCmd.CommandText = @"
+                ALTER TABLE `site_prediction_optimized`
+                ADD COLUMN `scenario` INT NOT NULL DEFAULT 1 AFTER `site_prediction_id`;";
+            await alterCmd.ExecuteNonQueryAsync();
+            return true;
+        }
+
+        [HttpPost, Route("EnsureSitePredictionOptimizedScenarioColumn")]
+        public async Task<IActionResult> EnsureSitePredictionOptimizedScenarioColumn()
+        {
+            try
+            {
+                var conn = db.Database.GetDbConnection();
+                if (conn.State != ConnectionState.Open)
+                    await conn.OpenAsync();
+
+                var created = await EnsureSitePredictionOptimizedScenarioColumnAsync(conn);
+                return Ok(new
+                {
+                    Status = 1,
+                    Message = created
+                        ? "scenario column created in site_prediction_optimized."
+                        : "scenario column already exists in site_prediction_optimized.",
+                    Table = "site_prediction_optimized",
+                    Column = "scenario",
+                    Created = created
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new
+                {
+                    Status = 0,
+                    Message = "Error creating scenario column in site_prediction_optimized.",
+                    Details = ex.Message
+                });
             }
         }
 
@@ -6873,6 +6957,125 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 }
             }
             return columns;
+        }
+
+        private async Task<long?> ResolveSitePredictionProjectIdAsync(
+            DbConnection conn,
+            DbTransaction? tx,
+            IReadOnlyList<Newtonsoft.Json.Linq.JObject> items)
+        {
+            var explicitProjectIds = new HashSet<long>();
+            foreach (var item in items)
+            {
+                if (TryGetLongToken(item, "project_id", out var projectId) ||
+                    TryGetLongToken(item, "projectId", out projectId))
+                {
+                    if (projectId > 0)
+                        explicitProjectIds.Add(projectId);
+                }
+            }
+
+            if (explicitProjectIds.Count == 1)
+                return explicitProjectIds.First();
+            if (explicitProjectIds.Count > 1)
+                throw new InvalidOperationException("All rows in one scenario must belong to the same project.");
+
+            foreach (var item in items)
+            {
+                long sourceId = 0;
+                if (TryGetLongToken(item, "source_id", out var explicitSourceId))
+                {
+                    sourceId = explicitSourceId;
+                }
+                else if (TryGetLongToken(item, "id", out var idValue))
+                {
+                    sourceId = idValue;
+                }
+
+                if (sourceId <= 0)
+                    continue;
+
+                await using var cmd = conn.CreateCommand();
+                cmd.Transaction = tx;
+                cmd.CommandText = "SELECT tbl_project_id FROM site_prediction WHERE id = @id LIMIT 1;";
+                Add(cmd, "@id", sourceId);
+                var obj = await cmd.ExecuteScalarAsync();
+                if (obj != null &&
+                    obj != DBNull.Value &&
+                    long.TryParse(Convert.ToString(obj, CultureInfo.InvariantCulture), out var projectId) &&
+                    projectId > 0)
+                {
+                    return projectId;
+                }
+            }
+
+            return null;
+        }
+
+        private async Task<int> ResolveSitePredictionScenarioAsync(
+            DbConnection conn,
+            DbTransaction tx,
+            long projectId,
+            IReadOnlyList<Newtonsoft.Json.Linq.JObject> items)
+        {
+            int requestedScenario = 0;
+            foreach (var item in items)
+            {
+                if (TryGetIntToken(item, "scenario", out var scenario) ||
+                    TryGetIntToken(item, "scenario_id", out scenario))
+                {
+                    if (scenario <= 0 || scenario > 6)
+                        throw new InvalidOperationException("Scenario must be between 1 and 6.");
+
+                    if (requestedScenario > 0 && requestedScenario != scenario)
+                        throw new InvalidOperationException("All rows in one request must use the same scenario.");
+
+                    requestedScenario = scenario;
+                }
+            }
+
+            if (requestedScenario > 0)
+                return requestedScenario;
+
+            await using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = @"
+                SELECT DISTINCT scenario
+                FROM site_prediction_optimized
+                WHERE tbl_project_id = @pid
+                  AND scenario BETWEEN 1 AND 6
+                ORDER BY scenario;";
+            Add(cmd, "@pid", projectId);
+
+            var used = new HashSet<int>();
+            await using var reader = await cmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                if (!reader.IsDBNull(0))
+                    used.Add(Convert.ToInt32(reader.GetValue(0)));
+            }
+
+            for (var scenario = 1; scenario <= 6; scenario++)
+            {
+                if (!used.Contains(scenario))
+                    return scenario;
+            }
+
+            throw new InvalidOperationException("please delete one scenario because u can make only 6 scenarios");
+        }
+
+        private static bool TryGetLongToken(Newtonsoft.Json.Linq.JObject item, string key, out long value)
+        {
+            value = 0;
+            return item.TryGetValue(key, StringComparison.OrdinalIgnoreCase, out var token) &&
+                   long.TryParse(token?.ToString(), out value);
+        }
+
+        private static bool TryGetIntToken(Newtonsoft.Json.Linq.JObject item, string key, out int value)
+        {
+            value = 0;
+            return item.TryGetValue(key, StringComparison.OrdinalIgnoreCase, out var token) &&
+                   int.TryParse(token?.ToString(), out value);
         }
 
         private string ResolveSitePredictionUpdatedBy()
@@ -6911,9 +7114,10 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             [FromQuery] int? band = null,
             [FromQuery] int? pci = null,
             [FromQuery] int limit = 200,
-            [FromQuery] int offset = 0)
+            [FromQuery] int offset = 0,
+            [FromQuery] int? scenario = null)
         {
-            return GetSitePrediction(projectId, site, cell_id, cluster, technology, band, pci, limit, offset, "combined");
+            return GetSitePrediction(projectId, site, cell_id, cluster, technology, band, pci, limit, offset, "combined", 0, scenario);
         }
 
         [HttpGet, Route("GetSitePrediction")]
@@ -6928,7 +7132,8 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             [FromQuery] int limit = 5000,
             [FromQuery] int offset = 0,
             [FromQuery] string version = "combined",
-            [FromQuery] int simple = 0)
+            [FromQuery] int simple = 0,
+            [FromQuery] int? scenario = null)
         {
             if (projectId <= 0)
                 return BadRequest(new { Status = 0, Message = "projectId is required" });
@@ -6951,6 +7156,20 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             if (requestedVersion == "combined")
             {
                 await EnsureSitePredictionOptimizedTableAsync(conn);
+            }
+
+            if (scenario.HasValue && scenario.Value > 6)
+            {
+                return BadRequest(new
+                {
+                    Status = 0,
+                    Message = "you have to delete one scenario because there is a limit you only 6 scenarios"
+                });
+            }
+
+            if (scenario.HasValue && scenario.Value <= 0)
+            {
+                return BadRequest(new { Status = 0, Message = "scenario must be between 1 and 6" });
             }
 
             await using var cmd = conn.CreateCommand();
@@ -6996,6 +7215,82 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 ? await GetTableColumnSetAsync(conn, "site_prediction_optimized")
                 : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+            int? activeScenario = null;
+            var hasScenarioData = false;
+            var hasAnyScenarioData = false;
+            if (requestedVersion == "combined" && optimizedColumns.Contains("scenario"))
+            {
+                if (scenario.HasValue)
+                {
+                    activeScenario = scenario.Value;
+                    await using (var anyScenarioCmd = conn.CreateCommand())
+                    {
+                        anyScenarioCmd.CommandText = @"
+                            SELECT COUNT(1)
+                            FROM site_prediction_optimized
+                            WHERE tbl_project_id = @pid
+                              AND scenario BETWEEN 1 AND 6;";
+                        Add(anyScenarioCmd, "@pid", projectId);
+                        hasAnyScenarioData = Convert.ToInt32(await anyScenarioCmd.ExecuteScalarAsync() ?? 0) > 0;
+                    }
+
+                    await using (var existsScenarioCmd = conn.CreateCommand())
+                    {
+                        existsScenarioCmd.CommandText = @"
+                            SELECT COUNT(1)
+                            FROM site_prediction_optimized
+                            WHERE tbl_project_id = @pid
+                              AND scenario = @scenario;";
+                        Add(existsScenarioCmd, "@pid", projectId);
+                        Add(existsScenarioCmd, "@scenario", activeScenario.Value);
+                        hasScenarioData = Convert.ToInt32(await existsScenarioCmd.ExecuteScalarAsync() ?? 0) > 0;
+                    }
+                }
+                else
+                {
+                    await using var scenarioCmd = conn.CreateCommand();
+                    scenarioCmd.CommandText = @"
+                        SELECT scenario
+                        FROM site_prediction_optimized
+                        WHERE tbl_project_id = @pid
+                          AND scenario BETWEEN 1 AND 6
+                        GROUP BY scenario
+                        ORDER BY scenario
+                        LIMIT 1;";
+                    Add(scenarioCmd, "@pid", projectId);
+                    var scenarioObj = await scenarioCmd.ExecuteScalarAsync();
+                    if (scenarioObj != null && scenarioObj != DBNull.Value)
+                    {
+                        activeScenario = Convert.ToInt32(scenarioObj);
+                        hasScenarioData = true;
+                        hasAnyScenarioData = true;
+                    }
+                }
+            }
+
+            if (scenario.HasValue && hasAnyScenarioData && !hasScenarioData)
+            {
+                return Json(new
+                {
+                    Status = 1,
+                    Version = requestedVersion,
+                    Scenario = activeScenario,
+                    ScenarioName = $"Scenario {activeScenario}",
+                    Message = $"Scenario {activeScenario} has no data.",
+                    Count = 0,
+                    TotalCount = 0,
+                    Data = Array.Empty<object>()
+                });
+            }
+
+            var scenarioFilterClause = hasScenarioData && activeScenario.HasValue
+                ? "AND spo.scenario = @scenario"
+                : string.Empty;
+            var optimizedHasScenarioSelect = optimizedColumns.Contains("scenario") ? "spo.scenario" : "NULL";
+            var scenarioSelectExpr = requestedVersion == "combined"
+                ? $"{optimizedHasScenarioSelect} AS scenario,"
+                : "NULL AS scenario,";
+
             static string ResolveTxPowerExpr(string alias, HashSet<string> columns)
             {
                 if (columns.Contains("tx_power"))
@@ -7018,6 +7313,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                         CONVERT(spo.site USING utf8mb4) COLLATE utf8mb4_unicode_ci AS site
                     FROM site_prediction_optimized spo
                     WHERE spo.tbl_project_id = @pid
+                      {scenarioFilterClause}
                       AND spo.site IS NOT NULL
                       AND TRIM(CONVERT(spo.site USING utf8mb4)) <> ''
                 ),
@@ -7031,6 +7327,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                         created_at,
                         updated_at,
                         updated_by,
+                        scenario,
                         site,
                         site_name,
                         sector,
@@ -7071,6 +7368,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                         spo.created_at,
                         spo.updated_at,
                         CONVERT(spo.updated_by USING utf8mb4) COLLATE utf8mb4_unicode_ci AS updated_by,
+                        {scenarioSelectExpr}
                         CONVERT(COALESCE(spo.site, sp.site) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS site,
                         CONVERT(COALESCE(spo.site_name, sp.site_name) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS site_name,
                         CONVERT(COALESCE(spo.sector, sp.sector) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS sector,
@@ -7113,6 +7411,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                     LEFT JOIN site_prediction sp ON sp.id = spo.site_prediction_id
                     LEFT JOIN tbl_project p ON p.id = COALESCE(spo.tbl_project_id, sp.tbl_project_id)
                     WHERE COALESCE(spo.tbl_project_id, sp.tbl_project_id) = @pid
+                    {scenarioFilterClause}
                     {filterClause}
                     ) ranked_optimized
                     WHERE rn = 1
@@ -7127,6 +7426,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                         NULL AS created_at,
                         NULL AS updated_at,
                         NULL AS updated_by,
+                        NULL AS scenario,
                         CONVERT(sp.site USING utf8mb4) COLLATE utf8mb4_unicode_ci AS site,
                         CONVERT(sp.site_name USING utf8mb4) COLLATE utf8mb4_unicode_ci AS site_name,
                         CONVERT(sp.sector USING utf8mb4) COLLATE utf8mb4_unicode_ci AS sector,
@@ -7186,6 +7486,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                     NULL AS created_at,
                     NULL AS updated_at,
                     NULL AS updated_by,
+                    NULL AS scenario,
                     sp.site,
                     sp.site_name,
                     sp.sector,
@@ -7223,6 +7524,10 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 ORDER BY sp.id DESC;";
 
             Add(cmd, "@pid", projectId);
+            if (hasScenarioData && activeScenario.HasValue)
+            {
+                Add(cmd, "@scenario", activeScenario.Value);
+            }
             AddSitePredictionFilterParameters(cmd, site, cell_id, cluster, technology, band, pci);
 
             var list = new List<Dictionary<string, object?>>();
@@ -7249,6 +7554,9 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             {
                 Status = 1,
                 Version = requestedVersion,
+                Scenario = activeScenario,
+                ScenarioName = activeScenario.HasValue ? $"Scenario {activeScenario.Value}" : null,
+                ScenarioMode = hasScenarioData ? "scenario" : "full_project",
                 Count = resultRows.Count,
                 TotalCount = list.Count,
                 Data = resultRows
@@ -7302,6 +7610,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             {
                 id = ReadInt(row, "original_id", "id"),
                 optimizedId = ReadInt(row, "optimized_id"),
+                scenario = ReadInt(row, "scenario"),
                 isUpdated = ReadInt(row, "is_updated") ?? 0,
                 status = ReadString(row, "status") ?? "original",
                 version = ReadInt(row, "version") ?? 0,
@@ -7545,6 +7854,8 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 {
                     "id",
                     "site_prediction_id",
+                    "scenario",
+                    "scenario_id",
                     "is_updated",
                     "version",
                     "status",
@@ -7575,6 +7886,18 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 var updatedBy = ResolveSitePredictionUpdatedBy();
 
                 await using var tx = await conn.BeginTransactionAsync();
+                var scenarioProjectId = await ResolveSitePredictionProjectIdAsync(conn, tx, items);
+                if (!scenarioProjectId.HasValue || scenarioProjectId.Value <= 0)
+                {
+                    await tx.RollbackAsync();
+                    return BadRequest(new
+                    {
+                        Status = 0,
+                        Message = "project_id is required to save an optimized scenario."
+                    });
+                }
+
+                var scenario = await ResolveSitePredictionScenarioAsync(conn, tx, scenarioProjectId.Value, items);
 
                 var itemIndex = 0;
                 foreach (var item in items)
@@ -7681,6 +8004,8 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                         if (key.Equals("source_id", StringComparison.OrdinalIgnoreCase)) continue;
                         if (key.Equals("project_id", StringComparison.OrdinalIgnoreCase)) continue;
                         if (key.Equals("projectId", StringComparison.OrdinalIgnoreCase)) continue;
+                        if (key.Equals("scenario", StringComparison.OrdinalIgnoreCase)) continue;
+                        if (key.Equals("scenario_id", StringComparison.OrdinalIgnoreCase)) continue;
                         if (key.Equals("move_entire_site", StringComparison.OrdinalIgnoreCase)) continue;
                         if (key.Equals("site_id_selector", StringComparison.OrdinalIgnoreCase)) continue;
                         if (key.Equals("site_selector", StringComparison.OrdinalIgnoreCase)) continue;
@@ -7722,6 +8047,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                             ? $@"
                                 INSERT INTO site_prediction_optimized (
                                     site_prediction_id,
+                                    scenario,
                                     {insertColumnList},
                                     is_updated,
                                     version,
@@ -7732,6 +8058,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                                 )
                                 SELECT
                                     sp.id,
+                                    @scenario,
                                     {selectColumnList},
                                     1,
                                     0,
@@ -7741,15 +8068,18 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                                     @updatedBy
                                 FROM site_prediction sp
                                 WHERE sp.id = @sourceId
+                                  AND sp.tbl_project_id = @scenarioProjectId
                                   AND NOT EXISTS (
                                       SELECT 1
                                       FROM site_prediction_optimized spo
                                       WHERE spo.site_prediction_id = sp.id
+                                        AND spo.scenario = @scenario
                                   );"
                             : hasWholeSiteSelector
                                 ? $@"
                                 INSERT INTO site_prediction_optimized (
                                     site_prediction_id,
+                                    scenario,
                                     {insertColumnList},
                                     is_updated,
                                     version,
@@ -7760,6 +8090,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                                 )
                                 SELECT
                                     sp.id,
+                                    @scenario,
                                     {selectColumnList},
                                     1,
                                     0,
@@ -7769,15 +8100,18 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                                     @updatedBy
                                 FROM site_prediction sp
                                 WHERE CONVERT(sp.site USING utf8mb4) COLLATE utf8mb4_unicode_ci = @targetSiteText
+                                  AND sp.tbl_project_id = @scenarioProjectId
                                   AND NOT EXISTS (
                                       SELECT 1
                                       FROM site_prediction_optimized spo
                                       WHERE spo.site_prediction_id = sp.id
+                                        AND spo.scenario = @scenario
                                   );"
                             : hasSiteSectorSelector
                                 ? $@"
                                 INSERT INTO site_prediction_optimized (
                                     site_prediction_id,
+                                    scenario,
                                     {insertColumnList},
                                     is_updated,
                                     version,
@@ -7788,6 +8122,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                                 )
                                 SELECT
                                     sp.id,
+                                    @scenario,
                                     {selectColumnList},
                                     1,
                                     0,
@@ -7798,14 +8133,17 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                                 FROM site_prediction sp
                                 WHERE CONVERT(sp.site USING utf8mb4) COLLATE utf8mb4_unicode_ci = @targetSiteText
                                   AND CONVERT(sp.sector USING utf8mb4) COLLATE utf8mb4_unicode_ci = @targetSectorText
+                                  AND sp.tbl_project_id = @scenarioProjectId
                                   AND NOT EXISTS (
                                       SELECT 1
                                       FROM site_prediction_optimized spo
                                       WHERE spo.site_prediction_id = sp.id
+                                        AND spo.scenario = @scenario
                                   );"
                             : $@"
                                 INSERT INTO site_prediction_optimized (
                                     site_prediction_id,
+                                    scenario,
                                     {insertColumnList},
                                     is_updated,
                                     version,
@@ -7816,6 +8154,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                                 )
                                 SELECT
                                     sp.id,
+                                    @scenario,
                                     {selectColumnList},
                                     1,
                                     0,
@@ -7825,13 +8164,17 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                                     @updatedBy
                                 FROM site_prediction sp
                                 WHERE sp.site = @targetSite
+                                  AND sp.tbl_project_id = @scenarioProjectId
                                   AND NOT EXISTS (
                                       SELECT 1
                                       FROM site_prediction_optimized spo
                                       WHERE spo.site_prediction_id = sp.id
+                                        AND spo.scenario = @scenario
                                   );";
 
                         Add(seedCmd, "@updatedBy", updatedBy);
+                        Add(seedCmd, "@scenario", scenario);
+                        Add(seedCmd, "@scenarioProjectId", scenarioProjectId.Value);
                         if (sourceId.HasValue) Add(seedCmd, "@sourceId", sourceId.Value);
                         else if (hasWholeSiteSelector)
                         {
@@ -7855,7 +8198,9 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                                 spo.version = COALESCE(spo.version, 0) + 1,
                                 spo.updated_at = UTC_TIMESTAMP(),
                                 spo.updated_by = @updatedBy_{lookupId}
-                            WHERE spo.site_prediction_id = @sourceId_{lookupId};"
+                            WHERE spo.site_prediction_id = @sourceId_{lookupId}
+                              AND spo.scenario = @scenario_{lookupId}
+                              AND COALESCE(spo.tbl_project_id, 0) = @scenarioProjectId_{lookupId};"
                         : hasWholeSiteSelector
                             ? $@"
                             UPDATE site_prediction_optimized spo
@@ -7869,7 +8214,9 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                             WHERE (
                                     CONVERT(spo.site USING utf8mb4) COLLATE utf8mb4_unicode_ci = @targetSiteText_{lookupId}
                                     OR CONVERT(sp.site USING utf8mb4) COLLATE utf8mb4_unicode_ci = @targetSiteText_{lookupId}
-                                  );"
+                                  )
+                              AND spo.scenario = @scenario_{lookupId}
+                              AND COALESCE(spo.tbl_project_id, sp.tbl_project_id) = @scenarioProjectId_{lookupId};"
                         : hasSiteSectorSelector
                             ? $@"
                             UPDATE site_prediction_optimized spo
@@ -7889,7 +8236,9 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                                         CONVERT(sp.site USING utf8mb4) COLLATE utf8mb4_unicode_ci = @targetSiteText_{lookupId}
                                         AND CONVERT(sp.sector USING utf8mb4) COLLATE utf8mb4_unicode_ci = @targetSectorText_{lookupId}
                                     )
-                                  );"
+                                  )
+                              AND spo.scenario = @scenario_{lookupId}
+                              AND COALESCE(spo.tbl_project_id, sp.tbl_project_id) = @scenarioProjectId_{lookupId};"
                         : $@"
                             UPDATE site_prediction_optimized spo
                             LEFT JOIN site_prediction sp ON sp.id = spo.site_prediction_id
@@ -7899,13 +8248,19 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                                 spo.version = COALESCE(spo.version, 0) + 1,
                                 spo.updated_at = UTC_TIMESTAMP(),
                                 spo.updated_by = @updatedBy_{lookupId}
-                            WHERE spo.site = @targetSite_{lookupId}
-                               OR sp.site = @targetSite_{lookupId};";
+                            WHERE (
+                                    spo.site = @targetSite_{lookupId}
+                                    OR sp.site = @targetSite_{lookupId}
+                                  )
+                              AND spo.scenario = @scenario_{lookupId}
+                              AND COALESCE(spo.tbl_project_id, sp.tbl_project_id) = @scenarioProjectId_{lookupId};";
 
                     await using var cmd = conn.CreateCommand();
                     cmd.Transaction = tx;
                     cmd.CommandText = sql;
                     Add(cmd, $"@updatedBy_{lookupId}", updatedBy);
+                    Add(cmd, $"@scenario_{lookupId}", scenario);
+                    Add(cmd, $"@scenarioProjectId_{lookupId}", scenarioProjectId.Value);
                     if (sourceId.HasValue) Add(cmd, $"@sourceId_{lookupId}", sourceId.Value);
                     else if (hasWholeSiteSelector)
                     {
@@ -7936,6 +8291,8 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 {
                     Status = 1,
                     Message = $"Successfully updated {totalUpdated} prediction(s)",
+                    Scenario = scenario,
+                    ScenarioName = $"Scenario {scenario}",
                     RowsAffected = totalUpdated,
                     Requested = requestedIds.Count,
                     UpdatedIds = updatedIds.Distinct().ToArray(),
@@ -7944,6 +8301,17 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             }
             catch (Exception ex)
             {
+                if (ex is InvalidOperationException &&
+                    (ex.Message.Contains("scenario", StringComparison.OrdinalIgnoreCase) ||
+                     ex.Message.Contains("project", StringComparison.OrdinalIgnoreCase)))
+                {
+                    return BadRequest(new
+                    {
+                        Status = 0,
+                        Message = ex.Message
+                    });
+                }
+
                 return StatusCode(500, new
                 {
                     Status = 0,
@@ -7962,6 +8330,76 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             public string? Sector { get; set; }
             public bool DeleteEntireSite { get; set; }
             public bool OptimizedOnly { get; set; }
+        }
+
+        public class DeleteSitePredictionScenarioRequest
+        {
+            public long ProjectId { get; set; }
+            public int Scenario { get; set; }
+        }
+
+        [HttpPost, Route("DeleteSitePredictionScenario")]
+        public async Task<IActionResult> DeleteSitePredictionScenario([FromBody] DeleteSitePredictionScenarioRequest? model)
+        {
+            if (model == null)
+                return BadRequest(new { Status = 0, Message = "Invalid payload." });
+
+            if (model.ProjectId <= 0)
+                return BadRequest(new { Status = 0, Message = "ProjectId is required." });
+
+            if (model.Scenario <= 0 || model.Scenario > 6)
+            {
+                return BadRequest(new
+                {
+                    Status = 0,
+                    Message = "scenario must be between 1 and 6"
+                });
+            }
+
+            try
+            {
+                var conn = db.Database.GetDbConnection();
+                if (conn.State != ConnectionState.Open)
+                    await conn.OpenAsync();
+
+                await EnsureSitePredictionOptimizedTableAsync(conn);
+
+                await using var tx = await conn.BeginTransactionAsync();
+                await using var deleteCmd = conn.CreateCommand();
+                deleteCmd.Transaction = tx;
+                deleteCmd.CommandText = @"
+                    DELETE FROM site_prediction_optimized
+                    WHERE tbl_project_id = @pid
+                      AND scenario = @scenario;";
+                Add(deleteCmd, "@pid", model.ProjectId);
+                Add(deleteCmd, "@scenario", model.Scenario);
+
+                var deletedRows = await deleteCmd.ExecuteNonQueryAsync();
+                await tx.CommitAsync();
+                await InvalidateMapViewCachesAsync();
+
+                return Ok(new
+                {
+                    Status = 1,
+                    Message = deletedRows > 0
+                        ? $"Scenario {model.Scenario} deleted successfully."
+                        : $"No rows found for Scenario {model.Scenario}.",
+                    ProjectId = model.ProjectId,
+                    Scenario = model.Scenario,
+                    ScenarioName = $"Scenario {model.Scenario}",
+                    RowsAffected = deletedRows,
+                    DeletedOptimizedRows = deletedRows
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new
+                {
+                    Status = 0,
+                    Message = "Error deleting site prediction scenario.",
+                    Details = ex.Message
+                });
+            }
         }
 
         [HttpPost, Route("DeleteSitePrediction")]

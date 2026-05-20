@@ -816,6 +816,7 @@ public class IndoorOutdoorLogDto
         public int id { get; set; }
 
         public int site_prediction_id { get; set; }
+        public int scenario { get; set; }
 
         public int tbl_project_id { get; set; }
         public int tbl_upload_id { get; set; }
