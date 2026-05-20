@@ -6779,6 +6779,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             }
 
             await EnsureSitePredictionOptimizedScenarioColumnAsync(conn);
+            await EnsureSitePredictionOptimizedIdentityAsync(conn);
 
             var requiredColumns = new (string Name, string Definition)[]
             {
@@ -6813,11 +6814,6 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 alterCmd.CommandText = $"ALTER TABLE `site_prediction_optimized` ADD COLUMN `{column.Name}` {column.Definition};";
                 await alterCmd.ExecuteNonQueryAsync();
             }
-
-            // Do not force AUTO_INCREMENT/PK shape here.
-            // Some deployed schemas already use a different auto column definition,
-            // and attempting to modify `id` can fail with:
-            // "there can be only one auto column and it must be defined as a key".
 
             // Keep one optimized row per source row (sector-level from site_prediction row id).
             await using (var dedupeCmd = conn.CreateCommand())
@@ -6872,6 +6868,103 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                         "ALTER TABLE site_prediction_optimized ADD UNIQUE INDEX uq_spo_site_prediction_scenario (site_prediction_id, scenario);";
                     await addUniqueCmd.ExecuteNonQueryAsync();
                 }
+            }
+        }
+
+        private async Task EnsureSitePredictionOptimizedIdentityAsync(DbConnection conn)
+        {
+            await using (var createCmd = conn.CreateCommand())
+            {
+                createCmd.CommandText = "CREATE TABLE IF NOT EXISTS `site_prediction_optimized` LIKE `site_prediction`;";
+                await createCmd.ExecuteNonQueryAsync();
+            }
+
+            var hasIdColumn = false;
+            var idIsAutoIncrement = false;
+            var idHasKey = false;
+            var idHasUniqueKey = false;
+            await using (var idColumnCmd = conn.CreateCommand())
+            {
+                idColumnCmd.CommandText = @"
+                    SELECT EXTRA, COLUMN_KEY
+                    FROM INFORMATION_SCHEMA.COLUMNS
+                    WHERE TABLE_SCHEMA = DATABASE()
+                      AND TABLE_NAME = 'site_prediction_optimized'
+                      AND COLUMN_NAME = 'id'
+                    LIMIT 1;";
+
+                await using var reader = await idColumnCmd.ExecuteReaderAsync();
+                if (await reader.ReadAsync())
+                {
+                    hasIdColumn = true;
+                    var extra = reader.IsDBNull(0) ? string.Empty : reader.GetString(0);
+                    var columnKey = reader.IsDBNull(1) ? string.Empty : reader.GetString(1);
+                    idIsAutoIncrement = extra.Contains("auto_increment", StringComparison.OrdinalIgnoreCase);
+                    idHasKey = !string.IsNullOrWhiteSpace(columnKey);
+                    idHasUniqueKey = columnKey.Equals("PRI", StringComparison.OrdinalIgnoreCase) ||
+                                     columnKey.Equals("UNI", StringComparison.OrdinalIgnoreCase);
+                }
+            }
+
+            if (!hasIdColumn)
+            {
+                await using var addIdCmd = conn.CreateCommand();
+                addIdCmd.CommandText = @"
+                    ALTER TABLE `site_prediction_optimized`
+                    ADD COLUMN `id` INT NOT NULL AUTO_INCREMENT PRIMARY KEY FIRST;";
+                await addIdCmd.ExecuteNonQueryAsync();
+                return;
+            }
+
+            await using (var normalizeRequiredCmd = conn.CreateCommand())
+            {
+                normalizeRequiredCmd.CommandText = @"
+                    SELECT COUNT(1)
+                    FROM (
+                        SELECT id
+                        FROM `site_prediction_optimized`
+                        GROUP BY id
+                        HAVING id IS NULL OR id <= 0 OR COUNT(1) > 1
+                    ) bad_ids;";
+                var normalizeObj = await normalizeRequiredCmd.ExecuteScalarAsync();
+                var normalizeRequired = normalizeObj != null &&
+                                        normalizeObj != DBNull.Value &&
+                                        Convert.ToInt32(normalizeObj) > 0;
+                if (normalizeRequired)
+                {
+                    await using (var seedSequenceCmd = conn.CreateCommand())
+                    {
+                        seedSequenceCmd.CommandText = "SET @spo_next_id := 0;";
+                        await seedSequenceCmd.ExecuteNonQueryAsync();
+                    }
+
+                    await using (var normalizeCmd = conn.CreateCommand())
+                    {
+                        normalizeCmd.CommandText = @"
+                        UPDATE `site_prediction_optimized`
+                        SET `id` = (@spo_next_id := @spo_next_id + 1)
+                        ORDER BY COALESCE(`id`, 0), COALESCE(`site_prediction_id`, 0), COALESCE(`scenario`, 0);";
+                        await normalizeCmd.ExecuteNonQueryAsync();
+                    }
+                }
+            }
+
+            if (!idHasUniqueKey)
+            {
+                await using var addIdUniqueCmd = conn.CreateCommand();
+                addIdUniqueCmd.CommandText =
+                    "ALTER TABLE `site_prediction_optimized` ADD UNIQUE INDEX `uq_spo_id` (`id`);";
+                await addIdUniqueCmd.ExecuteNonQueryAsync();
+                idHasKey = true;
+                idHasUniqueKey = true;
+            }
+
+            if (!idIsAutoIncrement)
+            {
+                await using var modifyIdCmd = conn.CreateCommand();
+                modifyIdCmd.CommandText =
+                    "ALTER TABLE `site_prediction_optimized` MODIFY COLUMN `id` INT NOT NULL AUTO_INCREMENT;";
+                await modifyIdCmd.ExecuteNonQueryAsync();
             }
         }
 
