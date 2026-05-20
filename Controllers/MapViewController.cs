@@ -3824,7 +3824,7 @@ public async Task<IActionResult> GetN78Neighbours([FromQuery] string session_ids
     string projectKey = project_id.HasValue && project_id.Value > 0
         ? project_id.Value.ToString(CultureInfo.InvariantCulture)
         : "no_project";
-    string cacheKey = $"n78_neighbours:{sessionCsv}:project:{projectKey}";
+    string cacheKey = $"n78_neighbours:v2:{sessionCsv}:project:{projectKey}";
     var projectPolygonWkt = await ResolveProjectFilterWktAsync(project_id);
 
     // ================= 2. REDIS READ =================
@@ -3895,8 +3895,16 @@ JoinedData AS (
         AND p.lon = n.lon
     WHERE (
           ((p.primary_network LIKE '%4G%' OR p.primary_network LIKE '%LTE%') AND (n.network LIKE '%5G%' OR n.network LIKE '%NR%'))
-          OR 
+          OR
           ((p.primary_network LIKE '%5G%' OR p.primary_network LIKE '%NR%') AND (n.network LIKE '%4G%' OR n.network LIKE '%LTE%'))
+          OR
+          ((p.primary_network LIKE '%2G%' OR p.primary_network LIKE '%GSM%' OR p.primary_network LIKE '%EDGE%' OR p.primary_network LIKE '%GPRS%') AND (n.network LIKE '%4G%' OR n.network LIKE '%LTE%'))
+          OR
+          ((p.primary_network LIKE '%4G%' OR p.primary_network LIKE '%LTE%') AND (n.network LIKE '%2G%' OR n.network LIKE '%GSM%' OR n.network LIKE '%EDGE%' OR n.network LIKE '%GPRS%'))
+          OR
+          ((p.primary_network LIKE '%2G%' OR p.primary_network LIKE '%GSM%' OR p.primary_network LIKE '%EDGE%' OR p.primary_network LIKE '%GPRS%') AND (n.network LIKE '%5G%' OR n.network LIKE '%NR%'))
+          OR
+          ((p.primary_network LIKE '%5G%' OR p.primary_network LIKE '%NR%') AND (n.network LIKE '%2G%' OR n.network LIKE '%GSM%' OR n.network LIKE '%EDGE%' OR n.network LIKE '%GPRS%'))
     )
 )
 SELECT 
