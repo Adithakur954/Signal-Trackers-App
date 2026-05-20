@@ -1,6 +1,5 @@
 ﻿namespace SignalTracker.Helper
 {
-    //public static []HydrogenParameter=[]
     public static class Constant
     {
         public static readonly string DateTimeFormat = "dd-MM-yyyy hh:mm tt";

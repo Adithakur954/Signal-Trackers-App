@@ -36,12 +36,14 @@ namespace SignalTracker.Controllers
         private readonly RedisService _redis;
         private readonly UserScopeService _userScope;
         private const int MapViewCacheTtlSeconds = 300;
+        private static volatile bool NetworkLogUpdatedAtColumnEnsured;
         private static readonly string[] MapViewCacheInvalidationPatterns =
         {
             "mapview:*",
             "projectpolygons:*",
             "availablepolygons:*",
             "networklog:v2:*",
+            "networklog:v3:*",
             "latlon:dist:*",
             "n78_simple_kpi:*",
             "n78_neighbours:*",
@@ -2229,16 +2231,23 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
         var page = filters.page <= 0 ? 1 : filters.page;
         var pageOffset = (page - 1) * limit;
         string connString = db.Database.GetConnectionString();
+        string providerNormalized = null;
+        await EnsureNetworkLogUpdatedAtColumnAsync(connString);
+        string dataVersion = await GetNetworkLogDataVersionAsync(
+            connString,
+            sessionIds,
+            providerNormalized,
+            filters
+        );
 
         // 1. Prepare Cache Key
-        string providerNormalized = null;
-
         string cacheKey = BuildNetworkLogCacheKey(
             sessionIds,
             providerNormalized,
             filters.StartDate,
             filters.EndDate,
-            filters.project_id
+            filters.project_id,
+            dataVersion
         );
         string pageCacheKey = $"{cacheKey}:page:{page}:limit:{limit}";
 
@@ -2792,12 +2801,114 @@ public class SessionCountDto
     public long SessionId { get; set; }
     public int Count { get; set; }
 }
+
+private async Task EnsureNetworkLogUpdatedAtColumnAsync(string connString)
+{
+    if (NetworkLogUpdatedAtColumnEnsured || string.IsNullOrWhiteSpace(connString))
+        return;
+
+    try
+    {
+        using var conn = new MySqlConnection(connString);
+        await conn.OpenAsync();
+
+        using (var checkCmd = conn.CreateCommand())
+        {
+            checkCmd.CommandText = @"
+                SELECT COUNT(*)
+                FROM information_schema.columns
+                WHERE table_schema = DATABASE()
+                  AND table_name = 'tbl_network_log'
+                  AND column_name = 'updated_at';";
+
+            var exists = Convert.ToInt32(await checkCmd.ExecuteScalarAsync(), CultureInfo.InvariantCulture) > 0;
+            if (!exists)
+            {
+                using var alterCmd = conn.CreateCommand();
+                alterCmd.CommandText = @"
+                    ALTER TABLE tbl_network_log
+                    ADD COLUMN updated_at DATETIME NOT NULL
+                    DEFAULT CURRENT_TIMESTAMP
+                    ON UPDATE CURRENT_TIMESTAMP;";
+                await alterCmd.ExecuteNonQueryAsync();
+            }
+        }
+
+        NetworkLogUpdatedAtColumnEnsured = true;
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($" Network log updated_at ensure skipped: {ex.Message}");
+    }
+}
+
+private async Task<string> GetNetworkLogDataVersionAsync(
+    string connString,
+    List<long> sessionIds,
+    string provider,
+    MapFilter1 filters)
+{
+    if (sessionIds == null || sessionIds.Count == 0 || string.IsNullOrWhiteSpace(connString))
+        return "empty";
+
+    var (whereClause, parameters) = await BuildSqlWhereAsync(sessionIds, provider, filters);
+
+    async Task<string> ReadVersionAsync(bool includeUpdatedAt)
+    {
+        using var conn = new MySqlConnection(connString);
+        await conn.OpenAsync();
+
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = includeUpdatedAt
+            ? $@"
+                SELECT
+                    COUNT(*) AS row_count,
+                    COALESCE(MAX(id), 0) AS max_id,
+                    COALESCE(UNIX_TIMESTAMP(MAX(updated_at)), 0) AS max_updated_at,
+                    COALESCE(UNIX_TIMESTAMP(MAX(timestamp)), 0) AS max_timestamp
+                FROM tbl_network_log
+                WHERE {whereClause};"
+            : $@"
+                SELECT
+                    COUNT(*) AS row_count,
+                    COALESCE(MAX(id), 0) AS max_id,
+                    0 AS max_updated_at,
+                    COALESCE(UNIX_TIMESTAMP(MAX(timestamp)), 0) AS max_timestamp
+                FROM tbl_network_log
+                WHERE {whereClause};";
+
+        foreach (var parameter in parameters)
+            AddParameter(cmd, parameter.Key, parameter.Value);
+
+        using var reader = await cmd.ExecuteReaderAsync();
+        if (!await reader.ReadAsync())
+            return "0-0-0-0";
+
+        var count = Convert.ToInt64(reader["row_count"], CultureInfo.InvariantCulture);
+        var maxId = Convert.ToInt64(reader["max_id"], CultureInfo.InvariantCulture);
+        var maxUpdatedAt = Convert.ToInt64(reader["max_updated_at"], CultureInfo.InvariantCulture);
+        var maxTimestamp = Convert.ToInt64(reader["max_timestamp"], CultureInfo.InvariantCulture);
+        return $"{count}-{maxId}-{maxUpdatedAt}-{maxTimestamp}";
+    }
+
+    try
+    {
+        return await ReadVersionAsync(includeUpdatedAt: true);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($" Network log version fallback: {ex.Message}");
+        return await ReadVersionAsync(includeUpdatedAt: false);
+    }
+}
+
 private string BuildNetworkLogCacheKey(
     List<long> sessionIds, 
     string provider, 
     DateTime? from, 
     DateTime? to,
-    long? projectId = null)
+    long? projectId = null,
+    string dataVersion = "noversion")
 {
     var sortedSessionIds = string.Join("-", sessionIds.OrderBy(x => x));
     string providerKey = provider ?? "all";
@@ -2806,8 +2917,9 @@ private string BuildNetworkLogCacheKey(
     string projectKey = projectId.HasValue && projectId.Value > 0
         ? projectId.Value.ToString(CultureInfo.InvariantCulture)
         : "no_project";
+    string versionKey = NormalizeCacheKeyPart(dataVersion);
 
-    return $"networklog:v2:{sortedSessionIds}:{providerKey}:{fromKey}:{toKey}:{projectKey}";
+    return $"networklog:v3:{sortedSessionIds}:{providerKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
 }
 
 private void AddParameter(DbCommand cmd, string name, object value)
