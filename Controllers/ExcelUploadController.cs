@@ -23,6 +23,7 @@ namespace SignalTracker.Controllers
         private readonly CommonFunction cf;
         private readonly IWebHostEnvironment _env;
         private readonly UserScopeService _userScope; // 1. Service for Security Logic
+        private readonly RedisService _redis;
 
         // Robust timezone: Windows ("India Standard Time") and Linux ("Asia/Kolkata")
         private static readonly TimeZoneInfo INDIAN_ZONE = GetIndianZone();
@@ -36,12 +37,14 @@ namespace SignalTracker.Controllers
             ApplicationDbContext context,
             IHttpContextAccessor httpContextAccessor,
             IWebHostEnvironment env,
-            UserScopeService userScope) // 2. Inject Service
+            UserScopeService userScope,
+            RedisService redis) // 2. Inject Service
         {
             db = context;
             cf = new CommonFunction(context, httpContextAccessor);
             _env = env;
             _userScope = userScope;
+            _redis = redis;
         }
 
         // GET: /ExcelUpload/Index
@@ -271,7 +274,7 @@ namespace SignalTracker.Controllers
                     projectId = objProject.id;
                 }
 
-                var csvProc = new ProcessCSVController(db, cf);
+                var csvProc = new ProcessCSVController(db, cf, _redis);
                 bool ok = csvProc.Process(
                     excel_details.id,
                     mainPath,

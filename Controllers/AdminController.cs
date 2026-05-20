@@ -424,6 +424,13 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
             var patterns = new[]
             {
                 "alllogs:*",
+                "networklog:v2:*",
+                "networklog:v3:*",
+                "mapview:*",
+                "daterangelog:*",
+                "latlon:dist:*",
+                "n78_simple_kpi:*",
+                "n78_neighbours:*",
                 "opcoverage:*",
                 "opquality:*",
                 "polygonpoints:*",

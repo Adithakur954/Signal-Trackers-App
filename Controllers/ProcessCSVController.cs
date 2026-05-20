@@ -2,6 +2,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using SignalTracker.Models;
+using SignalTracker.Services;
 
 using CsvHelper;
 using CsvHelper.Configuration;
@@ -384,11 +385,43 @@ namespace SignalTracker.Controllers
         // =====================================================================
         private readonly ApplicationDbContext db;
         private readonly CommonFunction cf;
+        private readonly RedisService _redis;
 
-        public ProcessCSVController(ApplicationDbContext context, CommonFunction _cf)
+        public ProcessCSVController(ApplicationDbContext context, CommonFunction _cf, RedisService redis)
         {
             db = context;
             cf = _cf;
+            _redis = redis;
+        }
+
+        private void InvalidateNetworkLogCachesBestEffort()
+        {
+            if (_redis == null || !_redis.IsConnected)
+                return;
+
+            var patterns = new[]
+            {
+                "networklog:v2:*",
+                "networklog:v3:*",
+                "mapview:*",
+                "daterangelog:*",
+                "latlon:dist:*",
+                "n78_simple_kpi:*",
+                "n78_neighbours:*",
+                "alllogs:*"
+            };
+
+            foreach (var pattern in patterns)
+            {
+                try
+                {
+                    _redis.DeleteByPatternAsync(pattern).GetAwaiter().GetResult();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($" Redis invalidation error [{pattern}]: {ex.Message}");
+                }
+            }
         }
 
         // =====================================================================
@@ -1191,6 +1224,7 @@ public IActionResult UploadSitePrediction(
 	            if (isColValValid)
 	            {
 	                db.SaveChanges();
+	                InvalidateNetworkLogCachesBestEffort();
 	            }
 	            else
 	            {

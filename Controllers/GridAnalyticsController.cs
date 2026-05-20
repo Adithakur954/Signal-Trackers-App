@@ -472,10 +472,9 @@ namespace SignalTracker.Controllers
                     }
 
                     // Invalidate potentially cached read calls
-                    string cacheKey = $"gridanalytics:{projectId}:{regionId ?? 0}:{resolvedScenarioId?.ToString() ?? "none"}";
                     if (_redis != null && _redis.IsConnected)
                     {
-                        try { await _redis.DeleteAsync(cacheKey); } catch { }
+                        try { await _redis.DeleteByPatternAsync($"gridanalytics*:{projectId}:{regionId ?? 0}:*"); } catch { }
                     }
 
                     sw.Stop();
@@ -595,14 +594,15 @@ namespace SignalTracker.Controllers
                 var conn = _db.Database.GetDbConnection();
                 await conn.OpenAsync();
                 var normalizedVersion = (version ?? "original").Trim().ToLowerInvariant();
-                var effectiveScenarioId = await ResolveScenarioIdAsync(
-                    conn,
-                    projectId,
-                    (normalizedVersion == "updated" || normalizedVersion == "optimized" || normalizedVersion == "optimised" || normalizedVersion == "delta")
-                        ? scenario_id
-                        : null
-                );
-                string cacheKey = $"gridanalytics:{projectId}:{regionId ?? 0}:{normalizedVersion}:{effectiveScenarioId?.ToString() ?? "none"}";
+                var isScenarioGridVersion =
+                    normalizedVersion == "updated" ||
+                    normalizedVersion == "optimized" ||
+                    normalizedVersion == "optimised" ||
+                    normalizedVersion == "delta";
+                var effectiveScenarioId = isScenarioGridVersion
+                    ? await ResolveScenarioIdAsync(conn, projectId, scenario_id)
+                    : null;
+                string cacheKey = $"gridanalytics:v2:{projectId}:{regionId ?? 0}:{normalizedVersion}:{effectiveScenarioId?.ToString() ?? "none"}";
                 if (_redis != null && _redis.IsConnected)
                 {
                     try
@@ -660,7 +660,7 @@ namespace SignalTracker.Controllers
                 else
                     query = query.Where(g => g.region_id == null || g.region_id <= 0);
 
-                if (normalizedVersion == "updated" || normalizedVersion == "optimized" || normalizedVersion == "optimised" || normalizedVersion == "delta")
+                if (isScenarioGridVersion)
                 {
                     if (effectiveScenarioId.HasValue)
                         query = query.Where(g => g.scenario_id == effectiveScenarioId.Value);
@@ -669,6 +669,7 @@ namespace SignalTracker.Controllers
                 }
 
                 storedResults = await query.ToListAsync();
+                storedResults = SelectLatestGridGeneration(storedResults);
                 
                 await conn.CloseAsync();
 
@@ -1763,6 +1764,24 @@ WHERE spo.tbl_project_id = @pid;";
                 });
             }
             return res;
+        }
+
+        private static List<grid_analytics_results> SelectLatestGridGeneration(List<grid_analytics_results> stored)
+        {
+            if (stored.Count <= 1)
+                return stored;
+
+            return stored
+                .GroupBy(s => new
+                {
+                    ScenarioId = s.scenario_id,
+                    GridSize = Math.Round(s.grid_size_meters, 3)
+                })
+                .OrderByDescending(g => g.Max(s => s.created_at ?? DateTime.MinValue))
+                .ThenByDescending(g => g.Count())
+                .First()
+                .OrderBy(s => s.grid_id)
+                .ToList();
         }
 
         private static double? Avg(List<double> v)
