@@ -8431,6 +8431,71 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             public int Scenario { get; set; }
         }
 
+        [HttpGet, Route("GetSitePredictionScenarios")]
+        public async Task<IActionResult> GetSitePredictionScenarios([FromQuery] long projectId)
+        {
+            if (projectId <= 0)
+                return BadRequest(new { Status = 0, Message = "projectId is required." });
+
+            try
+            {
+                var conn = db.Database.GetDbConnection();
+                if (conn.State != ConnectionState.Open)
+                    await conn.OpenAsync();
+
+                await EnsureSitePredictionOptimizedTableAsync(conn);
+
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = @"
+                    SELECT
+                        scenario,
+                        MAX(COALESCE(updated_at, created_at)) AS latest_at,
+                        COUNT(*) AS row_count
+                    FROM site_prediction_optimized
+                    WHERE tbl_project_id = @pid
+                      AND scenario BETWEEN 1 AND 6
+                    GROUP BY scenario
+                    ORDER BY scenario;";
+                Add(cmd, "@pid", projectId);
+
+                var rows = new List<object>();
+                await using var reader = await cmd.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
+                {
+                    var scenario = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0));
+                    if (scenario <= 0) continue;
+
+                    var latestAt = reader.IsDBNull(1) ? null : Convert.ToString(reader.GetValue(1));
+                    var rowCount = reader.IsDBNull(2) ? 0 : Convert.ToInt32(reader.GetValue(2));
+
+                    rows.Add(new
+                    {
+                        scenario_id = scenario,
+                        scenario_name = $"Scenario {scenario}",
+                        status = "updated",
+                        row_count = rowCount,
+                        updated_at = latestAt
+                    });
+                }
+
+                return Ok(new
+                {
+                    Status = 1,
+                    Message = "Site prediction scenarios fetched.",
+                    Data = rows
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new
+                {
+                    Status = 0,
+                    Message = "Error fetching site prediction scenarios.",
+                    Details = ex.Message
+                });
+            }
+        }
+
         [HttpPost, Route("DeleteSitePredictionScenario")]
         public async Task<IActionResult> DeleteSitePredictionScenario([FromBody] DeleteSitePredictionScenarioRequest? model)
         {
