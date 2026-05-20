@@ -2845,7 +2845,7 @@ public async Task<IActionResult> GetSessions([FromQuery] int? company_id = null)
             where useUserScope
                 ? s.user_id == currentUserId
                 : (targetCompanyId == 0 || u.company_id == targetCompanyId)
-            orderby s.start_time descending
+            orderby s.id descending
             select new
             {
                 id = s.id,
