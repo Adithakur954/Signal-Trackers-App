@@ -921,7 +921,7 @@ public class ProjectPolygonItem
             {
                 if (string.IsNullOrWhiteSpace(statusRaw))
                 {
-                    return "FAILED";
+                    return "2";
                 }
 
                 var normalized = statusRaw.Trim().ToUpperInvariant();
@@ -929,12 +929,12 @@ public class ProjectPolygonItem
 
                 if (compact is "NOTCONNECTED" or "DISCONNECTED" or "FAILED" or "FAIL" or "ERROR" or "FALSE" or "0" or "2" or "NO")
                 {
-                    return "FAILED";
+                    return "2";
                 }
 
                 if (compact is "SUCCESS" or "SUCCEEDED" or "SUCCESSFUL" or "PASS" or "PASSED" or "OK" or "TRUE" or "1" or "COMPLETE" or "COMPLETED" or "DONE" or "CONNECTED")
                 {
-                    return "SUCCESS";
+                    return "1";
                 }
 
                 if (compact.Contains("FAIL", StringComparison.OrdinalIgnoreCase) ||
@@ -942,22 +942,22 @@ public class ProjectPolygonItem
                     compact.Contains("TIMEOUT", StringComparison.OrdinalIgnoreCase) ||
                     compact.Contains("CANCEL", StringComparison.OrdinalIgnoreCase))
                 {
-                    return "FAILED";
+                    return "2";
                 }
 
                 return compact switch
                 {
-                    _ => "FAILED"
+                    _ => "2"
                 };
             }
 
             private static string MergeStatus(string? currentStatus, string? nextStatusRaw)
             {
                 var nextStatus = NormalizeStatus(nextStatusRaw);
-                return string.Equals(currentStatus, "SUCCESS", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(nextStatus, "SUCCESS", StringComparison.OrdinalIgnoreCase)
-                    ? "SUCCESS"
-                    : "FAILED";
+                return string.Equals(currentStatus, "1", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(nextStatus, "1", StringComparison.OrdinalIgnoreCase)
+                    ? "1"
+                    : "2";
             }
 
             private SubSessionStatusMetrics GetOrCreateStatusMetrics(string? statusRaw)
@@ -1006,8 +1006,8 @@ public class ProjectPolygonItem
 
             public object ToMetricsResponse()
             {
-                var successMetrics = GetStatusMetrics("SUCCESS");
-                var failedMetrics = GetStatusMetrics("FAILED");
+                var successMetrics = GetStatusMetrics("1");
+                var failedMetrics = GetStatusMetrics("2");
 
                 var successCount = successMetrics.RecordCount;
                 var failedCount = failedMetrics.RecordCount;
@@ -1080,10 +1080,7 @@ public class ProjectPolygonItem
                     existing.StartLon ??= startLon;
                     existing.EndLat ??= endLat;
                     existing.EndLon ??= endLon;
-                    if (isSameSubSessionType || string.IsNullOrWhiteSpace(existing.SubSessionType) || string.IsNullOrWhiteSpace(normalizedSubSessionType))
-                    {
-                        existing.ResultStatus = MergeStatus(existing.ResultStatus, resultStatusRaw);
-                    }
+                    existing.ResultStatus = MergeStatus(existing.ResultStatus, resultStatusRaw);
                     return;
                 }
 
@@ -1121,7 +1118,7 @@ public class ProjectPolygonItem
                             end_lat = x.EndLat,
                             end_lon = x.EndLon
                         },
-                        result_status = x.ResultStatus
+                        result_status = string.Equals(x.ResultStatus, "1", StringComparison.OrdinalIgnoreCase) ? 1 : 2
                     })
                     .ToList();
 
@@ -1555,7 +1552,8 @@ public async Task<IActionResult> DeleteAvailablePolygon(
     }
 }
 
-        [HttpGet, Route("GetSubSessionAnalytics")]
+        [HttpGet("GetSubSessionAnalytics")]
+        [HttpGet("GetSubSessionAnalyticsWithStatus")]
         public async Task<IActionResult> GetSubSessionAnalytics(
             [FromQuery] int? sessionId = null,
             [FromQuery] string? sessionIds = null,
@@ -1584,9 +1582,15 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                     return BadRequest(new { message = "Provide a valid sessionId or comma-separated sessionIds/session_ids." });
                 }
 
+                var isWithStatusRoute = Request?.Path.Value?.EndsWith(
+                    "/GetSubSessionAnalyticsWithStatus",
+                    StringComparison.OrdinalIgnoreCase) == true
+                    || string.Equals(Request?.Query["includeStatus"], "1", StringComparison.OrdinalIgnoreCase);
+
                 var cacheKey = BuildMapViewCacheKey(
-                    "subsession-v5",
-                    requestedSessionIds.Count > 0 ? string.Join("-", requestedSessionIds) : "all");
+                    "subsession-v7",
+                    requestedSessionIds.Count > 0 ? string.Join("-", requestedSessionIds) : "all",
+                    isWithStatusRoute ? "with-status" : "base");
 
                 var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
                 if (cached != null)
@@ -1621,6 +1625,20 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                             ELSE NULL
                         END";
 
+                var resultStatusColumn = await GetFirstExistingColumnAsync(
+                    conn,
+                    "tbl_sub_session",
+                    "status",
+                    "result_status",
+                    "resultStatus",
+                    "test_status",
+                    "connection_status",
+                    "result");
+
+                var resultStatusSql = resultStatusColumn != null
+                    ? $"NULLIF(TRIM(CAST(`{resultStatusColumn.Replace("`", "``")}` AS CHAR)), '')"
+                    : "NULL";
+
                 var sql = @"
                     SELECT
                         session_id,
@@ -1642,17 +1660,7 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                             WHEN JSON_VALID(json_data) THEN JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.file_size_bytes'))
                             ELSE NULL
                         END AS file_size_bytes,
-                        CASE
-                            WHEN JSON_VALID(json_data) THEN COALESCE(
-                                JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.result_status')),
-                                JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.resultStatus')),
-                                JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.status')),
-                                JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.result')),
-                                JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.test_status')),
-                                JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.success'))
-                            )
-                            ELSE NULL
-                        END AS result_status
+                        " + resultStatusSql + @" AS result_status
                     FROM tbl_sub_session
                     WHERE session_id IS NOT NULL";
 
@@ -1742,12 +1750,28 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                     .Select(x => x.ToResponse())
                     .ToList();
 
-                var response = new
+                object response;
+                if (isWithStatusRoute)
                 {
-                    requested_session_ids = requestedSessionIds,
-                    data = sessions,
-                    summary = overall.ToMetricsResponse()
-                };
+                    response = new
+                    {
+                        status_mode = "column_status_numeric_v1",
+                        requested_session_ids = requestedSessionIds,
+                        data = sessions,
+                        summary = overall.ToMetricsResponse(),
+                        status = sessions.Count > 0 ? 1 : 2
+                    };
+                }
+                else
+                {
+                    response = new
+                    {
+                        status_mode = "column_status_numeric_v1",
+                        requested_session_ids = requestedSessionIds,
+                        data = sessions,
+                        summary = overall.ToMetricsResponse()
+                    };
+                }
 
                 await SetMapViewCacheAsync(cacheKey, response);
                 return Json(response);
@@ -1841,6 +1865,7 @@ public class AvailablePolygonsResponse
 
             return null;
         }
+
 
         private static double RoundMetric(double value)
         {

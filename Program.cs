@@ -199,6 +199,20 @@ internal class Program
         }
 
         app.UseStaticFiles();
+
+        // Backward-compatible alias for clients calling the new route name.
+        // Must run before UseRouting so endpoint matching uses rewritten path.
+        app.Use(async (ctx, next) =>
+        {
+            if (ctx.Request.Path.Equals("/api/MapView/GetSubSessionAnalyticsWithStatus", StringComparison.OrdinalIgnoreCase))
+            {
+                ctx.Request.Path = "/api/MapView/GetSubSessionAnalytics";
+                ctx.Request.QueryString = ctx.Request.QueryString.Add("includeStatus", "1");
+            }
+
+            await next();
+        });
+
         app.UseRouting();
         app.UseCors(SecurityServiceExtensions.CorsPolicyName);
         app.UseCookiePolicy();
