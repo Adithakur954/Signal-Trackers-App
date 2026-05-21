@@ -25,7 +25,7 @@ public static class SecurityServiceExtensions
                     || allowedOrigins.Contains(origin)
                     || (allowLoopbackOrigins
                         && Uri.TryCreate(origin, UriKind.Absolute, out var originUri)
-                        && RequestSecurity.IsLoopbackHttpOrigin(originUri)))
+                        && RequestSecurity.IsLoopbackOrigin(originUri)))
                     .AllowAnyHeader()
                     .AllowAnyMethod()
                     .AllowCredentials();

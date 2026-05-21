@@ -13,10 +13,11 @@ public static class RequestSecurity
             || string.Equals(host, "0.0.0.0", StringComparison.OrdinalIgnoreCase);
     }
 
-    public static bool IsLoopbackHttpOrigin(Uri uri)
+    public static bool IsLoopbackOrigin(Uri uri)
     {
         return uri.IsAbsoluteUri
-            && string.Equals(uri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
+            && (string.Equals(uri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
             && IsLoopbackHost(uri.Host);
     }
 
