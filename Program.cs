@@ -9,6 +9,21 @@ using StackExchange.Redis;
 
 internal class Program
 {
+    private static string RequireConnectionString(IConfiguration configuration, string name)
+    {
+        var connectionString = MySqlConnectionStringHelper.EnsureZeroDateTimeHandling(
+            configuration.GetConnectionString(name));
+
+        if (!string.IsNullOrWhiteSpace(connectionString))
+        {
+            return connectionString;
+        }
+
+        throw new InvalidOperationException(
+            $"Missing database connection string '{name}'. " +
+            $"Set 'ConnectionStrings:{name}' in configuration or environment variable 'ConnectionStrings__{name}'.");
+    }
+
     private static void Main(string[] args)
     {
         var builder = WebApplication.CreateBuilder(args);
@@ -62,6 +77,11 @@ internal class Program
         // ----------------------------------------------------
         // DATABASE (DYNAMIC SELECTION)
         // ----------------------------------------------------
+        var validatedMainDbConnection = RequireConnectionString(builder.Configuration, "MySqlConnection");
+        var validatedTwDbConnection = RequireConnectionString(builder.Configuration, "MySqlConnection2");
+        _ = validatedMainDbConnection;
+        _ = validatedTwDbConnection;
+
         builder.Services.AddScoped<IDbConnectionProvider, DbConnectionProvider>();
 
         builder.Services.AddDbContext<ApplicationDbContext>((sp, options) =>
