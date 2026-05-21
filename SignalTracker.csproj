@@ -6,8 +6,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
-    <DefaultItemExcludes>$(DefaultItemExcludes);buildcheck_*\**;**\buildcheck_*\**;build_*\**;**\build_*\**;tmpout_*\**;**\tmpout_*\**;build_obj\**;**\build_obj\**;build_out\**;**\build_out\**;artifacts\**;**\artifacts\**;bin_temp\**;**\bin_temp\**;bin_temp_check\**;**\bin_temp_check\**</DefaultItemExcludes>
-    <DefaultExcludesInProjectFolder>$(DefaultExcludesInProjectFolder);buildcheck_*\**;**\buildcheck_*\**;build_*\**;**\build_*\**;tmpout_*\**;**\tmpout_*\**;build_obj\**;**\build_obj\**;build_out\**;**\build_out\**;artifacts\**;**\artifacts\**;bin_temp\**;**\bin_temp\**;bin_temp_check\**;**\bin_temp_check\**</DefaultExcludesInProjectFolder>
+    <UserSecretsId>SignalTracker.LocalDevelopment</UserSecretsId>
+    <DefaultItemExcludes>$(DefaultItemExcludes);buildcheck_*\**;**\buildcheck_*\**;build_*\**;**\build_*\**;tmpout_*\**;**\tmpout_*\**;build_obj\**;**\build_obj\**;build_out\**;**\build_out\**;artifacts\**;**\artifacts\**;bin_temp\**;**\bin_temp\**;bin_temp_check\**;**\bin_temp_check\**;_build_check\**;_build_check3\**</DefaultItemExcludes>
+    <DefaultExcludesInProjectFolder>$(DefaultExcludesInProjectFolder);buildcheck_*\**;**\buildcheck_*\**;build_*\**;**\build_*\**;tmpout_*\**;**\tmpout_*\**;build_obj\**;**\build_obj\**;build_out\**;**\build_out\**;artifacts\**;**\artifacts\**;bin_temp\**;**\bin_temp\**;bin_temp_check\**;**\bin_temp_check\**;_build_check\**;_build_check3\**</DefaultExcludesInProjectFolder>
   </PropertyGroup>
 
   <!-- Remove old/unused files -->
@@ -22,31 +23,16 @@
     <None Remove="NewFolder\**" />
   </ItemGroup>
 
-  <ItemGroup>
-    <Compile Remove="Controllers\ProcessExcelController - Copy %282%29.cs" />
-    <Compile Remove="Controllers\ProcessExcelController - Copy.cs" />
-    <Compile Remove="Models\CImage.aspx.cs" />
-    <Compile Remove="Models\RandomImage.cs" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <None Remove="Models\CImage.aspx" />
-  </ItemGroup>
-
-  <!-- Copy static files (templates/uploads) to output & publish -->
+  <!-- Copy static templates to output & publish. Runtime uploads stay outside source control. -->
   <ItemGroup>
     <Content Include="Template-Files/**">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
       <CopyToPublishDirectory>Always</CopyToPublishDirectory>
     </Content>
-    <Content Include="UploadedExcels/**">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <CopyToPublishDirectory>Always</CopyToPublishDirectory>
-    </Content>
   </ItemGroup>
   <ItemGroup>
-  <Content Update="App_Data\**\*" CopyToPublishDirectory="PreserveNewest" />
-  <Content Update="UploadedExcels\**\*" CopyToPublishDirectory="PreserveNewest" />
+  <Content Update="App_Data\**\*" CopyToPublishDirectory="Never" />
+  <Content Update="UploadedExcels\**\*" CopyToPublishDirectory="Never" />
 </ItemGroup>
 
   <!-- Packages (single group) -->

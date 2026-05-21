@@ -501,7 +501,7 @@ namespace SignalTracker.Controllers
             catch (Exception ex)
             {
                 sw.Stop();
-                return StatusCode(500, new { Status = 0, Message = "Error: " + ex.Message, StackTrace = ex.StackTrace });
+                return StatusCode(500, new { Status = 0, Message = "Error: " + ex.Message });
             }
         }
 
@@ -713,7 +713,7 @@ namespace SignalTracker.Controllers
             catch (Exception ex)
             {
                 sw.Stop();
-                return StatusCode(500, new { Status = 0, Message = "Error: " + ex.Message, StackTrace = ex.StackTrace });
+                return StatusCode(500, new { Status = 0, Message = "Error: " + ex.Message });
             }
         }
 
@@ -1011,7 +1011,7 @@ namespace SignalTracker.Controllers
             catch (Exception ex)
             {
                 sw.Stop();
-                return StatusCode(500, new { Status = 0, Message = "Error: " + ex.Message, StackTrace = ex.StackTrace });
+                return StatusCode(500, new { Status = 0, Message = "Error: " + ex.Message });
             }
         }
 
@@ -1982,3 +1982,4 @@ WHERE spo.tbl_project_id = @pid;";
         }
     }
 }
+

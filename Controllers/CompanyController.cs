@@ -83,7 +83,6 @@ namespace SignalTracker.Controllers
                 return StatusCode(500, new { Status = 0, Message = "Error fetching companies: " + ex.Message });
             }
         }
-[AllowAnonymous]
       [HttpPost("SaveCompanyDetails")]
         public async Task<IActionResult> SaveCompany([FromBody] SaveCompanyRequest request)
         {

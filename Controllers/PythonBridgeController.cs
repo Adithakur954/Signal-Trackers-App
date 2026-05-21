@@ -31,7 +31,6 @@ namespace SignalTracker.Controllers
             return Unauthorized(new { Status = 0, Message = "Invalid bridge key." });
         }
 
-        [AllowAnonymous]
         [HttpPost("GetDriveTestRows")]
         public async Task<IActionResult> GetDriveTestRows([FromBody] DriveTestRowsRequest request)
         {
@@ -69,7 +68,6 @@ namespace SignalTracker.Controllers
             });
         }
 
-        [AllowAnonymous]
         [HttpGet("GetLteTiltBaselineResults")]
         public async Task<IActionResult> GetLteTiltBaselineResults([FromQuery] LteTiltBaselineRowsRequest request)
         {
@@ -96,7 +94,6 @@ namespace SignalTracker.Controllers
             });
         }
 
-        [AllowAnonymous]
         [HttpGet("GetLteTiltAntennaRows")]
         public async Task<IActionResult> GetLteTiltAntennaRows([FromQuery] LteTiltAntennaRowsRequest request)
         {
@@ -123,7 +120,6 @@ namespace SignalTracker.Controllers
             });
         }
 
-        [AllowAnonymous]
         [HttpGet("GetLtePredictionGeoFeatures")]
         public async Task<IActionResult> GetLtePredictionGeoFeatures([FromQuery] LtePredictionGeoFeatureRowsRequest request)
         {
@@ -150,7 +146,6 @@ namespace SignalTracker.Controllers
             });
         }
 
-        [AllowAnonymous]
         [HttpGet("GetSitePredictionOptimized")]
         public async Task<IActionResult> GetSitePredictionOptimized(
             [FromQuery] long projectId,
@@ -185,7 +180,6 @@ namespace SignalTracker.Controllers
             });
         }
 
-        [AllowAnonymous]
         [HttpGet("GetLteSitePredictionRows")]
         public async Task<IActionResult> GetLteSitePredictionRows([FromQuery] LteSitePredictionRowsRequest request)
         {
@@ -205,7 +199,6 @@ namespace SignalTracker.Controllers
             return Ok(new { Status = 1, Count = result.Rows.Count, Limit = result.Limit, Offset = result.Offset, Data = result.Rows });
         }
 
-        [AllowAnonymous]
         [HttpGet("GetLteBuildingRows")]
         public async Task<IActionResult> GetLteBuildingRows([FromQuery] LteBuildingRowsRequest request)
         {
@@ -225,7 +218,6 @@ namespace SignalTracker.Controllers
             return Ok(new { Status = 1, Count = result.Rows.Count, Limit = result.Limit, Offset = result.Offset, Data = result.Rows });
         }
 
-        [AllowAnonymous]
         [HttpGet("GetLteBaselineRows")]
         public async Task<IActionResult> GetLteBaselineRows([FromQuery] LteBaselineRowsRequest request)
         {
@@ -245,7 +237,6 @@ namespace SignalTracker.Controllers
             return Ok(new { Status = 1, Count = result.Rows.Count, Limit = result.Limit, Offset = result.Offset, Data = result.Rows });
         }
 
-        [AllowAnonymous]
         [HttpPost("SavePredictionData")]
         public async Task<IActionResult> SavePredictionData([FromBody] PredictionDataBulkRequest request)
         {
@@ -277,7 +268,6 @@ namespace SignalTracker.Controllers
             return Ok(new { Status = 1, Inserted = inserted });
         }
 
-        [AllowAnonymous]
         [HttpPost("SaveLtePredictionResults")]
         public async Task<IActionResult> SaveLtePredictionResults([FromBody] LtePredictionBulkRequest request)
         {
@@ -302,7 +292,6 @@ namespace SignalTracker.Controllers
             return Ok(new { Status = 1, Inserted = inserted });
         }
 
-        [AllowAnonymous]
         [HttpPost("SaveLtePredictionRefined")]
         public async Task<IActionResult> SaveLtePredictionRefined([FromBody] LtePredictionRefinedBulkRequest request)
         {
@@ -327,7 +316,6 @@ namespace SignalTracker.Controllers
             return Ok(new { Status = 1, Inserted = inserted });
         }
 
-        [AllowAnonymous]
         [HttpPost("SaveLtePredictionOptimisedResults")]
         public async Task<IActionResult> SaveLtePredictionOptimisedResults([FromBody] LtePredictionOptimisedBulkRequest request)
         {
@@ -352,7 +340,6 @@ namespace SignalTracker.Controllers
             return Ok(new { Status = 1, Inserted = inserted });
         }
 
-        [AllowAnonymous]
         [HttpPost("SaveLtePredictionBaselineResults")]
         public async Task<IActionResult> SaveLtePredictionBaselineResults([FromBody] DictionaryRowsBulkRequest request)
         {
@@ -377,7 +364,6 @@ namespace SignalTracker.Controllers
             return Ok(new { Status = 1, Inserted = inserted });
         }
 
-        [AllowAnonymous]
         [HttpPost("SaveLtePredictionGeoFeatures")]
         public async Task<IActionResult> SaveLtePredictionGeoFeatures([FromBody] DictionaryRowsBulkRequest request)
         {
@@ -402,7 +388,6 @@ namespace SignalTracker.Controllers
             return Ok(new { Status = 1, Inserted = inserted });
         }
 
-        [AllowAnonymous]
         [HttpPost("DeleteLtePredictionGeoFeatures")]
         public async Task<IActionResult> DeleteLtePredictionGeoFeatures([FromBody] DictionaryRowsBulkRequest request)
         {
@@ -427,7 +412,6 @@ namespace SignalTracker.Controllers
             return Ok(new { Status = 1, Deleted = deleted });
         }
 
-        [AllowAnonymous]
         [HttpGet("GetNextRfOptimizationScenarioId")]
         public async Task<IActionResult> GetNextRfOptimizationScenarioId([FromQuery] long projectId)
         {
@@ -447,7 +431,6 @@ namespace SignalTracker.Controllers
             return Ok(new { Status = 1, ScenarioId = scenarioId });
         }
 
-        [AllowAnonymous]
         [HttpGet("GetLatestLteBaselineJobId")]
         public async Task<IActionResult> GetLatestLteBaselineJobId([FromQuery] long projectId)
         {
@@ -467,7 +450,6 @@ namespace SignalTracker.Controllers
             return Ok(new { Status = 1, JobId = jobId });
         }
 
-        [AllowAnonymous]
         [HttpGet("GetNextLteOptimizationScenarioId")]
         public async Task<IActionResult> GetNextLteOptimizationScenarioId([FromQuery] long projectId)
         {
@@ -487,7 +469,6 @@ namespace SignalTracker.Controllers
             return Ok(new { Status = 1, ScenarioId = scenarioId });
         }
 
-        [AllowAnonymous]
         [HttpPost("CreateLteOptimizationScenario")]
         public async Task<IActionResult> CreateLteOptimizationScenario([FromBody] LteOptimizationScenarioCreateRequest request)
         {
@@ -507,7 +488,6 @@ namespace SignalTracker.Controllers
             return Ok(new { Status = 1, ScenarioRowId = result.RowId, ScenarioId = result.ScenarioId });
         }
 
-        [AllowAnonymous]
         [HttpPost("UpdateLteOptimizationScenarioStatus")]
         public async Task<IActionResult> UpdateLteOptimizationScenarioStatus([FromBody] LteOptimizationScenarioStatusRequest request)
         {
@@ -527,7 +507,6 @@ namespace SignalTracker.Controllers
             return Ok(new { Status = 1 });
         }
 
-        [AllowAnonymous]
         [HttpPost("SaveRfOptimizationResults")]
         public async Task<IActionResult> SaveRfOptimizationResults([FromBody] RfOptimizationBulkRequest request)
         {
@@ -552,7 +531,6 @@ namespace SignalTracker.Controllers
             return Ok(new { Status = 1, Inserted = inserted });
         }
 
-        [AllowAnonymous]
         [HttpGet("PredictionDebugSummary")]
         public async Task<IActionResult> PredictionDebugSummary([FromQuery] long projectId)
         {
@@ -578,7 +556,6 @@ namespace SignalTracker.Controllers
             });
         }
 
-        [AllowAnonymous]
         [HttpGet("GetProject")]
         public async Task<IActionResult> GetProject([FromQuery] long projectId)
         {
@@ -603,7 +580,6 @@ namespace SignalTracker.Controllers
             return Ok(new { Status = 1, Data = project });
         }
 
-        [AllowAnonymous]
         [HttpGet("GetProjectRegions")]
         public async Task<IActionResult> GetProjectRegions([FromQuery] long projectId)
         {
@@ -623,7 +599,6 @@ namespace SignalTracker.Controllers
             return Ok(new { Status = 1, Count = rows.Count, Data = rows });
         }
 
-        [AllowAnonymous]
         [HttpPost("GetReportNetworkLogs")]
         public async Task<IActionResult> GetReportNetworkLogs([FromBody] SessionIdsPagedRequest request)
         {
@@ -650,7 +625,6 @@ namespace SignalTracker.Controllers
             });
         }
 
-        [AllowAnonymous]
         [HttpPost("GetSessions")]
         public async Task<IActionResult> GetSessions([FromBody] SessionIdsPagedRequest request)
         {
@@ -670,7 +644,6 @@ namespace SignalTracker.Controllers
             return Ok(new { Status = 1, Count = rows.Count, Data = rows });
         }
 
-        [AllowAnonymous]
         [HttpGet("GetUser")]
         public async Task<IActionResult> GetUser([FromQuery] int userId)
         {
@@ -695,7 +668,6 @@ namespace SignalTracker.Controllers
             return Ok(new { Status = 1, Data = user });
         }
 
-        [AllowAnonymous]
         [HttpGet("GetUserThresholds")]
         public async Task<IActionResult> GetUserThresholds([FromQuery] int userId)
         {
@@ -720,7 +692,6 @@ namespace SignalTracker.Controllers
             return Ok(new { Status = 1, Data = thresholds });
         }
 
-        [AllowAnonymous]
         [HttpPost("UpdateProjectDownloadPath")]
         public async Task<IActionResult> UpdateProjectDownloadPath([FromBody] ProjectDownloadPathUpdateRequest request)
         {

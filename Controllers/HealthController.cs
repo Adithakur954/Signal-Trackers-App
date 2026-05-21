@@ -4,10 +4,12 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using MySqlConnector;
 using SignalTracker.Models;
+using SignalTracker.Security;
 
 namespace SignalTracker.Controllers
 {
     [AllowAnonymous]
+    [PublicApiKey]
     [ApiController]
     [Route("healthz")]
     public class HealthController : ControllerBase
@@ -60,12 +62,12 @@ namespace SignalTracker.Controllers
             }
             catch (Exception ex)
             {
+                Console.WriteLine($"Main database health check failed: {ex.Message}");
                 mainDbWatch.Stop();
                 checks["main_database"] = new
                 {
                     status = "down",
-                    latencyMs = mainDbWatch.ElapsedMilliseconds,
-                    error = ex.Message
+                    latencyMs = mainDbWatch.ElapsedMilliseconds
                 };
                 healthy = false;
             }
@@ -113,12 +115,12 @@ namespace SignalTracker.Controllers
             }
             catch (Exception ex)
             {
+                Console.WriteLine($"Secondary database health check failed: {ex.Message}");
                 twDbWatch.Stop();
                 checks["tw_database"] = new
                 {
                     status = "down",
-                    latencyMs = twDbWatch.ElapsedMilliseconds,
-                    error = ex.Message
+                    latencyMs = twDbWatch.ElapsedMilliseconds
                 };
                 healthy = false;
             }

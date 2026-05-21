@@ -12,6 +12,7 @@ using Newtonsoft.Json;
 
 using SignalTracker.Helper;
 using SignalTracker.Models;
+using SignalTracker.Security;
 
 using System.Data;          // ConnectionState, DbType, etc.
 using System.Data.Common;   // DbCommand, DbConnection
@@ -28,6 +29,7 @@ namespace SignalTracker.Controllers
 {
     [Route("api/[controller]")]
     [ApiController]
+    [Authorize]
     public class MapViewController : BaseController
     {
         private readonly IWebHostEnvironment _env;
@@ -329,7 +331,7 @@ namespace SignalTracker.Controllers
             public int? company_id { get; set; }
         }
 
-        [HttpPost, AllowAnonymous, Route("user_signup")]
+        [HttpPost, AllowAnonymous, PublicApiKey, Route("user_signup")]
         public async Task<JsonResult> user_signup([FromBody] UserModel model)
         {
             var message = new ReturnAPIResponse();
@@ -399,7 +401,7 @@ namespace SignalTracker.Controllers
             public string? notes { get; set; }
         }
 
-        [HttpPost, AllowAnonymous, Route("start_session")]
+        [HttpPost, AllowAnonymous, PublicApiKey, Route("start_session")]
         public async Task<JsonResult> start_session([FromBody] SessionStartModel model)
         {
             var message = new ReturnAPIResponse();
@@ -438,7 +440,7 @@ namespace SignalTracker.Controllers
             public string? end_address { get; set; }
         }
 
-        [HttpPost, AllowAnonymous, Route("end_session")]
+        [HttpPost, AllowAnonymous, PublicApiKey, Route("end_session")]
         public async Task<JsonResult> end_session([FromBody] SessionEndModel model)
         {
             var message = new ReturnAPIResponse();
@@ -923,12 +925,39 @@ public class ProjectPolygonItem
                 }
 
                 var normalized = statusRaw.Trim().ToUpperInvariant();
-                return normalized switch
+                var compact = Regex.Replace(normalized, @"[\s_\-]+", "");
+
+                if (compact is "NOTCONNECTED" or "DISCONNECTED" or "FAILED" or "FAIL" or "ERROR" or "FALSE" or "0" or "2" or "NO")
                 {
-                    "SUCCESS" or "SUCCEEDED" or "PASS" => "SUCCESS",
-                    "FAILED" or "FAIL" or "ERROR" => "FAILED",
+                    return "FAILED";
+                }
+
+                if (compact is "SUCCESS" or "SUCCEEDED" or "SUCCESSFUL" or "PASS" or "PASSED" or "OK" or "TRUE" or "1" or "COMPLETE" or "COMPLETED" or "DONE" or "CONNECTED")
+                {
+                    return "SUCCESS";
+                }
+
+                if (compact.Contains("FAIL", StringComparison.OrdinalIgnoreCase) ||
+                    compact.Contains("ERROR", StringComparison.OrdinalIgnoreCase) ||
+                    compact.Contains("TIMEOUT", StringComparison.OrdinalIgnoreCase) ||
+                    compact.Contains("CANCEL", StringComparison.OrdinalIgnoreCase))
+                {
+                    return "FAILED";
+                }
+
+                return compact switch
+                {
                     _ => "FAILED"
                 };
+            }
+
+            private static string MergeStatus(string? currentStatus, string? nextStatusRaw)
+            {
+                var nextStatus = NormalizeStatus(nextStatusRaw);
+                return string.Equals(currentStatus, "SUCCESS", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(nextStatus, "SUCCESS", StringComparison.OrdinalIgnoreCase)
+                    ? "SUCCESS"
+                    : "FAILED";
             }
 
             private SubSessionStatusMetrics GetOrCreateStatusMetrics(string? statusRaw)
@@ -1041,21 +1070,27 @@ public class ProjectPolygonItem
                 }
 
                 var key = (int)subSessionId.Value;
+                var normalizedSubSessionType = NormalizeSubSessionType(subSessionType);
                 if (SubSessionLocationMap.TryGetValue(key, out var existing))
                 {
-                    existing.SubSessionType ??= NormalizeSubSessionType(subSessionType);
+                    var isSameSubSessionType = string.Equals(existing.SubSessionType, normalizedSubSessionType, StringComparison.OrdinalIgnoreCase);
+
+                    existing.SubSessionType ??= normalizedSubSessionType;
                     existing.StartLat ??= startLat;
                     existing.StartLon ??= startLon;
                     existing.EndLat ??= endLat;
                     existing.EndLon ??= endLon;
-                    existing.ResultStatus ??= NormalizeStatus(resultStatusRaw);
+                    if (isSameSubSessionType || string.IsNullOrWhiteSpace(existing.SubSessionType) || string.IsNullOrWhiteSpace(normalizedSubSessionType))
+                    {
+                        existing.ResultStatus = MergeStatus(existing.ResultStatus, resultStatusRaw);
+                    }
                     return;
                 }
 
                 SubSessionLocationMap[key] = new SubSessionLocation
                 {
                     SubSessionId = key,
-                    SubSessionType = NormalizeSubSessionType(subSessionType),
+                    SubSessionType = normalizedSubSessionType,
                     StartLat = startLat,
                     StartLon = startLon,
                     EndLat = endLat,
@@ -1550,7 +1585,7 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                 }
 
                 var cacheKey = BuildMapViewCacheKey(
-                    "subsession-v2",
+                    "subsession-v5",
                     requestedSessionIds.Count > 0 ? string.Join("-", requestedSessionIds) : "all");
 
                 var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
@@ -1608,7 +1643,14 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                             ELSE NULL
                         END AS file_size_bytes,
                         CASE
-                            WHEN JSON_VALID(json_data) THEN JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.result_status'))
+                            WHEN JSON_VALID(json_data) THEN COALESCE(
+                                JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.result_status')),
+                                JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.resultStatus')),
+                                JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.status')),
+                                JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.result')),
+                                JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.test_status')),
+                                JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.success'))
+                            )
                             ELSE NULL
                         END AS result_status
                     FROM tbl_sub_session
@@ -1619,7 +1661,7 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                     sql += $" AND session_id IN ({string.Join(", ", requestedSessionIds.Select((_, i) => $"@sid{i}"))})";
                 }
 
-                sql += ";";
+                sql += " ORDER BY id ASC;";
 
                 var sessionMap = new Dictionary<int, SubSessionAnalyticsAccumulator>();
                 var overall = new SubSessionAnalyticsAccumulator();
@@ -6233,7 +6275,7 @@ public JsonResult GetPredictionLog(
         // ===================== Image Upload ======================
         // =========================================================
 
-        [HttpPost, AllowAnonymous, Route("UploadImage")]
+        [HttpPost, AllowAnonymous, PublicApiKey, Route("UploadImage")]
         public async Task<IActionResult> UploadImage([FromForm] IFormFile file)
         {
             if (file == null || file.Length == 0)
@@ -6263,7 +6305,7 @@ public JsonResult GetPredictionLog(
             });
         }
 
-        [HttpPost, AllowAnonymous, Route("UploadImageLegacy")]
+        [HttpPost, AllowAnonymous, PublicApiKey, Route("UploadImageLegacy")]
         public async Task<IActionResult> UploadImageLegacy([FromForm] IFormFile file)
         {
             if (file == null || file.Length == 0)
@@ -6301,7 +6343,7 @@ public JsonResult GetPredictionLog(
             public List<log_network> data { get; set; } = new();
         }
 
-        [HttpPost, AllowAnonymous, Route("log_networkAsync")]
+        [HttpPost, AllowAnonymous, PublicApiKey, Route("log_networkAsync")]
         public async Task<JsonResult> log_networkAsync([FromBody] NetworkLogPostModel model)
         {
             var message = new ReturnMessage();

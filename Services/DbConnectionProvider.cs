@@ -33,7 +33,7 @@ namespace SignalTracker.Services
         {
             var context = _httpContextAccessor.HttpContext;
             if (context == null)
-                return MySqlConnectionStringHelper.EnsureZeroDateTimeHandling(_configuration.GetConnectionString("MySqlConnection"));
+                return GetConfiguredConnectionString("MySqlConnection");
 
             var path = (context.Request.Path.Value ?? string.Empty).ToLowerInvariant();
 
@@ -42,7 +42,7 @@ namespace SignalTracker.Services
                 path.Contains("/api/auth/login") ||
                 path.Contains("/home/getloggeduser"))
             {
-                return MySqlConnectionStringHelper.EnsureZeroDateTimeHandling(_configuration.GetConnectionString("MySqlConnection"));
+                return GetConfiguredConnectionString("MySqlConnection");
             }
 
             // User management write-paths are always sourced from MainDB.
@@ -51,7 +51,7 @@ namespace SignalTracker.Services
             // and get incorrectly pinned to Main DB.
             if (Array.Exists(MainDbOnlyAdminPaths, p => string.Equals(path, p, StringComparison.OrdinalIgnoreCase)))
             {
-                return MySqlConnectionStringHelper.EnsureZeroDateTimeHandling(_configuration.GetConnectionString("MySqlConnection"));
+                return GetConfiguredConnectionString("MySqlConnection");
             }
 
             // Explicit override for diagnostics/manual API testing
@@ -82,10 +82,22 @@ namespace SignalTracker.Services
 
             if (string.Equals(country, "TW", StringComparison.OrdinalIgnoreCase))
             {
-                return MySqlConnectionStringHelper.EnsureZeroDateTimeHandling(_configuration.GetConnectionString("MySqlConnection2"));
+                return GetConfiguredConnectionString("MySqlConnection2");
             }
 
-            return MySqlConnectionStringHelper.EnsureZeroDateTimeHandling(_configuration.GetConnectionString("MySqlConnection"));
+            return GetConfiguredConnectionString("MySqlConnection");
+        }
+
+        private string GetConfiguredConnectionString(string name)
+        {
+            var connectionString = MySqlConnectionStringHelper.EnsureZeroDateTimeHandling(_configuration.GetConnectionString(name));
+            if (!string.IsNullOrWhiteSpace(connectionString))
+            {
+                return connectionString;
+            }
+
+            throw new InvalidOperationException(
+                $"Missing database connection string '{name}'. Configure 'ConnectionStrings:{name}' in appsettings.Development.json, user-secrets, or the environment variable 'ConnectionStrings__{name}'.");
         }
     }
 

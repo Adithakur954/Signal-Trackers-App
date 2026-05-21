@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using SignalTracker.Models;
 using System;
@@ -7,6 +8,7 @@ namespace SignalTracker.Controllers
 {
     [Route("api/[controller]")]
     [ApiController]
+    [Authorize]
     public class RedisTestController : ControllerBase
     {
         private readonly RedisService _redis;
@@ -71,11 +73,11 @@ namespace SignalTracker.Controllers
             }
             catch (Exception ex)
             {
+                Console.WriteLine($"Redis health probe failed: {ex.Message}");
                 return StatusCode(503, new
                 {
                     success = false,
                     message = "Redis connection failed.",
-                    error = ex.Message,
                     connected = _redis.IsConnected
                 });
             }

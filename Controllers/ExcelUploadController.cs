@@ -12,6 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 using SignalTracker.Services; // Required for UserScopeService
+using SignalTracker.Security;
 
 namespace SignalTracker.Controllers
 {
@@ -59,6 +60,7 @@ namespace SignalTracker.Controllers
         // GET: /ExcelUpload/DownloadExcel
         [HttpGet("DownloadExcel")]
         [AllowAnonymous]
+        [PublicApiKey]
         public IActionResult DownloadExcel(int fileType, string? fileName)
         {
             var root = _env.ContentRootPath;
@@ -104,6 +106,7 @@ namespace SignalTracker.Controllers
         // GET: /ExcelUpload/DownloadPythonRuntime
         [HttpGet("DownloadPythonRuntime")]
         [AllowAnonymous]
+        [PublicApiKey]
         public IActionResult DownloadPythonRuntime()
         {
             return DownloadExcel(4, null);
@@ -111,7 +114,6 @@ namespace SignalTracker.Controllers
 
         // GET: /ExcelUpload/GetUploadedExcelFiles
         [HttpGet("GetUploadedExcelFiles")]
-        [AllowAnonymous]
         public async Task<IActionResult> GetUploadedExcelFiles(
             int fileType, 
             [FromQuery] int? company_id = null, // Added for SuperAdmin filtering
@@ -395,7 +397,6 @@ if (UploadFileType == 1)
 
         // GET: /ExcelUpload/Test
         [HttpGet("Test")]
-        [AllowAnonymous]
         public IActionResult Test()
         {
             return Ok(new 
