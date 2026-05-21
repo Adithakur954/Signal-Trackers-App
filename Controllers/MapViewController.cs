@@ -881,6 +881,7 @@ public class ProjectPolygonItem
             private sealed class SubSessionLocation
             {
                 public int SubSessionId { get; set; }
+                public string? SubSessionType { get; set; }
                 public float? StartLat { get; set; }
                 public float? StartLon { get; set; }
                 public float? EndLat { get; set; }
@@ -1032,7 +1033,7 @@ public class ProjectPolygonItem
                 statusMetrics.AddObservation(durationMs, speedKbps, fileSizeBytes);
             }
 
-            public void AddSubSessionLocation(long? subSessionId, float? startLat, float? startLon, float? endLat, float? endLon, string? resultStatusRaw)
+            public void AddSubSessionLocation(long? subSessionId, string? subSessionType, float? startLat, float? startLon, float? endLat, float? endLon, string? resultStatusRaw)
             {
                 if (!subSessionId.HasValue || subSessionId.Value < int.MinValue || subSessionId.Value > int.MaxValue)
                 {
@@ -1042,6 +1043,7 @@ public class ProjectPolygonItem
                 var key = (int)subSessionId.Value;
                 if (SubSessionLocationMap.TryGetValue(key, out var existing))
                 {
+                    existing.SubSessionType ??= NormalizeSubSessionType(subSessionType);
                     existing.StartLat ??= startLat;
                     existing.StartLon ??= startLon;
                     existing.EndLat ??= endLat;
@@ -1053,12 +1055,20 @@ public class ProjectPolygonItem
                 SubSessionLocationMap[key] = new SubSessionLocation
                 {
                     SubSessionId = key,
+                    SubSessionType = NormalizeSubSessionType(subSessionType),
                     StartLat = startLat,
                     StartLon = startLon,
                     EndLat = endLat,
                     EndLon = endLon,
                     ResultStatus = NormalizeStatus(resultStatusRaw)
                 };
+            }
+
+            private static string? NormalizeSubSessionType(string? subSessionType)
+            {
+                return string.IsNullOrWhiteSpace(subSessionType)
+                    ? null
+                    : subSessionType.Trim();
             }
 
             public object ToResponse()
@@ -1068,6 +1078,7 @@ public class ProjectPolygonItem
                     .Select(x => new
                     {
                         sub_session_id = x.SubSessionId,
+                        sub_session_type = x.SubSessionType,
                         coordinates = new
                         {
                             start_lat = x.StartLat,
@@ -1539,17 +1550,47 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                 }
 
                 var cacheKey = BuildMapViewCacheKey(
-                    "subsession",
+                    "subsession-v2",
                     requestedSessionIds.Count > 0 ? string.Join("-", requestedSessionIds) : "all");
 
                 var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
                 if (cached != null)
                     return Json(cached);
 
+                var conn = db.Database.GetDbConnection();
+                if (conn.State != ConnectionState.Open)
+                {
+                    await conn.OpenAsync();
+                }
+
+                var subSessionTypeColumn = await GetFirstExistingColumnAsync(
+                    conn,
+                    "tbl_sub_session",
+                    "sub_session_type",
+                    "session_type",
+                    "type",
+                    "test_type",
+                    "service_type");
+
+                var subSessionTypeSql = subSessionTypeColumn != null
+                    ? $"`{subSessionTypeColumn.Replace("`", "``")}`"
+                    : @"
+                        CASE
+                            WHEN JSON_VALID(json_data) THEN COALESCE(
+                                JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.sub_session_type')),
+                                JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.session_type')),
+                                JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.type')),
+                                JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.test_type')),
+                                JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.service_type'))
+                            )
+                            ELSE NULL
+                        END";
+
                 var sql = @"
                     SELECT
                         session_id,
                         sub_session_id,
+                        " + subSessionTypeSql + @" AS sub_session_type,
                         start_lat,
                         start_lon,
                         end_lat,
@@ -1583,12 +1624,6 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                 var sessionMap = new Dictionary<int, SubSessionAnalyticsAccumulator>();
                 var overall = new SubSessionAnalyticsAccumulator();
 
-                var conn = db.Database.GetDbConnection();
-                if (conn.State != ConnectionState.Open)
-                {
-                    await conn.OpenAsync();
-                }
-
                 await using var cmd = conn.CreateCommand();
                 cmd.CommandText = sql;
 
@@ -1608,14 +1643,15 @@ public async Task<IActionResult> DeleteAvailablePolygon(
 
                         var currentSessionId = reader.GetInt32(0);
                         long? subSessionId = reader.IsDBNull(1) ? null : reader.GetInt64(1);
-                        float? subSessionStartLat = TryParseNullableFloat(reader.IsDBNull(2) ? null : reader.GetValue(2)?.ToString());
-                        float? subSessionStartLon = TryParseNullableFloat(reader.IsDBNull(3) ? null : reader.GetValue(3)?.ToString());
-                        float? subSessionEndLat = TryParseNullableFloat(reader.IsDBNull(4) ? null : reader.GetValue(4)?.ToString());
-                        float? subSessionEndLon = TryParseNullableFloat(reader.IsDBNull(5) ? null : reader.GetValue(5)?.ToString());
-                        var durationMs = TryParseNullableDouble(reader.IsDBNull(6) ? null : reader.GetValue(6)?.ToString());
-                        var speedKbps = TryParseNullableDouble(reader.IsDBNull(7) ? null : reader.GetValue(7)?.ToString());
-                        var fileSizeBytes = TryParseNullableDouble(reader.IsDBNull(8) ? null : reader.GetValue(8)?.ToString());
-                        var resultStatus = reader.IsDBNull(9) ? null : reader.GetValue(9)?.ToString();
+                        var subSessionType = reader.IsDBNull(2) ? null : reader.GetValue(2)?.ToString();
+                        float? subSessionStartLat = TryParseNullableFloat(reader.IsDBNull(3) ? null : reader.GetValue(3)?.ToString());
+                        float? subSessionStartLon = TryParseNullableFloat(reader.IsDBNull(4) ? null : reader.GetValue(4)?.ToString());
+                        float? subSessionEndLat = TryParseNullableFloat(reader.IsDBNull(5) ? null : reader.GetValue(5)?.ToString());
+                        float? subSessionEndLon = TryParseNullableFloat(reader.IsDBNull(6) ? null : reader.GetValue(6)?.ToString());
+                        var durationMs = TryParseNullableDouble(reader.IsDBNull(7) ? null : reader.GetValue(7)?.ToString());
+                        var speedKbps = TryParseNullableDouble(reader.IsDBNull(8) ? null : reader.GetValue(8)?.ToString());
+                        var fileSizeBytes = TryParseNullableDouble(reader.IsDBNull(9) ? null : reader.GetValue(9)?.ToString());
+                        var resultStatus = reader.IsDBNull(10) ? null : reader.GetValue(10)?.ToString();
 
                         if (!sessionMap.TryGetValue(currentSessionId, out var sessionAgg))
                         {
@@ -1624,7 +1660,7 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                         }
 
                         sessionAgg.AddSubSession(subSessionId);
-                        sessionAgg.AddSubSessionLocation(subSessionId, subSessionStartLat, subSessionStartLon, subSessionEndLat, subSessionEndLon, resultStatus);
+                        sessionAgg.AddSubSessionLocation(subSessionId, subSessionType, subSessionStartLat, subSessionStartLon, subSessionEndLat, subSessionEndLon, resultStatus);
                         sessionAgg.AddMetrics(durationMs, speedKbps, fileSizeBytes, resultStatus);
 
                         overall.AddMetrics(durationMs, speedKbps, fileSizeBytes, resultStatus);
@@ -1698,6 +1734,40 @@ public class AvailablePolygonsResponse
             p.ParameterName = name;
             p.Value = value ?? DBNull.Value;
             cmd.Parameters.Add(p);
+        }
+
+        private static async Task<string?> GetFirstExistingColumnAsync(DbConnection conn, string tableName, params string[] candidateColumns)
+        {
+            if (candidateColumns.Length == 0)
+            {
+                return null;
+            }
+
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = $@"
+                SELECT COLUMN_NAME
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = @tableName
+                  AND COLUMN_NAME IN ({string.Join(", ", candidateColumns.Select((_, i) => $"@column{i}"))});";
+
+            AddParam(cmd, "@tableName", tableName);
+            for (var i = 0; i < candidateColumns.Length; i++)
+            {
+                AddParam(cmd, $"@column{i}", candidateColumns[i]);
+            }
+
+            var existingColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            await using var reader = await cmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                if (!reader.IsDBNull(0))
+                {
+                    existingColumns.Add(reader.GetString(0));
+                }
+            }
+
+            return candidateColumns.FirstOrDefault(existingColumns.Contains);
         }
 
         private static double? TryParseNullableDouble(string? raw)
