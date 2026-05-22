@@ -1593,7 +1593,7 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                     || string.Equals(Request?.Query["includeStatus"], "1", StringComparison.OrdinalIgnoreCase);
 
                 var cacheKey = BuildMapViewCacheKey(
-                    "subsession-v9",
+                    "subsession-v10",
                     requestedSessionIds.Count > 0 ? string.Join("-", requestedSessionIds) : "all",
                     isWithStatusRoute ? "with-status" : "base");
 
@@ -1633,16 +1633,58 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                 var resultStatusColumn = await GetFirstExistingColumnAsync(
                     conn,
                     "tbl_sub_session",
-                    "status",
-                    "result_status",
-                    "resultStatus",
-                    "test_status",
-                    "connection_status",
-                    "result");
+                    "status");
 
                 var resultStatusSql = resultStatusColumn != null
                     ? $"NULLIF(TRIM(CAST(`{resultStatusColumn.Replace("`", "``")}` AS CHAR)), '')"
-                    : "NULL";
+                    : @"
+                        CASE
+                            WHEN JSON_VALID(json_data) THEN NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.result_status'))), '')
+                            ELSE NULL
+                        END";
+
+                var durationColumn = await GetFirstExistingColumnAsync(
+                    conn,
+                    "tbl_sub_session",
+                    "duration_ms",
+                    "duration",
+                    "call_duration_ms");
+
+                var speedColumn = await GetFirstExistingColumnAsync(
+                    conn,
+                    "tbl_sub_session",
+                    "speed_kbps",
+                    "speed");
+
+                var fileSizeColumn = await GetFirstExistingColumnAsync(
+                    conn,
+                    "tbl_sub_session",
+                    "file_size_bytes",
+                    "file_size");
+
+                var durationSql = durationColumn != null
+                    ? $"NULLIF(TRIM(CAST(`{durationColumn.Replace("`", "``")}` AS CHAR)), '')"
+                    : @"
+                        CASE
+                            WHEN JSON_VALID(json_data) THEN JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.duration_ms'))
+                            ELSE NULL
+                        END";
+
+                var speedSql = speedColumn != null
+                    ? $"NULLIF(TRIM(CAST(`{speedColumn.Replace("`", "``")}` AS CHAR)), '')"
+                    : @"
+                        CASE
+                            WHEN JSON_VALID(json_data) THEN JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.speed_kbps'))
+                            ELSE NULL
+                        END";
+
+                var fileSizeSql = fileSizeColumn != null
+                    ? $"NULLIF(TRIM(CAST(`{fileSizeColumn.Replace("`", "``")}` AS CHAR)), '')"
+                    : @"
+                        CASE
+                            WHEN JSON_VALID(json_data) THEN JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.file_size_bytes'))
+                            ELSE NULL
+                        END";
 
                 var sql = @"
                     SELECT
@@ -1654,26 +1696,10 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                         start_lon,
                         end_lat,
                         end_lon,
-                        CASE
-                            WHEN JSON_VALID(json_data) THEN JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.duration_ms'))
-                            ELSE NULL
-                        END AS duration_ms,
-                        CASE
-                            WHEN JSON_VALID(json_data) THEN JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.speed_kbps'))
-                            ELSE NULL
-                        END AS speed_kbps,
-                        CASE
-                            WHEN JSON_VALID(json_data) THEN JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.file_size_bytes'))
-                            ELSE NULL
-                        END AS file_size_bytes,
-                        COALESCE(
-                            CASE
-                                WHEN JSON_VALID(json_data) THEN NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.result_status'))), '')
-                                ELSE NULL
-                            END,
-                            " + resultStatusSql + @",
-                            '1'
-                        ) AS result_status
+                        " + durationSql + @" AS duration_ms,
+                        " + speedSql + @" AS speed_kbps,
+                        " + fileSizeSql + @" AS file_size_bytes,
+                        " + resultStatusSql + @" AS result_status
                     FROM tbl_sub_session
                     WHERE session_id IS NOT NULL";
 
