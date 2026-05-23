@@ -226,6 +226,7 @@ internal class Program
         });
 
         app.UseAuthentication();
+        app.UseMiddleware<CsrfProtectionMiddleware>();
         app.UseAuthorization();
         app.UsePartitionedCookieSupport();
 

@@ -2,10 +2,9 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using SignalTracker.Models;
+using SignalTracker.Security;
 using SignalTracker.Services;
 using SignalTracker.DTOs;
-using System.Security.Cryptography;
-using System.Text;
 using Microsoft.Extensions.Configuration;
 
 namespace SignalTracker.Controllers
@@ -113,7 +112,7 @@ namespace SignalTracker.Controllers
                     if (string.IsNullOrEmpty(request.password))
                         return BadRequest(new { Status = 0, Message = "Password is required for new companies" });
 
-                    string hashedPassword = Sha256Hash(request.password);
+                    string hashedPassword = PasswordSecurity.HashPassword(request.password);
 
                     // C. Generate Unique Company Code
                     string companyCode;
@@ -304,7 +303,7 @@ else
     // ==============================
     if (!string.IsNullOrEmpty(request.password))
     {
-        var hashedPassword = Sha256Hash(request.password);
+        var hashedPassword = PasswordSecurity.HashPassword(request.password);
         existingCompany.password = hashedPassword;
 
         // Keep the default company admin user in sync with company password
@@ -364,17 +363,6 @@ else
             catch (Exception ex)
             {
                 return StatusCode(500, new { Status = 0, Message = "Error saving company: " + ex.Message });
-            }
-        }
-   private static string Sha256Hash(string input)
-        {
-            using (SHA256 sha256 = SHA256.Create())
-            {
-                byte[] bytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(input));
-                StringBuilder sb = new StringBuilder();
-                foreach (byte b in bytes)
-                    sb.Append(b.ToString("x2"));
-                return sb.ToString();
             }
         }
         // Delete Company 
@@ -844,7 +832,7 @@ public async Task<IActionResult> UpdateUser([FromQuery] int userId, [FromBody] U
         }
 
         if (!string.IsNullOrWhiteSpace(request.password))
-            user.password = Sha256Hash(request.password);
+            user.password = PasswordSecurity.HashPassword(request.password);
 
         await _db.SaveChangesAsync();
 

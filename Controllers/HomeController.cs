@@ -10,6 +10,7 @@ using Microsoft.AspNetCore.Diagnostics;
 using System.Security.Claims;
 using SignalTracker.Helper;
 using Microsoft.Extensions.Configuration;
+using SignalTracker.Security;
 using SignalTracker.Services;
 
 namespace SignalTracker.Controllers
@@ -133,6 +134,58 @@ namespace SignalTracker.Controllers
                 .SingleOrDefaultAsync();
         }
 
+        private async Task UpgradePasswordHashIfNeededAsync(UserLite user, string sourceDb, string submittedPassword)
+        {
+            if (!PasswordSecurity.NeedsUpgrade(user.password)) return;
+
+            try
+            {
+                var upgradedHash = PasswordSecurity.HashPassword(submittedPassword);
+                if (string.Equals(sourceDb, "TW", StringComparison.OrdinalIgnoreCase))
+                {
+                    var twConnectionString = MySqlConnectionStringHelper.EnsureZeroDateTimeHandling(_configuration.GetConnectionString("MySqlConnection2"));
+                    if (string.IsNullOrWhiteSpace(twConnectionString)) return;
+
+                    var optionsBuilder = new DbContextOptionsBuilder<ApplicationDbContext>();
+                    optionsBuilder.UseMySql(twConnectionString, new MySqlServerVersion(new Version(8, 0, 29)));
+
+                    await using var twDb = new ApplicationDbContext(optionsBuilder.Options);
+                    var trackedUser = await twDb.tbl_user.FirstOrDefaultAsync(u => u.id == user.id);
+                    if (trackedUser == null) return;
+
+                    trackedUser.password = upgradedHash;
+                    await twDb.SaveChangesAsync();
+                }
+                else
+                {
+                    var trackedUser = await _db.tbl_user.FirstOrDefaultAsync(u => u.id == user.id);
+                    if (trackedUser == null) return;
+
+                    trackedUser.password = upgradedHash;
+                    await _db.SaveChangesAsync();
+                }
+
+                user.password = upgradedHash;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Password hash upgrade failed for user {UserId} in {SourceDb}", user.id, sourceDb);
+            }
+        }
+
+        private async Task<List<string>> GetEnabledFeaturesSafeAsync(int userId, CancellationToken ct = default)
+        {
+            try
+            {
+                return await _licenseFeatureService.GetEnabledFeaturesForUserAsync(userId, ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Unable to load enabled features for user {UserId}", userId);
+                return new List<string>();
+            }
+        }
+
         [HttpPost("UserLogin")]
         public async Task<JsonResult> UserLogin([FromBody] LoginData obj)
         {
@@ -156,7 +209,7 @@ namespace SignalTracker.Controllers
                 if (preferTw)
                 {
                     var twUser = await GetUserForLoginTw(emailNormalized);
-                    if (twUser != null && twUser.password == obj.Password)
+                    if (twUser != null && PasswordSecurity.VerifyPassword(obj.Password, twUser.password, allowPlainTextFallback: true))
                     {
                         user = twUser;
                         loginSource = "TW";
@@ -171,13 +224,13 @@ namespace SignalTracker.Controllers
                     user = await GetUserForLogin(_db, emailNormalized);
                     var dbMs = sw.ElapsedMilliseconds;
 
-                    if (user != null && user.password == obj.Password)
+                    if (user != null && PasswordSecurity.VerifyPassword(obj.Password, user.password, allowPlainTextFallback: true))
                     {
                         var resolvedCountry = (user.country_code ?? string.Empty).Trim().ToUpperInvariant();
                         if (resolvedCountry == "TW")
                         {
                             var twUser = await GetUserForLoginTw(emailNormalized);
-                            if (twUser != null && twUser.password == obj.Password)
+                            if (twUser != null && PasswordSecurity.VerifyPassword(obj.Password, twUser.password, allowPlainTextFallback: true))
                             {
                                 user = twUser;
                                 loginSource = "TW";
@@ -187,7 +240,7 @@ namespace SignalTracker.Controllers
                     else
                     {
                         var twUser = await GetUserForLoginTw(emailNormalized);
-                        if (twUser == null || twUser.password != obj.Password)
+                        if (twUser == null || !PasswordSecurity.VerifyPassword(obj.Password, twUser.password, allowPlainTextFallback: true))
                             return Json(new { success = false, message = "Invalid email or password!" });
 
                         user = twUser;
@@ -195,33 +248,37 @@ namespace SignalTracker.Controllers
                     }
                 }
 
-                if (_redis?.IsConnected != true)
+                var lockValue = $"{user!.id}:{user.email}:{DateTimeOffset.UtcNow:O}";
+                userLockKey = BuildUserLoginLockKey(user.id);
+
+                if (_redis?.IsConnected == true)
+                {
+                    if (obj.ForceLogin == true)
+                    {
+                        await _redis.DeleteAsync(userLockKey);
+                        // Backward compatibility: clear old single global lock key as well.
+                        await _redis.DeleteAsync(LegacyGlobalLoginLockKey);
+                    }
+
+                    lockAcquired = await _redis.TrySetStringAsync(userLockKey, lockValue, UserLoginLockTtlSeconds);
+                    if (!lockAcquired)
+                    {
+                        return Json(new { success = false, message = "Sorry, someone is already logged in. Please try again later." });
+                    }
+                }
+                else if (_configuration.GetValue<bool>("Security:RequireRedisLoginLock"))
                 {
                     return Json(new { success = false, message = "Login service is temporarily unavailable. Please try again." });
                 }
 
-                var lockValue = $"{user!.id}:{user.email}:{DateTimeOffset.UtcNow:O}";
-                userLockKey = BuildUserLoginLockKey(user.id);
-
-                if (obj.ForceLogin == true)
-                {
-                    await _redis.DeleteAsync(userLockKey);
-                    // Backward compatibility: clear old single global lock key as well.
-                    await _redis.DeleteAsync(LegacyGlobalLoginLockKey);
-                }
-
-                lockAcquired = await _redis.TrySetStringAsync(userLockKey, lockValue, UserLoginLockTtlSeconds);
-                if (!lockAcquired)
-                {
-                    return Json(new { success = false, message = "Sorry, someone is already logged in. Please try again later." });
-                }
-
                 var resolvedCountryCode = (string.IsNullOrWhiteSpace(user.country_code) ? loginSource : user.country_code).Trim().ToUpperInvariant();
+                await UpgradePasswordHashIfNeededAsync(user, loginSource, obj.Password);
 
-                var enabledFeatures = await _licenseFeatureService.GetEnabledFeaturesForUserAsync(user.id);
+                var enabledFeatures = await GetEnabledFeaturesSafeAsync(user.id);
 
                 var claims = new List<Claim>
                 {
+                    new Claim(ClaimTypes.Email, user.email),
                     new Claim(ClaimTypes.Name, user.email),
                     new Claim("UserId", user.id.ToString()),
                     new Claim("UserTypeId", user.m_user_type_id.ToString()),
@@ -405,7 +462,7 @@ namespace SignalTracker.Controllers
                     return Json(ret);
                 }
 
-                user.password = model.NewPassword;
+                user.password = PasswordSecurity.HashPassword(model.NewPassword);
                 user.uid = null;
                 _db.SaveChanges();
 

@@ -14,6 +14,7 @@ Required production values should be supplied through environment variables or a
 - `SMS_ENTITY_ID`
 - `DATAPROTECTION_KEYS_PATH`
 - `ALLOWED_ORIGINS`
+- `Security__RequireCsrfHeader=true` for production cookie-auth deployments
 
 Security-sensitive startup code is organized under:
 
@@ -26,5 +27,7 @@ Before production deployment:
 - Rotate any credentials that were previously committed to `appsettings.json`.
 - Keep `Security:AllowNullOrigin` set to `false`.
 - Keep `Security:AllowLoopbackOrigins` set to `false` outside development.
+- Keep `Security:RequireCsrfHeader` set to `true` in production and send the `X-CSRF-TOKEN` header with authenticated write requests.
 - Store Data Protection keys outside the application source folder.
 - Do not publish local upload folders, build outputs, logs, or database record dumps.
+- Rotate any database, Redis, or SMS credentials that were ever present in repository history before VAPT.

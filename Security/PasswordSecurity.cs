@@ -17,14 +17,21 @@ public static class PasswordSecurity
             return BCrypt.Net.BCrypt.Verify(submittedPassword, storedPassword);
         }
 
-        if (IsSha256Hex(storedPassword))
+        var storedPasswordTrimmed = storedPassword.Trim();
+
+        if (IsSha256Hex(storedPasswordTrimmed))
         {
-            return string.Equals(Sha256Hex(submittedPassword), storedPassword, StringComparison.OrdinalIgnoreCase);
+            if (allowPlainTextFallback
+                && string.Equals(submittedPassword, storedPasswordTrimmed, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            return string.Equals(Sha256Hex(submittedPassword), storedPasswordTrimmed, StringComparison.OrdinalIgnoreCase);
         }
 
         if (!allowPlainTextFallback) return false;
 
-        var storedPasswordTrimmed = storedPassword.Trim();
         if (string.Equals(submittedPassword, storedPassword, StringComparison.Ordinal)
             || string.Equals(submittedPassword, storedPasswordTrimmed, StringComparison.Ordinal))
         {

@@ -18,6 +18,7 @@ using System.Threading.Tasks;
 using Microsoft.AspNetCore.Authorization;
 using System.Web;
 using System.Security.Claims;
+using SignalTracker.Security;
 using SignalTracker.Services;
 
 namespace SignalTracker.Controllers
@@ -1070,7 +1071,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
                 var getUser = await db.tbl_user.FirstOrDefaultAsync(a => a.id == userid);
                 if (getUser != null)
                 {
-                    getUser.password = newpwd;
+                    getUser.password = PasswordSecurity.HashPassword(newpwd);
                     db.Entry(getUser).State = EntityState.Modified;
                     await db.SaveChangesAsync();
                     ret.Status = 1;
@@ -1102,10 +1103,10 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
                 // Assuming HttpContext is available via BaseController/Middleware
                 if (HttpContext?.Session.GetString("CaptchaImageText") == captcha)
                 {
-                    var getUser = await db.tbl_user.FirstOrDefaultAsync(a => a.id == userid && a.password == oldpwd);
-                    if (getUser != null)
+                    var getUser = await db.tbl_user.FirstOrDefaultAsync(a => a.id == userid);
+                    if (getUser != null && PasswordSecurity.VerifyPassword(oldpwd, getUser.password, allowPlainTextFallback: true))
                     {
-                        getUser.password = newpwd;
+                        getUser.password = PasswordSecurity.HashPassword(newpwd);
                         db.Entry(getUser).State = EntityState.Modified;
                         await db.SaveChangesAsync();
                         ret.Status = 1;
@@ -5143,7 +5144,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
     string operatorName,
     DateTime? from,
     DateTime? to,
-    [FromQuery] int? company_id = null) // <--- ADDED PARAMETER
+    [FromQuery] int? company_id = null) 
         {
             // =========================================================
             // 1. SMART SECURITY: RESOLVE COMPANY ID
