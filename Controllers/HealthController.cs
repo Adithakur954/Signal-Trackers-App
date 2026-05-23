@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -60,9 +60,9 @@ namespace SignalTracker.Controllers
                 };
                 healthy = false;
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                Console.WriteLine($"Main database health check failed: {ex.Message}");
+                Console.WriteLine("Main database health check failed: operation failed (see server logs)");
                 mainDbWatch.Stop();
                 checks["main_database"] = new
                 {
@@ -113,9 +113,9 @@ namespace SignalTracker.Controllers
                 };
                 healthy = false;
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                Console.WriteLine($"Secondary database health check failed: {ex.Message}");
+                Console.WriteLine("Secondary database health check failed: operation failed (see server logs)");
                 twDbWatch.Stop();
                 checks["tw_database"] = new
                 {
@@ -181,3 +181,5 @@ namespace SignalTracker.Controllers
         }
     }
 }
+
+

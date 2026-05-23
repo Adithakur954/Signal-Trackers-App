@@ -1,4 +1,4 @@
-namespace SignalTracker.DTO.PythonBridge
+﻿namespace SignalTracker.DTO.PythonBridge
 {
     public class DriveTestRowsRequest
     {
@@ -10,3 +10,5 @@ namespace SignalTracker.DTO.PythonBridge
         public int Offset { get; set; } = 0;
     }
 }
+
+

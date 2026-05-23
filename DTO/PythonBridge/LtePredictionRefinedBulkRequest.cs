@@ -1,4 +1,4 @@
-namespace SignalTracker.DTO.PythonBridge
+﻿namespace SignalTracker.DTO.PythonBridge
 {
     public class LtePredictionRefinedBulkRequest
     {
@@ -17,3 +17,5 @@ namespace SignalTracker.DTO.PythonBridge
         public double? measured_dt_rsrp { get; set; }
     }
 }
+
+

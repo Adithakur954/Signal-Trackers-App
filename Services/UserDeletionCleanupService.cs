@@ -1,4 +1,4 @@
-using Microsoft.EntityFrameworkCore;
+﻿using Microsoft.EntityFrameworkCore;
 using SignalTracker.Models;
 
 namespace SignalTracker.Services
@@ -172,3 +172,5 @@ namespace SignalTracker.Services
         }
     }
 }
+
+

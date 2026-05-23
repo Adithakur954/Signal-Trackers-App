@@ -1,4 +1,4 @@
-using System.Security.Cryptography;
+﻿using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore;
 using SignalTracker.Models;
@@ -316,3 +316,5 @@ namespace SignalTracker.Services
         }
     }
 }
+
+

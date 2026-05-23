@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Data.Common;
@@ -11,6 +11,7 @@ using System.Threading.Tasks;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using SignalTracker.Helper;
 using SignalTracker.Models;
 using SignalTracker.Services;
 
@@ -77,7 +78,7 @@ namespace SignalTracker.Controllers
 
             var sw = Stopwatch.StartNew();
 
-            // ── 1. AUTH & COMPANY SCOPING ──
+            // â”€â”€ 1. AUTH & COMPANY SCOPING â”€â”€
             int targetCompanyId = _userScope.GetTargetCompanyId(User, company_id);
             bool isSuperAdmin = _userScope.IsSuperAdmin(User);
             if (!isSuperAdmin && targetCompanyId == 0)
@@ -96,7 +97,7 @@ namespace SignalTracker.Controllers
 
                 try
                 {
-                    // ── ENSURE TABLE EXISTS ──
+                    // â”€â”€ ENSURE TABLE EXISTS â”€â”€
                     await using (var cmdCreate = conn.CreateCommand())
                     {
                         cmdCreate.CommandText = @"
@@ -219,7 +220,7 @@ namespace SignalTracker.Controllers
                         await cmdCreateIdx.ExecuteNonQueryAsync();
                     }
 
-                    // ── 3. FETCH grid_size FROM tbl_project ──
+                    // â”€â”€ 3. FETCH grid_size FROM tbl_project â”€â”€
                     double gridSizeMeters = gridSize ?? 0;
                     if (gridSizeMeters <= 0)
                     {
@@ -233,7 +234,7 @@ namespace SignalTracker.Controllers
                     if (gridSizeMeters <= 0)
                         return BadRequest(new { Status = 0, Message = "grid_size not available. Pass gridSize query param (meters)." });
 
-                    // ── 4. SECURITY: project belongs to company ──
+                    // â”€â”€ 4. SECURITY: project belongs to company â”€â”€
                     if (targetCompanyId > 0)
                     {
                         await using var cmdAcc = conn.CreateCommand();
@@ -258,7 +259,7 @@ namespace SignalTracker.Controllers
                         await cmdUpdateGrid.ExecuteNonQueryAsync();
                     }
 
-                    // ── 5. FETCH PREDICTION DATA (raw ADO.NET) ──
+                    // â”€â”€ 5. FETCH PREDICTION DATA (raw ADO.NET) â”€â”€
                     // Use optimized + baseline-only logic similar to GetSitePredictionOptimised.
                     // Baseline rows are included only when there is no matching optimized row
                     // across stable identifiers (nodeb_id_cell_id, node_b_id+cell_id, site_id+cell_id)
@@ -287,7 +288,7 @@ namespace SignalTracker.Controllers
                         });
                     }
 
-                    // ── 6. RESOLVE GRID BOUNDARY ──
+                    // â”€â”€ 6. RESOLVE GRID BOUNDARY â”€â”€
                     // If regionId is explicitly provided, use that region polygon.
                     // Otherwise, use project map_regions polygons (all active regions) as boundary.
                     // If no valid map_regions polygon exists, fallback to prediction bounds.
@@ -363,7 +364,7 @@ namespace SignalTracker.Controllers
                     if (gridCells.Count == 0)
                         return Ok(new GridAnalyticsResponse { Status = 1, Message = $"No grid cells generated for boundary source: {boundarySource}." });
 
-                    // ── 7. MAP POINTS → GRIDS ──
+                    // â”€â”€ 7. MAP POINTS â†’ GRIDS â”€â”€
                     var baseByGrid = MapPointsToGrids(baselinePts, mLat, mLon, gLat, gLon, gridCells);
                     var optByGrid = MapPointsToGrids(optimizedPts, mLat, mLon, gLat, gLon, gridCells);
                     int baselineMappedPoints = baseByGrid.Values.Sum(v => v.Count);
@@ -391,7 +392,7 @@ namespace SignalTracker.Controllers
                         }
                     }
 
-                    // ── 8. COMPUTE METRICS & DIFFERENCES ──
+                    // â”€â”€ 8. COMPUTE METRICS & DIFFERENCES â”€â”€
                     var resultsList = new List<grid_analytics_results>();
                     foreach (var cell in gridCells.Values)
                     {
@@ -446,7 +447,7 @@ namespace SignalTracker.Controllers
                         });
                     }
 
-                    // ── 9. REMOVE EXISTING AND STORE TO DATABASE ──
+                    // â”€â”€ 9. REMOVE EXISTING AND STORE TO DATABASE â”€â”€
                     await using (var cmdDel = conn.CreateCommand())
                     {
                         if (regionId.HasValue && regionId.Value > 0)
@@ -498,10 +499,10 @@ namespace SignalTracker.Controllers
                         await conn.CloseAsync();
                 }
             }
-            catch (Exception ex)
+            catch (Exception)
             {
                 sw.Stop();
-                return StatusCode(500, new { Status = 0, Message = "Error: " + ex.Message });
+                return StatusCode(500, new { Status = 0, Message = "An internal server error occurred." });
             }
         }
 
@@ -554,7 +555,7 @@ namespace SignalTracker.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new { Status = 0, Message = "Error: " + ex.Message });
+                return StatusCode(500, new { Status = 0, Message = "Error: " + SafeException.Get(ex) });
             }
         }
 
@@ -713,7 +714,7 @@ namespace SignalTracker.Controllers
             catch (Exception ex)
             {
                 sw.Stop();
-                return StatusCode(500, new { Status = 0, Message = "Error: " + ex.Message });
+                return StatusCode(500, new { Status = 0, Message = "Error: " + SafeException.Get(ex) });
             }
         }
 
@@ -1011,7 +1012,7 @@ namespace SignalTracker.Controllers
             catch (Exception ex)
             {
                 sw.Stop();
-                return StatusCode(500, new { Status = 0, Message = "Error: " + ex.Message });
+                return StatusCode(500, new { Status = 0, Message = "Error: " + SafeException.Get(ex) });
             }
         }
 
@@ -1244,7 +1245,7 @@ namespace SignalTracker.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new { Status = 0, Message = "Error: " + ex.Message });
+                return StatusCode(500, new { Status = 0, Message = "Error: " + SafeException.Get(ex) });
             }
         }
 
@@ -1982,4 +1983,6 @@ WHERE spo.tbl_project_id = @pid;";
         }
     }
 }
+
+
 

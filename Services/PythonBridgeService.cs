@@ -1,4 +1,4 @@
-using System.Data;
+﻿using System.Data;
 using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
@@ -1471,3 +1471,5 @@ namespace SignalTracker.Services
         }
     }
 }
+
+

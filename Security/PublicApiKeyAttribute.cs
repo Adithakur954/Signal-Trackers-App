@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Filters;
 using Microsoft.Extensions.Primitives;
 
@@ -57,3 +57,5 @@ public sealed class PublicApiKeyAttribute : Attribute, IAuthorizationFilter
         return values.Any(value => string.Equals(value, configuredKey, StringComparison.Ordinal));
     }
 }
+
+

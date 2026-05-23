@@ -1,4 +1,4 @@
-using MySqlConnector;
+﻿using MySqlConnector;
 
 namespace SignalTracker.Services
 {
@@ -133,3 +133,5 @@ namespace SignalTracker.Services
         }
     }
 }
+
+

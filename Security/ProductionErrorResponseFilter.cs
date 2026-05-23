@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Filters;
 
 namespace SignalTracker.Security;
@@ -49,3 +49,5 @@ public sealed class ProductionErrorResponseFilter : IResultFilter
         return statusCode >= StatusCodes.Status500InternalServerError;
     }
 }
+
+

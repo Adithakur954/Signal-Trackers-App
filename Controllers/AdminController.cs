@@ -348,9 +348,9 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
             {
                 return await _redis.GetObjectAsync<T>(cacheKey);
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                Console.WriteLine($" Redis read error [{cacheKey}]: {ex.Message}");
+                Console.WriteLine($" Redis read error [{cacheKey}]: operation failed (see server logs)");
                 return null;
             }
         }
@@ -364,9 +364,9 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
             {
                 await _redis.SetObjectAsync(cacheKey, value, ttlSeconds);
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                Console.WriteLine($" Redis write error [{cacheKey}]: {ex.Message}");
+                Console.WriteLine($" Redis write error [{cacheKey}]: operation failed (see server logs)");
             }
         }
 
@@ -379,9 +379,9 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
             {
                 return await _redis.GetStringAsync(cacheKey);
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                Console.WriteLine($" Redis read error [{cacheKey}]: {ex.Message}");
+                Console.WriteLine($" Redis read error [{cacheKey}]: operation failed (see server logs)");
                 return null;
             }
         }
@@ -395,9 +395,9 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
             {
                 await _redis.SetStringAsync(cacheKey, value, ttlSeconds);
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                Console.WriteLine($" Redis write error [{cacheKey}]: {ex.Message}");
+                Console.WriteLine($" Redis write error [{cacheKey}]: operation failed (see server logs)");
             }
         }
 
@@ -489,7 +489,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($" Redis invalidation error [{pattern}]: {ex.Message}");
+                    Console.WriteLine($" Redis invalidation error [{pattern}]: {SafeException.Get(ex)}");
                 }
             }
         }
@@ -648,7 +648,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
             {
                 try { new Writelog(db).write_exception_log(0, "AdminController", "GetUsers", DateTime.Now, ex); } catch { }
                 message.Status = 0;
-                message.Message = "Error: " + ex.Message;
+                message.Message = "Error: " + SafeException.Get(ex);
             }
             return Json(message);
         }
@@ -728,7 +728,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
             }
             catch (Exception ex)
             {
-                throw new Exception("Error in base64Encode " + ex.Message);
+                throw new Exception("Error in base64Encode " + SafeException.Get(ex));
             }
         }
 
@@ -791,7 +791,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
             {
                 message.Status = 0;
                 // Assuming DisplayMessage.ErrorMessage is a constant
-                message.Message = "Error Message" + " " + ex.Message;
+                message.Message = "Error Message" + " " + SafeException.Get(ex);
             }
             return Json(message);
         }
@@ -837,7 +837,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
             catch (Exception ex)
             {
                 // Assuming DisplayMessage.ErrorMessage is a constant
-                message.Message = "Error Message" + " " + ex.Message;
+                message.Message = "Error Message" + " " + SafeException.Get(ex);
             }
             return Json(message);
         }
@@ -891,7 +891,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
             catch (Exception ex)
             {
                 message.Status = 0;
-                message.Message = ex.Message;
+                message.Message = SafeException.Get(ex);
             }
 
             return Ok(message);
@@ -944,7 +944,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
             catch (Exception ex)
             {
                 message.Status = 0;
-                message.Message = ex.Message;
+                message.Message = SafeException.Get(ex);
             }
 
             return Ok(message);
@@ -997,7 +997,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
             catch (Exception ex)
             {
                 message.Status = 0;
-                message.Message = ex.Message;
+                message.Message = SafeException.Get(ex);
             }
 
             return Ok(message);
@@ -1049,7 +1049,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
             catch (Exception ex)
             {
                 message.Status = 0;
-                message.Message = ex.Message;
+                message.Message = SafeException.Get(ex);
             }
 
             return Ok(message);
@@ -1088,7 +1088,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
             {
                 ret.Status = 0;
                 // Assuming DisplayMessage.ErrorMessage is a constant
-                ret.Message = "Error Message" + " " + ex.Message;
+                ret.Message = "Error Message" + " " + SafeException.Get(ex);
             }
             return Json(ret);
         }
@@ -1128,7 +1128,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
             {
                 ret.Status = 0;
                 // Assuming DisplayMessage.ErrorMessage is a constant
-                ret.Message = "Error Message" + " " + ex.Message;
+                ret.Message = "Error Message" + " " + SafeException.Get(ex);
             }
             return Json(ret);
         }
@@ -1363,7 +1363,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
             }
             catch (Exception ex)
             {
-                return Json(new { Status = 0, Message = "Error: " + ex.Message });
+                return Json(new { Status = 0, Message = "Error: " + SafeException.Get(ex) });
             }
         }// ========================================
          //  CACHE MANAGEMENT ENDPOINTS
@@ -1414,7 +1414,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
             }
             catch (Exception ex)
             {
-                return Json(new { status = 0, message = "Error: " + ex.Message });
+                return Json(new { status = 0, message = "Error: " + SafeException.Get(ex) });
             }
         }
 
@@ -1455,7 +1455,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
             }
             catch (Exception ex)
             {
-                return Json(new { status = 0, message = "Error: " + ex.Message });
+                return Json(new { status = 0, message = "Error: " + SafeException.Get(ex) });
             }
         }
 
@@ -1483,7 +1483,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
             }
             catch (Exception ex)
             {
-                return Json(new { status = 0, message = "Error: " + ex.Message });
+                return Json(new { status = 0, message = "Error: " + SafeException.Get(ex) });
             }
         }
 
@@ -1566,7 +1566,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
                 return Json(new
                 {
                     Status = 0,
-                    Message = "An error occurred on the server: " + ex.Message
+                    Message = "An error occurred on the server: " + SafeException.Get(ex)
                 });
             }
         }
@@ -1710,7 +1710,7 @@ public async Task<IActionResult> GetOperatorCoverageRanking(
     catch (Exception ex)
     {
         try { new Writelog(db).write_exception_log(0, "AdminController", "GetOperatorCoverageRanking", DateTime.Now, ex); } catch { }
-        return StatusCode(500, new { Message = "Error: " + ex.Message });
+        return StatusCode(500, new { Message = "Error: " + SafeException.Get(ex) });
     }
 }
 
@@ -1895,7 +1895,7 @@ public async Task<IActionResult> GetOperatorQualityRanking(
     catch (Exception ex)
     {
         try { new Writelog(db).write_exception_log(0, "AdminController", "GetOperatorQualityRanking", DateTime.Now, ex); } catch { }
-        return StatusCode(500, new { Message = "Error: " + ex.Message });
+        return StatusCode(500, new { Message = "Error: " + SafeException.Get(ex) });
     }
 }
         // ========================================
@@ -1914,7 +1914,7 @@ public async Task<IActionResult> GetOperatorQualityRanking(
             }
             catch (Exception ex)
             {
-                Console.WriteLine($" Failed to clear operator quality cache: {ex.Message}");
+                Console.WriteLine($" Failed to clear operator quality cache: {SafeException.Get(ex)}");
             }
         }
 
@@ -1941,7 +1941,7 @@ public async Task<IActionResult> GetOperatorQualityRanking(
             }
             catch (Exception ex)
             {
-                return Json(new { status = 0, message = "Error: " + ex.Message });
+                return Json(new { status = 0, message = "Error: " + SafeException.Get(ex) });
             }
         }
         // Indoor/Outdoor counts & KPIs
@@ -1976,7 +1976,7 @@ public async Task<IActionResult> IndoorCount(
     catch (Exception ex)
     {
         // Log error if needed
-        return StatusCode(500, new { Status = 0, Message = "Error fetching indoor count: " + ex.Message });
+        return StatusCode(500, new { Status = 0, Message = "Error fetching indoor count: " + SafeException.Get(ex) });
     }
 }
 
@@ -2011,7 +2011,7 @@ public async Task<IActionResult> OutdoorCount(
     }
     catch (Exception ex)
     {
-        return StatusCode(500, new { Status = 0, Message = "Error fetching outdoor count: " + ex.Message });
+        return StatusCode(500, new { Status = 0, Message = "Error fetching outdoor count: " + SafeException.Get(ex) });
     }
 }
         [HttpGet("IndoorKpis")]
@@ -2024,7 +2024,7 @@ public async Task<IActionResult> OutdoorCount(
             }
             catch (Exception ex)
             {
-                return Json(new { Status = 0, Message = "Error fetching indoor KPIs: " + ex.Message });
+                return Json(new { Status = 0, Message = "Error fetching indoor KPIs: " + SafeException.Get(ex) });
             }
         }
 
@@ -2038,7 +2038,7 @@ public async Task<IActionResult> OutdoorCount(
             }
             catch (Exception ex)
             {
-                return Json(new { Status = 0, Message = "Error fetching outdoor KPIs: " + ex.Message });
+                return Json(new { Status = 0, Message = "Error fetching outdoor KPIs: " + SafeException.Get(ex) });
             }
         }
 
@@ -2372,7 +2372,7 @@ public async Task<IActionResult> OutdoorCount(
                 return Json(new
                 {
                     Status = 0,
-                    Message = "Error fetching indoor bad count: " + ex.Message
+                    Message = "Error fetching indoor bad count: " + SafeException.Get(ex)
                 });
             }
         }
@@ -2404,7 +2404,7 @@ public async Task<IActionResult> OutdoorCount(
                 return Json(new
                 {
                     Status = 0,
-                    Message = "Error fetching indoor good count: " + ex.Message
+                    Message = "Error fetching indoor good count: " + SafeException.Get(ex)
                 });
             }
         }
@@ -2524,7 +2524,7 @@ public async Task<IActionResult> OutdoorCount(
                 return Json(new
                 {
                     Status = 0,
-                    Message = "Error fetching indoor bad logs: " + ex.Message
+                    Message = "Error fetching indoor bad logs: " + SafeException.Get(ex)
                 });
             }
         }
@@ -2558,7 +2558,7 @@ public async Task<IActionResult> OutdoorCount(
                 return Json(new
                 {
                     Status = 0,
-                    Message = "Error fetching indoor good logs: " + ex.Message
+                    Message = "Error fetching indoor good logs: " + SafeException.Get(ex)
                 });
             }
         }
@@ -2680,7 +2680,7 @@ public async Task<IActionResult> OutdoorCount(
                 return Json(new
                 {
                     Status = 0,
-                    Message = "Error fetching all indoor session logs: " + ex.Message
+                    Message = "Error fetching all indoor session logs: " + SafeException.Get(ex)
                 });
             }
         }
@@ -2799,7 +2799,7 @@ public async Task<IActionResult> OutdoorCount(
                 return Json(new
                 {
                     Status = 0,
-                    Message = "Error fetching indoor session logs: " + ex.Message
+                    Message = "Error fetching indoor session logs: " + SafeException.Get(ex)
                 });
             }
         }
@@ -2893,7 +2893,7 @@ public async Task<IActionResult> GetSessions([FromQuery] int? company_id = null)
         return StatusCode(500, new
         {
             Status = 0,
-            Message = "Error: " + ex.Message
+            Message = "Error: " + SafeException.Get(ex)
         });
     }
 }
@@ -3032,7 +3032,7 @@ public async Task<IActionResult> GetSessions([FromQuery] int? company_id = null)
             {
                 // Add detailed error logging here if possible
                 Response.StatusCode = 500;
-                return Json(new { Message = "Error fetching sessions: " + ex.Message });
+                return Json(new { Message = "Error fetching sessions: " + SafeException.Get(ex) });
             }
         }
         [HttpDelete("DeleteSession")]
@@ -3072,7 +3072,7 @@ public async Task<IActionResult> GetSessions([FromQuery] int? company_id = null)
                 return StatusCode(500, new
                 {
                     success = false,
-                    message = ex.InnerException?.Message ?? ex.Message
+                    message = SafeException.Get(ex?.InnerException) ?? SafeException.Get(ex)
                 });
             }
         }
@@ -3240,7 +3240,7 @@ public async Task<IActionResult> GetSessions([FromQuery] int? company_id = null)
                 return Json(new
                 {
                     Status = 0,
-                    Message = "Error fetching polygon good/bad summary: " + ex.Message
+                    Message = "Error fetching polygon good/bad summary: " + SafeException.Get(ex)
                 });
             }
         }
@@ -3402,7 +3402,7 @@ public async Task<IActionResult> GetSessions([FromQuery] int? company_id = null)
                     }
                     catch (Exception redisEx)
                     {
-                        Console.WriteLine($" Redis read error: {redisEx.Message}");
+                        Console.WriteLine("Redis read error: operation failed (see server logs)");
                     }
                 }
                 else
@@ -3444,7 +3444,7 @@ public async Task<IActionResult> GetSessions([FromQuery] int? company_id = null)
                     }
                     catch (Exception redisEx)
                     {
-                        Console.WriteLine($" Failed to cache: {redisEx.Message}");
+                        Console.WriteLine("Failed to cache: operation failed (see server logs)");
                     }
                 }
 
@@ -3470,14 +3470,13 @@ public async Task<IActionResult> GetSessions([FromQuery] int? company_id = null)
             catch (Exception ex)
             {
                 totalStopwatch.Stop();
-                Console.WriteLine($" ERROR in PolygonPoints: {ex.Message}");
-                Console.WriteLine($" Stack Trace: {ex.StackTrace}");
+                Console.WriteLine($" ERROR in PolygonPoints: {SafeException.Get(ex)}");
+                Console.WriteLine("Stack trace available in server logs.");
 
                 return Json(new
                 {
                     Status = 0,
-                    Message = "Error fetching polygon samples: " + ex.Message,
-                    StackTrace = ex.StackTrace
+                    Message = "Error fetching polygon samples."
                 });
             }
         }
@@ -3581,7 +3580,7 @@ public async Task<IActionResult> GetSessions([FromQuery] int? company_id = null)
                     }
                     catch (Exception redisEx)
                     {
-                        Console.WriteLine($" Redis read error [{action}]: {redisEx.Message}");
+                        Console.WriteLine($"Redis read error [{action}]: operation failed (see server logs)");
                         // Continue without cache
                     }
                 }
@@ -3611,7 +3610,7 @@ public async Task<IActionResult> GetSessions([FromQuery] int? company_id = null)
                     }
                     catch (Exception redisEx)
                     {
-                        Console.WriteLine($" Failed to cache [{action}]: {redisEx.Message}");
+                        Console.WriteLine($"Failed to cache [{action}]: operation failed (see server logs)");
                     }
                 }
 
@@ -3631,10 +3630,10 @@ public async Task<IActionResult> GetSessions([FromQuery] int? company_id = null)
             {
                 totalStopwatch.Stop();
                 msg.Status = 0;
-                msg.Message = "Error: " + ex.Message;
+                msg.Message = "Error: " + SafeException.Get(ex);
 
-                Console.WriteLine($" ERROR in {action}: {ex.Message}");
-                Console.WriteLine($" Stack Trace: {ex.StackTrace}");
+                Console.WriteLine($" ERROR in {action}: {SafeException.Get(ex)}");
+                Console.WriteLine("Stack trace available in server logs.");
 
                 try
                 {
@@ -4147,7 +4146,7 @@ public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new { Status = 0, Message = $"Error calculating network durations: {ex.Message}" });
+                return StatusCode(500, new { Status = 0, Message = $"Error calculating network durations: {SafeException.Get(ex)}" });
             }
             finally
             {
@@ -4459,7 +4458,7 @@ public async Task<IActionResult> MonthlySamplesV2(
     }
     catch (Exception ex)
     {
-        return StatusCode(500, new { Status = 0, Message = "Error fetching monthly samples: " + ex.Message });
+        return StatusCode(500, new { Status = 0, Message = "Error fetching monthly samples: " + SafeException.Get(ex) });
     }
 }
         
@@ -4530,7 +4529,7 @@ public async Task<IActionResult> MonthlySamplesV2(
                     }
                     catch (Exception redisEx)
                     {
-                        Console.WriteLine($" Redis read error: {redisEx.Message}");
+                        Console.WriteLine("Redis read error: operation failed (see server logs)");
                     }
                 }
                 else
@@ -4643,7 +4642,7 @@ GROUP BY provider, tech;
                     }
                     catch (Exception redisEx)
                     {
-                        Console.WriteLine($" Failed to cache: {redisEx.Message}");
+                        Console.WriteLine("Failed to cache: operation failed (see server logs)");
                     }
                 }
 
@@ -4667,14 +4666,13 @@ GROUP BY provider, tech;
             catch (Exception ex)
             {
                 totalStopwatch.Stop();
-                Console.WriteLine($" ERROR in GetSessionTechMinutesFilter: {ex.Message}");
-                Console.WriteLine($" Stack Trace: {ex.StackTrace}");
+                Console.WriteLine($" ERROR in GetSessionTechMinutesFilter: {SafeException.Get(ex)}");
+                Console.WriteLine("Stack trace available in server logs.");
 
                 return StatusCode(500, new
                 {
                     Status = 0,
-                    Message = $"Error: {ex.Message}",
-                    StackTrace = ex.StackTrace
+                    Message = "An internal server error occurred."
                 });
             }
         }
@@ -5111,7 +5109,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new { Status = 0, Message = "Error: " + ex.Message });
+                return StatusCode(500, new { Status = 0, Message = "Error: " + SafeException.Get(ex) });
             }
             finally
             {
@@ -5442,7 +5440,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new { Status = 0, Message = "Error: " + ex.Message });
+                return StatusCode(500, new { Status = 0, Message = "Error: " + SafeException.Get(ex) });
             }
         }
         [HttpGet("AvgRsrpV2")]
@@ -5776,7 +5774,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
             {
                 // Log error if you have a logger, e.g.:
                 // new Writelog(db).write_exception_log(...);
-                return StatusCode(500, new { Status = 0, Message = "Error: " + ex.Message });
+                return StatusCode(500, new { Status = 0, Message = "Error: " + SafeException.Get(ex) });
             }
         }
         public class IndoorOutdoorAvgDto
@@ -6484,7 +6482,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new { Status = 0, Message = "Error: " + ex.Message });
+                return StatusCode(500, new { Status = 0, Message = "Error: " + SafeException.Get(ex) });
             }
         }
 
@@ -6564,9 +6562,11 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new { Status = 0, Message = "Error: " + ex.Message });
+                return StatusCode(500, new { Status = 0, Message = "Error: " + SafeException.Get(ex) });
             }
         }
     }
 }
+
+
 

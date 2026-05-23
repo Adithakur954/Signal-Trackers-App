@@ -1,4 +1,4 @@
-using System.Data.Common;
+﻿using System.Data.Common;
 
 namespace SignalTracker.Helper
 {
@@ -53,3 +53,5 @@ namespace SignalTracker.Helper
         }
     }
 }
+
+

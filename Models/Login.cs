@@ -1,4 +1,4 @@
-namespace SignalTracker.Models
+﻿namespace SignalTracker.Models
 {
     public class Login
     {
@@ -6,3 +6,4 @@ namespace SignalTracker.Models
         public string password { get; set; }
     }
 }
+

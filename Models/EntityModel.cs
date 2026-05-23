@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
@@ -441,7 +441,7 @@ public class N78NeighbourSimpleDto
     public string primary_network { get; set; }
     public string primary_band { get; set; }
 
-    // ✅ KPIs from PRIMARY table
+    // âœ… KPIs from PRIMARY table
     public double? rsrp { get; set; }
     public double? rsrq { get; set; }
     public double? sinr { get; set; }
@@ -789,7 +789,7 @@ public class IndoorOutdoorLogDto
     public string? Length { get; set; }
     public string? Info { get; set; }
 
-    // phone / app metrics – store as string for now
+    // phone / app metrics â€“ store as string for now
     public string? Battery { get; set; }
     public string? Network { get; set; }
     public string? dls { get; set; }
@@ -1285,3 +1285,5 @@ public class LogFilterModel
 
     
 }
+
+

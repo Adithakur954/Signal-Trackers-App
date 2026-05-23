@@ -1,4 +1,4 @@
-namespace SignalTracker.DTOs
+﻿namespace SignalTracker.DTOs
 {
     public class CompanyDto
     {
@@ -86,3 +86,5 @@ public int total_used_licenses { get; set; }
         public string remarks { get; set; }
     }
 }
+
+

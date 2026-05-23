@@ -1,4 +1,4 @@
-using Microsoft.EntityFrameworkCore;
+﻿using Microsoft.EntityFrameworkCore;
 using SignalTracker.Services;
 using static SignalTracker.Controllers.AdminController;
 using static SignalTracker.Controllers.MapViewController;
@@ -267,3 +267,5 @@ protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
         }
     }
 }
+
+

@@ -1,4 +1,4 @@
-namespace SignalTracker.DTO.PythonBridge
+﻿namespace SignalTracker.DTO.PythonBridge
 {
     public class LteTiltBaselineRowsRequest
     {
@@ -23,3 +23,5 @@ namespace SignalTracker.DTO.PythonBridge
         public int Offset { get; set; } = 0;
     }
 }
+
+

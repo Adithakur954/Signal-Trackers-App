@@ -1,4 +1,4 @@
-namespace SignalTracker.DTO.PythonBridge
+﻿namespace SignalTracker.DTO.PythonBridge
 {
     public class LtePredictionBulkRequest
     {
@@ -17,3 +17,5 @@ namespace SignalTracker.DTO.PythonBridge
         public string? site_id { get; set; }
     }
 }
+
+

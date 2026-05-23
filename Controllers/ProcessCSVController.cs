@@ -2,6 +2,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using SignalTracker.Helper;
 using SignalTracker.Models;
 using SignalTracker.Services;
 
@@ -28,6 +29,20 @@ namespace SignalTracker.Controllers
     [Authorize]
     public class ProcessCSVController : Controller
     {
+        private const long MaxZipEntryBytes = 50_000_000;
+        private static readonly HashSet<string> AllowedZipExtensions = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ".csv",
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".gif",
+            ".bmp",
+            ".webp",
+            ".json",
+            ".geojson"
+        };
+
         // =====================================================================
         // CSV row models (for reading files) — not EF entities
         // =====================================================================
@@ -421,7 +436,7 @@ namespace SignalTracker.Controllers
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($" Redis invalidation error [{pattern}]: {ex.Message}");
+                    Console.WriteLine($" Redis invalidation error [{pattern}]: {SafeException.Get(ex)}");
                 }
             }
         }
@@ -632,9 +647,9 @@ public IActionResult UploadSitePrediction(
             details = errorMsg
         });
     }
-    catch (Exception ex)
+    catch (Exception)
     {
-        return StatusCode(500, new { success = false, message = ex.Message });
+        return StatusCode(500, new { success = false, message = "An internal server error occurred." });
     }
 }
 
@@ -882,7 +897,7 @@ public IActionResult UploadSitePrediction(
             catch (Exception ex)
             {
                 IsValidSheet = false;
-                errorMsag = "Exception " + ex.Message;
+                errorMsag = "Exception " + SafeException.Get(ex);
             }
 
             try
@@ -929,13 +944,90 @@ public IActionResult UploadSitePrediction(
         [NonAction]
         public bool IsValidZip(string filePath)
         {
+            if (!System.IO.File.Exists(filePath))
+            {
+                return false;
+            }
+
             try
             {
-                using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read);
+                using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                if (fs.Length < 4)
+                {
+                    return false;
+                }
+
+                Span<byte> header = stackalloc byte[4];
+                if (fs.Read(header) != header.Length)
+                {
+                    return false;
+                }
+
+                if (!header.SequenceEqual(new byte[] { 0x50, 0x4B, 0x03, 0x04 }) &&
+                    !header.SequenceEqual(new byte[] { 0x50, 0x4B, 0x05, 0x06 }) &&
+                    !header.SequenceEqual(new byte[] { 0x50, 0x4B, 0x07, 0x08 }))
+                {
+                    return false;
+                }
+
+                fs.Position = 0;
                 using var archive = new ZipArchive(fs, ZipArchiveMode.Read, true);
-                return archive.Entries.Count > 0;
+                return archive.Entries.Any(entry => !string.IsNullOrEmpty(entry.Name));
             }
-            catch { return false; }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static string GetNormalizedDestinationPath(string extractPath, string entryName)
+        {
+            var destinationPath = Path.GetFullPath(Path.Combine(extractPath, entryName));
+            if (!destinationPath.StartsWith(extractPath, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("Zip entry escapes the extraction directory.");
+            }
+
+            return destinationPath;
+        }
+
+        private static void ExtractZipToDirectorySecurely(ZipArchive archive, string extractPath)
+        {
+            if (!Directory.Exists(extractPath))
+            {
+                Directory.CreateDirectory(extractPath);
+            }
+
+            if (archive.Entries.Count > 1000)
+            {
+                throw new InvalidOperationException("Zip archive contains too many entries.");
+            }
+
+            foreach (var entry in archive.Entries)
+            {
+                if (string.IsNullOrEmpty(entry.Name))
+                {
+                    continue;
+                }
+
+                if (entry.Length > MaxZipEntryBytes || entry.CompressedLength > MaxZipEntryBytes)
+                {
+                    throw new InvalidOperationException("Zip archive contains an entry that exceeds the allowed file size.");
+                }
+
+                var destinationPath = GetNormalizedDestinationPath(extractPath, entry.FullName);
+                var extension = Path.GetExtension(destinationPath);
+                if (string.IsNullOrEmpty(extension) || !AllowedZipExtensions.Contains(extension))
+                {
+                    continue;
+                }
+
+                Directory.CreateDirectory(Path.GetDirectoryName(destinationPath) ?? extractPath);
+
+                using var entryStream = entry.Open();
+                using var outputStream = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None);
+                entryStream.CopyTo(outputStream);
+            }
         }
 
         [NonAction]
@@ -944,19 +1036,33 @@ public IActionResult UploadSitePrediction(
             List<string> csvFiles = new();
             List<string> imageFiles = new();
 
-            if (!Directory.Exists(extractPath))
-                Directory.CreateDirectory(extractPath);
+            using var fs = new FileStream(zipFilePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            using var archive = new ZipArchive(fs, ZipArchiveMode.Read, true);
 
-            ZipFile.ExtractToDirectory(zipFilePath, extractPath, overwriteFiles: true);
+            ExtractZipToDirectorySecurely(archive, extractPath);
 
-            string[] imageExtensions = new[] { ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp" };
+            var imageExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ".png",
+                ".jpg",
+                ".jpeg",
+                ".gif",
+                ".bmp",
+                ".webp"
+            };
+
             var allFiles = Directory.GetFiles(extractPath, "*.*", SearchOption.AllDirectories);
-
             foreach (var file in allFiles)
             {
-                string ext = Path.GetExtension(file).ToLowerInvariant();
-                if (ext == ".csv") csvFiles.Add(file);
-                else if (imageExtensions.Contains(ext)) imageFiles.Add(file);
+                var extension = Path.GetExtension(file);
+                if (string.Equals(extension, ".csv", StringComparison.OrdinalIgnoreCase))
+                {
+                    csvFiles.Add(file);
+                }
+                else if (imageExtensions.Contains(extension))
+                {
+                    imageFiles.Add(file);
+                }
             }
 
             return (csvFiles, imageFiles);
@@ -965,18 +1071,14 @@ public IActionResult UploadSitePrediction(
         [NonAction]
         public List<string> ExtractJsonFiles(string zipFilePath, string extractPath)
         {
-            List<string> jsonFilesOut = new();
+            using var fs = new FileStream(zipFilePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            using var archive = new ZipArchive(fs, ZipArchiveMode.Read, true);
 
-            if (!Directory.Exists(extractPath))
-                Directory.CreateDirectory(extractPath);
+            ExtractZipToDirectorySecurely(archive, extractPath);
 
-            ZipFile.ExtractToDirectory(zipFilePath, extractPath, overwriteFiles: true);
-
-            var jsonFiles = Directory.GetFiles(extractPath, "*.json", SearchOption.AllDirectories);
-            var geoJsonFiles = Directory.GetFiles(extractPath, "*.geojson", SearchOption.AllDirectories);
-
-            jsonFilesOut.AddRange(jsonFiles);
-            jsonFilesOut.AddRange(geoJsonFiles);
+            var jsonFilesOut = new List<string>();
+            jsonFilesOut.AddRange(Directory.GetFiles(extractPath, "*.json", SearchOption.AllDirectories));
+            jsonFilesOut.AddRange(Directory.GetFiles(extractPath, "*.geojson", SearchOption.AllDirectories));
 
             return jsonFilesOut;
         }
@@ -1242,13 +1344,13 @@ public IActionResult UploadSitePrediction(
 	                         .Where(e => e.State is EntityState.Added or EntityState.Modified))
 	                e.State = EntityState.Detached;
 
-	            errorList.Add($"{fileName} General error: {(ex.InnerException != null ? ex.InnerException.Message : ex.Message)}");
+	            errorList.Add($"{fileName} General error: {(SafeException.GetInnermost(ex))}");
 	            return false;
         }
     }
     catch (Exception ex)
     {
-        errorList.Add($"{fileName} General error: {(ex.InnerException != null ? ex.InnerException.Message : ex.Message)}");
+        errorList.Add($"{fileName} General error: {(SafeException.GetInnermost(ex))}");
         return false;
     }
 
@@ -1317,7 +1419,7 @@ public IActionResult UploadSitePrediction(
 	                foreach (var e in db.ChangeTracker.Entries().Where(e => e.State is EntityState.Added or EntityState.Modified)){
 	                    e.State = EntityState.Detached;
 	                }
-                errorList.Add($"General error: {(ex.InnerException != null ? ex.InnerException.Message : ex.Message)}");
+                errorList.Add($"General error: An internal server error occurred.");
                 return false;
             }
 
@@ -1538,13 +1640,13 @@ public bool ProcessSitePredictionSheet(
                 e.State = EntityState.Detached;
             }
 
-            errorList.Add($"{fileName} General error: {(ex.InnerException != null ? ex.InnerException.Message : ex.Message)}");
+            errorList.Add($"{fileName} General error: An internal server error occurred.");
             return false;
         }
     }
-    catch (Exception ex)
+    catch (Exception)
     {
-        errorList.Add($"{fileName} General error: {(ex.InnerException != null ? ex.InnerException.Message : ex.Message)}");
+        errorList.Add($"{fileName} General error: An internal server error occurred.");
         return false;
     }
 
@@ -1576,7 +1678,7 @@ public bool ProcessSitePredictionSheet(
 	            }
 	            catch (Exception ex)
 	            {
-	                errorList.Add($"General error: {(ex.InnerException != null ? ex.InnerException.Message : ex.Message)}");
+	                errorList.Add($"General error: {(SafeException.GetInnermost(ex))}");
 	                return false;
 	            }
 
@@ -1811,3 +1913,5 @@ public bool ProcessSitePredictionSheet(
 }
 
         
+
+

@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Http;
+﻿using Microsoft.AspNetCore.Http;
 
 namespace SignalTracker.Security;
 
@@ -44,3 +44,5 @@ public static class RequestSecurity
         options.Secure = usesHttps;
     }
 }
+
+

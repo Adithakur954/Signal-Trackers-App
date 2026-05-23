@@ -1,4 +1,4 @@
-using System.Data;
+﻿using System.Data;
 using System.Data.Common;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
@@ -335,3 +335,5 @@ CREATE TABLE IF NOT EXISTS license_feature_access (
         }
     }
 }
+
+

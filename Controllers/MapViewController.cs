@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;     // for Regex
@@ -388,7 +388,7 @@ namespace SignalTracker.Controllers
             }
             catch (Exception ex)
             {
-                message.Status = 0; message.Message = "Error: " + ex.Message;
+                message.Status = 0; message.Message = "Error: " + SafeException.Get(ex);
             }
             return Json(message);
         }
@@ -422,7 +422,7 @@ namespace SignalTracker.Controllers
                 message.Status = 1; message.Message = "Session Started.";
                 message.Data = new { sessionid = newSess.id };
             }
-            catch (Exception ex) { message.Status = 0; message.Message = "Error: " + ex.Message; }
+            catch (Exception ex) { message.Status = 0; message.Message = "Error: " + SafeException.Get(ex); }
             return Json(message);
         }
 
@@ -467,7 +467,7 @@ namespace SignalTracker.Controllers
                 await InvalidateMapViewCachesAsync();
                 message.Status = 1; message.Message = "Session Ended.";
             }
-            catch (Exception ex) { message.Status = 0; message.Message = "Error: " + ex.Message; }
+            catch (Exception ex) { message.Status = 0; message.Message = "Error: " + SafeException.Get(ex); }
             return Json(message);
         }
 
@@ -533,9 +533,9 @@ public async Task<IActionResult> GetProjectPolygons(
                     return Ok(cached.data);
                 }
             }
-            catch (Exception redisEx)
+            catch (Exception)
             {
-                Console.WriteLine($" Redis error: {redisEx.Message}");
+                Console.WriteLine("Redis error: operation failed (see server logs)");
             }
         }
 
@@ -600,9 +600,9 @@ public async Task<IActionResult> GetProjectPolygons(
                 // Cache for 10 minutes
                 await _redis.SetObjectAsync(cacheKey, response, ttlSeconds: 600);
             }
-            catch (Exception redisEx)
+            catch (Exception)
             {
-                Console.WriteLine($" Failed to cache: {redisEx.Message}");
+                Console.WriteLine("Failed to cache: operation failed (see server logs)");
             }
         }
 
@@ -617,12 +617,8 @@ public async Task<IActionResult> GetProjectPolygons(
     catch (Exception ex)
     {
         totalStopwatch.Stop();
-        return StatusCode(500, new 
-        { 
-            status = 0, 
-            message = "Error: " + ex.Message,
-            stackTrace = ex.StackTrace 
-        });
+        Console.WriteLine("Stack trace available in server logs.");
+        return StatusCode(500, new { status = 0, message = "An internal server error occurred." });
     }
 }
 
@@ -816,7 +812,7 @@ public class ProjectPolygonItem
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new { Status = 0, Message = "Error: " + ex.Message });
+                return StatusCode(500, new { Status = 0, Message = "Error: " + SafeException.Get(ex) });
             }
         }
 
@@ -1263,7 +1259,7 @@ public class ProjectPolygonItem
             catch (Exception ex)
             {
                 message.Status = 0;
-                message.Message = "Error saving polygon: " + ex.Message;
+                message.Message = "Error saving polygon: " + SafeException.Get(ex);
             }
 
             return Json(message);
@@ -1463,7 +1459,7 @@ public async Task<IActionResult> GetAvailablePolygons(
     }
     catch (Exception ex)
     {
-        return StatusCode(500, new { error = "Failed to fetch polygons", details = ex.Message });
+        return StatusCode(500, new { error = "Failed to fetch polygons", details = SafeException.Get(ex) });
     }
 }
 
@@ -1553,7 +1549,7 @@ public async Task<IActionResult> DeleteAvailablePolygon(
     }
     catch (Exception ex)
     {
-        return StatusCode(500, new { Status = 0, Message = "Error deleting polygon: " + ex.Message });
+        return StatusCode(500, new { Status = 0, Message = "Error deleting polygon: " + SafeException.Get(ex) });
     }
 }
 
@@ -1821,7 +1817,7 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                 return StatusCode(500, new
                 {
                     message = "An error occurred while fetching sub-session analytics.",
-                    details = ex.Message
+                    details = SafeException.Get(ex)
                 });
             }
         }
@@ -1954,7 +1950,7 @@ public class AvailablePolygonsResponse
             }
             catch (Exception ex)
             {
-                return new JsonResult(new { message = "Server error: " + ex.Message }) { StatusCode = 500 };
+                return new JsonResult(new { message = "Server error: " + SafeException.Get(ex) }) { StatusCode = 500 };
             }
         }
 
@@ -2145,7 +2141,7 @@ public async Task<JsonResult> CreateProjectWithPolygons([FromBody] CreateProject
     {
         // SURFACING THE REAL ERROR:
         // EF Core hides DB constraints in the InnerException. This will print the actual SQL error.
-        string actualError = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+        string actualError = SafeException.GetInnermost(ex);
         
         message.Status  = 0;
         message.Message = "Error creating project: " + actualError;
@@ -2194,7 +2190,7 @@ public async Task<JsonResult> CreateProjectWithPolygons([FromBody] CreateProject
             catch (Exception ex)
             {
                 message.Status = 0;
-                message.Message = "Error: " + ex.Message;
+                message.Message = "Error: " + SafeException.Get(ex);
             }
             return Json(message);
         }
@@ -2517,7 +2513,7 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
         var pageData = SliceCachedPage(fullData, limit, pageOffset);
 
         // =========================================================================
-        // 📦 PACKAGE RESPONSE
+        // ðŸ“¦ PACKAGE RESPONSE
         // =========================================================================
         var responseObj = new
         {
@@ -2562,12 +2558,12 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
     }
     catch (Exception ex)
     {
-        return Json(new { message = "Server Error", details = ex.Message });
+        return Json(new { message = "Server Error", details = SafeException.Get(ex) });
     }
 }
 
 // ---------------------------------------------------------
-// 1️⃣ MAIN DATA (Full filtered fetch via EF Core)
+// 1ï¸âƒ£ MAIN DATA (Full filtered fetch via EF Core)
 // ---------------------------------------------------------
 private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyEF(
     List<long> sessionIds, string provider, MapFilter1 filters)
@@ -2591,7 +2587,7 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyEF(
     if (from.HasValue) query = query.Where(log => log.timestamp >= from.Value);
     if (to.HasValue) query = query.Where(log => log.timestamp < to.Value);
     
-    // ⚡ SIGNAL RANGE CONSTRAINTS
+    // âš¡ SIGNAL RANGE CONSTRAINTS
     query = query.Where(log => log.rsrp >= -140 && log.rsrp <= -44);
     query = query.Where(log => log.rsrq >= -34 && log.rsrq <= -3);
     query = query.Where(log => log.sinr >= -20 && log.sinr <= 40);
@@ -2727,7 +2723,7 @@ private async Task<Dictionary<string, object>> GetAppSummaryRaw(
         if (!parameters.ContainsKey(pName)) parameters.Add(pName, $"%{app.ToLower()}%");
     }
 
-    // ⚡ UPDATED QUERY: Uses GROUP_CONCAT to show ALL operators
+    // âš¡ UPDATED QUERY: Uses GROUP_CONCAT to show ALL operators
     string sql = $@"
         SELECT 
             -- 0. App Name
@@ -2801,7 +2797,7 @@ private async Task<Dictionary<string, object>> GetAppSummaryRaw(
     return result;
 }
 //---------------------------------------------------
-// 3️⃣ COMBINED STATS (Volume + IO + Sessions in ONE Query)
+// 3ï¸âƒ£ COMBINED STATS (Volume + IO + Sessions in ONE Query)
 // ---------------------------------------------------------
 private async Task<CombinedStatsDto> GetCombinedStatsRaw(
     string connString, List<long> sessionIds, string provider, MapFilter1 filters)
@@ -3015,7 +3011,7 @@ private async Task EnsureNetworkLogUpdatedAtColumnAsync(string connString)
     }
     catch (Exception ex)
     {
-        Console.WriteLine($" Network log updated_at ensure skipped: {ex.Message}");
+        Console.WriteLine($" Network log updated_at ensure skipped: {SafeException.Get(ex)}");
     }
 }
 
@@ -3074,7 +3070,7 @@ private async Task<string> GetNetworkLogDataVersionAsync(
     }
     catch (Exception ex)
     {
-        Console.WriteLine($" Network log version fallback: {ex.Message}");
+        Console.WriteLine($" Network log version fallback: {SafeException.Get(ex)}");
         return await ReadVersionAsync(includeUpdatedAt: false);
     }
 }
@@ -3256,7 +3252,7 @@ public async Task<IActionResult> DeleteProject([FromQuery] int projectId)
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Redis cache clear failed on project delete: {ex.Message}");
+                Console.WriteLine($"Redis cache clear failed on project delete: {SafeException.Get(ex)}");
             }
         }
 
@@ -3266,7 +3262,7 @@ public async Task<IActionResult> DeleteProject([FromQuery] int projectId)
     }
     catch (Exception ex)
     {
-        return StatusCode(500, new { Status = 0, Message = "Error deleting project: " + ex.Message });
+        return StatusCode(500, new { Status = 0, Message = "Error deleting project: " + SafeException.Get(ex) });
     }
 }
 
@@ -3417,7 +3413,7 @@ public async Task<IActionResult> GetCombinedProviderNetworkTime(
         return StatusCode(500, new
         {
             message = "Error calculating combined provider network time",
-            error = ex.Message
+            error = SafeException.Get(ex)
         });
     }
 }
@@ -3438,10 +3434,10 @@ public async Task<IActionResult> GetKpiDistribution(
     if (cached != null)
         return Ok(cached);
 
-    // 🔹 KPI → SQL Expression Map (RSRP FIXED)
+    // ðŸ”¹ KPI â†’ SQL Expression Map (RSRP FIXED)
     var kpiMap = new Dictionary<string, (string expr, string column)>
     {
-        { "rsrp", ("ROUND(rsrp)", "rsrp") },      // ✅ FIXED
+        { "rsrp", ("ROUND(rsrp)", "rsrp") },      // âœ… FIXED
         { "rsrq", ("ROUND(rsrq)", "rsrq") },
         { "sinr", ("ROUND(sinr,1)", "sinr") },
         { "mos",  ("ROUND(mos,1)", "mos") },
@@ -3478,7 +3474,7 @@ public async Task<IActionResult> GetKpiDistribution(
             .ToListAsync();
     }
 
-    // 🔹 SINGLE KPI
+    // ðŸ”¹ SINGLE KPI
     if (!string.IsNullOrWhiteSpace(kpi))
     {
         kpi = kpi.ToLower();
@@ -3499,7 +3495,7 @@ public async Task<IActionResult> GetKpiDistribution(
         return Ok(response);
     }
 
-    // 🔹 ALL KPIs
+    // ðŸ”¹ ALL KPIs
     var allData = new Dictionary<string, object>();
 
     foreach (var item in kpiMap)
@@ -3535,14 +3531,14 @@ public async Task<IActionResult> GetLatLonDistribution(
         return BadRequest("Invalid sessionIds");
 
     // ========================================
-    // 🔑 BUILD REDIS CACHE KEY
+    // ðŸ”‘ BUILD REDIS CACHE KEY
     // ========================================
     string cacheKey = $"latlon:dist:{string.Join("-", sessionIdList)}";
 
     var totalStopwatch = System.Diagnostics.Stopwatch.StartNew();
 
     // ========================================
-    // 🔁 TRY REDIS CACHE
+    // ðŸ” TRY REDIS CACHE
     // ========================================
     if (_redis != null && _redis.IsConnected)
     {
@@ -3565,12 +3561,12 @@ public async Task<IActionResult> GetLatLonDistribution(
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"⚠️ Redis read error: {ex.Message}");
+            Console.WriteLine($"âš ï¸ Redis read error: {SafeException.Get(ex)}");
         }
     }
 
     // ========================================
-    // 🗄️ FETCH FROM DATABASE
+    // ðŸ—„ï¸ FETCH FROM DATABASE
     // ========================================
     var conn = db.Database.GetDbConnection();
     bool shouldClose = false;
@@ -3661,7 +3657,7 @@ ORDER BY log_count DESC;
     };
 
     // ========================================
-    // 💾 SAVE TO REDIS
+    // ðŸ’¾ SAVE TO REDIS
     // ========================================
     if (_redis != null && _redis.IsConnected)
     {
@@ -3671,7 +3667,7 @@ ORDER BY log_count DESC;
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"⚠️ Redis write error: {ex.Message}");
+            Console.WriteLine($"âš ï¸ Redis write error: {SafeException.Get(ex)}");
         }
     }
 
@@ -3701,7 +3697,7 @@ ORDER BY log_count DESC;
 //         db.Database.SetCommandTimeout(180);
 
 //         // ===============================
-//         // 1️ Parse Session IDs
+//         // 1ï¸ Parse Session IDs
 //         // ===============================
 //         var sessionIdList = sessionIds
 //             .Split(',', StringSplitOptions.RemoveEmptyEntries)
@@ -3718,7 +3714,7 @@ ORDER BY log_count DESC;
 //         }
 
 //         // ===============================
-//         // 2️ Indoor vs Outdoor Averages (DB LEVEL)
+//         // 2ï¸ Indoor vs Outdoor Averages (DB LEVEL)
 //         // ===============================
 //         var avgData = await db.tbl_network_log
 //             .AsNoTracking()
@@ -3756,7 +3752,7 @@ ORDER BY log_count DESC;
 //             ((outdoor.AvgMOS - indoor.AvgMOS) / outdoor.AvgMOS) * 100;
 
 //         // ===============================
-//         // 3️ Degraded Indoor Locations
+//         // 3ï¸ Degraded Indoor Locations
 //         // ===============================
 //         var degradedIndoorLocations = await db.tbl_network_log
 //             .AsNoTracking()
@@ -3781,7 +3777,7 @@ ORDER BY log_count DESC;
 //             .ToListAsync();
 
 //         // ===============================
-//         // 4️ 5G Indoor Weak Stability
+//         // 4ï¸ 5G Indoor Weak Stability
 //         // ===============================
 //         var indoor5GWeakStability = await db.tbl_network_log
 //             .AsNoTracking()
@@ -3808,12 +3804,12 @@ ORDER BY log_count DESC;
 //             .ToListAsync();
 
 //         // ===============================
-//         // 5️ RESPONSE
+//         // 5ï¸ RESPONSE
 //         // ===============================
 //         return Ok(new
 //         {
 //             Status = 1,
-//             Message = "Indoor–Outdoor Degradation (Session-wise)",
+//             Message = "Indoorâ€“Outdoor Degradation (Session-wise)",
 //             SessionIds = sessionIdList,
 //             Summary = new
 //             {
@@ -3839,7 +3835,7 @@ ORDER BY log_count DESC;
 //         {
 //             Status = 0,
 //             Message = "Error calculating degradation map for sessions",
-//             Error = ex.Message
+//             Error = SafeException.Get(ex)
 //         });
 //     }
 // }
@@ -3908,7 +3904,7 @@ SELECT
     p.sinr AS sinr,
     p.mos  AS mos,
 
-    -- 🔥 Throughput (VARCHAR → DOUBLE FIX)
+    -- ðŸ”¥ Throughput (VARCHAR â†’ DOUBLE FIX)
     CAST(NULLIF(p.dl_tpt, '') AS DECIMAL(12,4)) AS dl_tpt,
     CAST(NULLIF(p.ul_tpt, '') AS DECIMAL(12,4)) AS ul_tpt,
 
@@ -4135,7 +4131,7 @@ public async Task<IActionResult> GetN78Neighbours([FromQuery] string session_ids
                 });
             }
         }
-        catch { /* Redis unavailable — fall through to DB */ }
+        catch { /* Redis unavailable â€” fall through to DB */ }
     }
 
     // ================= 3. RAW SQL (all processing in DB via CTE) =================
@@ -4206,7 +4202,7 @@ FROM JoinedData
 WHERE rn = 1 
 ORDER BY timestamp;";
 
-    // ================= 4. RAW ADO.NET READ — fetch raw rows from DB =================
+    // ================= 4. RAW ADO.NET READ â€” fetch raw rows from DB =================
     var data = new List<LTE5GNeighbourDto>();
 
     var conn = db.Database.GetDbConnection();
@@ -4242,7 +4238,7 @@ ORDER BY timestamp;";
                 indoor_outdoor = reader.IsDBNull(5) ? null : reader.GetString(5),
                 provider       = reader.IsDBNull(6) ? null : reader.GetString(6),
 
-                // --- Primary KPIs (float? in DB → double? in DTO) ---
+                // --- Primary KPIs (float? in DB â†’ double? in DTO) ---
                 primary_network = reader.IsDBNull(7)  ? null : reader.GetString(7),
                 primary_band    = reader.IsDBNull(8)  ? null : reader.GetString(8),
                 primary_pci     = reader.IsDBNull(9)  ? null : reader.GetString(9),
@@ -4251,11 +4247,11 @@ ORDER BY timestamp;";
                 primary_sinr    = reader.IsDBNull(12) ? null : (double?)Convert.ToDouble(reader.GetValue(12)),
                 mos             = reader.IsDBNull(13) ? null : (double?)Convert.ToDouble(reader.GetValue(13)),
 
-                // --- Throughput (DECIMAL(12,4) from CAST in SQL → decimal? in DTO) ---
+                // --- Throughput (DECIMAL(12,4) from CAST in SQL â†’ decimal? in DTO) ---
                 dl_tpt = reader.IsDBNull(14) ? null : (decimal?)Convert.ToDecimal(reader.GetValue(14)),
                 ul_tpt = reader.IsDBNull(15) ? null : (decimal?)Convert.ToDecimal(reader.GetValue(15)),
 
-                // --- Neighbour KPIs (float? in DB → double? in DTO) ---
+                // --- Neighbour KPIs (float? in DB â†’ double? in DTO) ---
                 neighbour_network  = reader.IsDBNull(16) ? null : reader.GetString(16),
                 neighbour_band     = reader.IsDBNull(17) ? null : reader.GetString(17),
                 neighbour_pci      = reader.IsDBNull(18) ? null : reader.GetString(18),
@@ -4340,7 +4336,7 @@ ORDER BY timestamp;";
     if (_redis != null && _redis.IsConnected)
     {
         try { await _redis.SetObjectAsync(cacheKey, data, ttlSeconds: 300); }
-        catch { /* best-effort cache — don't fail the request */ }
+        catch { /* best-effort cache â€” don't fail the request */ }
     }
 
     Response.Headers["X-Cache"] = "MISS";
@@ -4668,7 +4664,7 @@ GROUP BY session_id, provider, tech;
     }
     catch (Exception ex)
     {
-        return Json(new { status = 0, message = ex.Message });
+        return Json(new { status = 0, message = SafeException.Get(ex) });
     }
 }
 
@@ -4817,11 +4813,11 @@ public async Task<IActionResult> GetNeighbourLogsByDateRange(
         if (endDateTime.HasValue)
             baseQuery = baseQuery.Where(x => x.timestamp <= endDateTime.Value);
 
-        // 🔑 KEYSET PAGINATION
+        // ðŸ”‘ KEYSET PAGINATION
         if (filters.CursorTs.HasValue)
             baseQuery = baseQuery.Where(x => x.timestamp > filters.CursorTs.Value);
 
-        // 🔒 5G NR BAND FILTER (n78 / n*)
+        // ðŸ”’ 5G NR BAND FILTER (n78 / n*)
         baseQuery = baseQuery.Where(x => x.band != null && EF.Functions.Like(x.band.ToLower(), "n%"));
 
         if (!string.IsNullOrWhiteSpace(filters.Provider))
@@ -4996,8 +4992,8 @@ public async Task<IActionResult> GetNeighbourLogsByDateRange(
     {
         return StatusCode(500, new
         {
-            error = ex.Message,
-            inner = ex.InnerException?.Message
+            error = SafeException.Get(ex),
+            inner = SafeException.Get(ex?.InnerException)
         });
     }
 }
@@ -5219,9 +5215,10 @@ public async Task<IActionResult> GetLogsByDateRange(
 
         return Json(response);
     }
-    catch (Exception ex)
+    catch (Exception)
     {
-        return StatusCode(500, new { error = ex.Message, stackTrace = ex.StackTrace });
+        Console.WriteLine("Stack trace available in server logs.");
+        return StatusCode(500, new { error = "An internal server error occurred." });
     }
 }
 
@@ -5379,7 +5376,7 @@ public async Task<IActionResult> GetTotalUsageTime(
         const int MAX_GAP_SECONDS = 300;
 
         // =====================================
-        // 1️ Date + Time combine
+        // 1ï¸ Date + Time combine
         // =====================================
         var startDateTime = filter.StartDate.Date
             .Add(filter.StartTime ?? TimeSpan.Zero);
@@ -5400,7 +5397,7 @@ public async Task<IActionResult> GetTotalUsageTime(
             return Ok(cached);
 
         // =====================================
-        // 2️ Base query (PRIMARY only)
+        // 2ï¸ Base query (PRIMARY only)
         // =====================================
         var baseQuery = db.tbl_network_log
             .AsNoTracking()
@@ -5447,7 +5444,7 @@ public async Task<IActionResult> GetTotalUsageTime(
         }
 
         // =====================================
-        // 3️ TIME CALCULATION
+        // 3ï¸ TIME CALCULATION
         // =====================================
         double totalSeconds = 0;
         var breakdown = new Dictionary<string, double>();
@@ -5512,7 +5509,7 @@ public async Task<IActionResult> GetTotalUsageTime(
         }
 
         // =====================================
-        // 4️ FORMAT BREAKDOWN RESPONSE
+        // 4ï¸ FORMAT BREAKDOWN RESPONSE
         // =====================================
         var breakdownList = breakdown.Select(kv =>
         {
@@ -5542,13 +5539,10 @@ public async Task<IActionResult> GetTotalUsageTime(
         await SetMapViewCacheAsync(cacheKey, response);
         return Ok(response);
     }
-    catch (Exception ex)
+    catch (Exception)
     {
-        return StatusCode(500, new
-        {
-            error = ex.Message,
-            stackTrace = ex.StackTrace
-        });
+        Console.WriteLine("Stack trace available in server logs.");
+        return StatusCode(500, new { error = "An internal server error occurred." });
     }
 }
 
@@ -5641,7 +5635,7 @@ public async Task<IActionResult> GetIndoorOutdoorSessionAnalytics(
         const int MAX_GAP_SECONDS = 300;
 
         // =============================
-        // 1️ VALIDATION
+        // 1ï¸ VALIDATION
         // =============================
         if (string.IsNullOrWhiteSpace(filter.SessionIds))
             return BadRequest("SessionIds are required");
@@ -5666,7 +5660,7 @@ public async Task<IActionResult> GetIndoorOutdoorSessionAnalytics(
             return Ok(cached);
 
         // =============================
-        // 2️ BASE QUERY (PRIMARY ONLY)
+        // 2ï¸ BASE QUERY (PRIMARY ONLY)
         // =============================
         var query = db.tbl_network_log
             .AsNoTracking()
@@ -5690,7 +5684,7 @@ public async Task<IActionResult> GetIndoorOutdoorSessionAnalytics(
         }
 
         // =============================
-        // 3️ FETCH PRIMARY DATA
+        // 3ï¸ FETCH PRIMARY DATA
         // =============================
         var logs = await query
             .OrderBy(x => x.session_id)
@@ -5726,7 +5720,7 @@ public async Task<IActionResult> GetIndoorOutdoorSessionAnalytics(
         }
 
         // =============================
-        // 4️ HELPERS
+        // 4ï¸ HELPERS
         // =============================
         float? ParseFloat(string? v)
             => float.TryParse(v, out var f) ? f : null;
@@ -5738,7 +5732,7 @@ public async Task<IActionResult> GetIndoorOutdoorSessionAnalytics(
         }
 
         // =============================
-        // 5️ RESULT STRUCTURE
+        // 5ï¸ RESULT STRUCTURE
         // =============================
         var result = new
         {
@@ -5748,7 +5742,7 @@ public async Task<IActionResult> GetIndoorOutdoorSessionAnalytics(
         };
 
         // =============================
-        // 6️ GROUP BY INDOOR / OUTDOOR
+        // 6ï¸ GROUP BY INDOOR / OUTDOOR
         // =============================
         var ioGroups = logs
             .Where(x => !string.IsNullOrWhiteSpace(x.indoor_outdoor))
@@ -5759,7 +5753,7 @@ public async Task<IActionResult> GetIndoorOutdoorSessionAnalytics(
             var ioList = new List<object>();
 
             // =============================
-            // 7️ GROUP BY OPERATOR + TECHNOLOGY
+            // 7ï¸ GROUP BY OPERATOR + TECHNOLOGY
             // =============================
             var opTechGroups = ioGroup.GroupBy(x =>
             {
@@ -5866,18 +5860,15 @@ public async Task<IActionResult> GetIndoorOutdoorSessionAnalytics(
         }
 
         // =============================
-        // 8️ FINAL RESPONSE
+        // 8ï¸ FINAL RESPONSE
         // =============================
         await SetMapViewCacheAsync(cacheKey, result);
         return Ok(result);
     }
-    catch (Exception ex)
+    catch (Exception)
     {
-        return StatusCode(500, new
-        {
-            error = ex.Message,
-            stackTrace = ex.StackTrace
-        });
+        Console.WriteLine("Stack trace available in server logs.");
+        return StatusCode(500, new { error = "An internal server error occurred." });
     }
 }
 
@@ -5957,7 +5948,7 @@ public async Task<IActionResult> GetIndoorOutdoorSessionAnalytics(
                 {
                     status = 0,
                     message = "Error fetching bands data",
-                    error = ex.Message
+                    error = SafeException.Get(ex)
                 })
                 { StatusCode = 500 };
             }
@@ -6136,7 +6127,7 @@ public JsonResult GetPredictionLog([FromBody] PredictionLogQueryDto q)
     catch (Exception ex)
     {
         message.Status = 0;
-        message.Message = DisplayMessage.ErrorMessage + " " + ex.Message;
+        message.Message = DisplayMessage.ErrorMessage + " " + SafeException.Get(ex);
     }
     return Json(message);
 }
@@ -6281,7 +6272,7 @@ public JsonResult GetPredictionLog(
     catch (Exception ex)
     {
         message.Status = 0;
-        message.Message = DisplayMessage.ErrorMessage + " " + ex.Message;
+        message.Message = DisplayMessage.ErrorMessage + " " + SafeException.Get(ex);
     }
     return Json(message);
 }
@@ -6332,7 +6323,7 @@ public JsonResult GetPredictionLog(
             }
             catch (Exception ex)
             {
-                return Json(new { error = "An error occurred while fetching data.", details = ex.Message });
+                return Json(new { error = "An error occurred while fetching data.", details = SafeException.Get(ex) });
             }
         }
 
@@ -6547,7 +6538,7 @@ public JsonResult GetPredictionLog(
             catch (Exception ex)
             {
                 message.Status = 0;
-                message.Message = "Error: " + ex.Message;
+                message.Message = "Error: " + SafeException.Get(ex);
             }
             return Json(message);
         }
@@ -6572,7 +6563,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
     var required = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
         "site","sector","cell_id","longitude","latitude","pci","azimuth",
         "band","earfcn","cluster","technology",
-        "m_tilt","e_tilt","height"   // ✅ ADDED
+        "m_tilt","e_tilt","height"   // âœ… ADDED
     };
 
     var inserted = 0;
@@ -6607,9 +6598,9 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
     var idxCluster  = Col("cluster");
     var idxTech     = Col("technology");
 
-    var idxMTilt    = Col("m_tilt");     // ✅ ADDED
-    var idxETilt    = Col("e_tilt");     // ✅ ADDED
-    var idxHeight   = Col("height");     // ✅ ADDED
+    var idxMTilt    = Col("m_tilt");     // âœ… ADDED
+    var idxETilt    = Col("e_tilt");     // âœ… ADDED
+    var idxHeight   = Col("height");     // âœ… ADDED
 
     var conn = db.Database.GetDbConnection();
     if (conn.State != System.Data.ConnectionState.Open)
@@ -6646,9 +6637,9 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             string.IsNullOrWhiteSpace(cols[idxEarfcn])   ||
             string.IsNullOrWhiteSpace(cols[idxCluster])  ||
             string.IsNullOrWhiteSpace(cols[idxTech])     ||
-            string.IsNullOrWhiteSpace(cols[idxMTilt])    ||   // ✅ ADDED
-            string.IsNullOrWhiteSpace(cols[idxETilt])    ||   // ✅ ADDED
-            string.IsNullOrWhiteSpace(cols[idxHeight]))       // ✅ ADDED
+            string.IsNullOrWhiteSpace(cols[idxMTilt])    ||   // âœ… ADDED
+            string.IsNullOrWhiteSpace(cols[idxETilt])    ||   // âœ… ADDED
+            string.IsNullOrWhiteSpace(cols[idxHeight]))       // âœ… ADDED
         {
             continue;
         }
@@ -6669,9 +6660,9 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
         Add(cmd, "@cluster", cols[idxCluster]);
         Add(cmd, "@tech",    cols[idxTech]);
 
-        Add(cmd, "@m_tilt",  ToInt(cols[idxMTilt]));      // ✅ ADDED
-        Add(cmd, "@e_tilt",  ToInt(cols[idxETilt]));      // ✅ ADDED
-        Add(cmd, "@height",  ToDouble(cols[idxHeight]));  // ✅ ADDED
+        Add(cmd, "@m_tilt",  ToInt(cols[idxMTilt]));      // âœ… ADDED
+        Add(cmd, "@e_tilt",  ToInt(cols[idxETilt]));      // âœ… ADDED
+        Add(cmd, "@height",  ToDouble(cols[idxHeight]));  // âœ… ADDED
 
         Add(cmd, "@pid",     req.ProjectId);
 
@@ -7201,7 +7192,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 {
                     Status = 0,
                     Message = "Error creating scenario column in site_prediction_optimized.",
-                    Details = ex.Message
+                    Details = SafeException.Get(ex)
                 });
             }
         }
@@ -8572,13 +8563,13 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             catch (Exception ex)
             {
                 if (ex is InvalidOperationException &&
-                    (ex.Message.Contains("scenario", StringComparison.OrdinalIgnoreCase) ||
-                     ex.Message.Contains("project", StringComparison.OrdinalIgnoreCase)))
+                    (SafeException.Get(ex).Contains("scenario", StringComparison.OrdinalIgnoreCase) ||
+                     SafeException.Get(ex).Contains("project", StringComparison.OrdinalIgnoreCase)))
                 {
                     return BadRequest(new
                     {
                         Status = 0,
-                        Message = ex.Message
+                        Message = SafeException.Get(ex)
                     });
                 }
 
@@ -8587,7 +8578,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                     Status = 0,
                     Message = "Error updating site prediction.",
                     FailedId = currentItemId > 0 ? (long?)currentItemId : null,
-                    Details = ex.Message
+                    Details = SafeException.Get(ex)
                 });
             }
         }
@@ -8675,7 +8666,7 @@ public async Task<IActionResult> GetSitePredictionScenarios([FromQuery] long pro
         {
             Status = 0,
             Message = "Error fetching site prediction scenarios.",
-            Details = ex.Message
+            Details = SafeException.Get(ex)
         });
     }
 }
@@ -8739,7 +8730,7 @@ public async Task<IActionResult> GetSitePredictionScenarios([FromQuery] long pro
                 {
                     Status = 0,
                     Message = "Error deleting site prediction scenario.",
-                    Details = ex.Message
+                    Details = SafeException.Get(ex)
                 });
             }
         }
@@ -8802,7 +8793,7 @@ public async Task<IActionResult> GetSitePredictionScenarios([FromQuery] long pro
                 {
                     Status = 0,
                     Message = "Error deleting LTE optimized scenario.",
-                    Details = ex.Message
+                    Details = SafeException.Get(ex)
                 });
             }
         }
@@ -9002,7 +8993,7 @@ public async Task<IActionResult> GetSitePredictionScenarios([FromQuery] long pro
                 {
                     Status = 0,
                     Message = "Error deleting site prediction rows.",
-                    Details = ex.Message
+                    Details = SafeException.Get(ex)
                 });
             }
         }
@@ -9066,7 +9057,7 @@ public async Task<IActionResult> CreateSimpleProject([FromBody] CreateProjectMod
     }
     catch (Exception ex)
     {
-        string details = ex.InnerException?.Message ?? ex.Message;
+        string details = SafeException.Get(ex?.InnerException) ?? SafeException.Get(ex);
         return StatusCode(500, new
         {
             Status = 0,
@@ -9393,7 +9384,7 @@ public async Task<IActionResult> AddSitePrediction([FromBody] AddSitePredictionM
     }
     catch (Exception ex)
     {
-        return StatusCode(500, new { Status = 0, Message = ex.Message });
+        return StatusCode(500, new { Status = 0, Message = SafeException.Get(ex) });
     }
 }
     // =========================================================
@@ -9629,7 +9620,7 @@ public async Task<IActionResult> AddSitePrediction([FromBody] AddSitePredictionM
                 {
                     Status = 0,
                     Message = "Error fetching polygons.",
-                    Details = ex.Message
+                    Details = SafeException.Get(ex)
                 });
             }
         }
@@ -9798,7 +9789,7 @@ public async Task<IActionResult> GetNeighboursForPrimary(
                     .ToList();
 
                 if (!latLonGroups.Any())
-                    return null; // no lat/lon match → no collision
+                    return null; // no lat/lon match â†’ no collision
 
                 return new
                 {
@@ -9833,7 +9824,7 @@ public async Task<IActionResult> GetNeighboursForPrimary(
         return StatusCode(500, new
         {
             Status = 0,
-            Message = ex.Message
+            Message = SafeException.Get(ex)
         });
     }
 }
@@ -9898,7 +9889,7 @@ public async Task<IActionResult> GetProjects([FromQuery] int? company_id = null)
     catch (Exception ex)
     {
         if (ex is KeyNotFoundException ||
-            ex.Message.Contains("not present in the dictionary", StringComparison.OrdinalIgnoreCase))
+            SafeException.Get(ex).Contains("not present in the dictionary", StringComparison.OrdinalIgnoreCase))
         {
             try
             {
@@ -9915,7 +9906,7 @@ public async Task<IActionResult> GetProjects([FromQuery] int? company_id = null)
         }
 
         message.Status = 0;
-        message.Message = DisplayMessage.ErrorMessage + " " + ex.Message;
+        message.Message = DisplayMessage.ErrorMessage + " " + SafeException.Get(ex);
     }
 
     return Json(message);
@@ -10229,7 +10220,7 @@ public async Task<JsonResult> GetDominanceDetails([FromQuery] MapFilter1 filters
     }
     catch (Exception ex)
     {
-        return Json(new { success = false, message = "Server Error", details = ex.Message });
+        return Json(new { success = false, message = "Server Error", details = SafeException.Get(ex) });
     }
 }
 [HttpGet, Route("GetPciDistribution")]
@@ -10278,7 +10269,7 @@ public async Task<JsonResult> GetPciDistribution([FromQuery] MapFilter1 filters)
     }
     catch (Exception ex)
     {
-        return Json(new { success = false, message = "Server Error", details = ex.Message });
+        return Json(new { success = false, message = "Server Error", details = SafeException.Get(ex) });
     }
 }
 
@@ -10342,7 +10333,7 @@ private async Task<Dictionary<int, Dictionary<int, double>>> GetPciDistributionG
         }
     }
 
-    // 3. 🧮 CALCULATE GLOBAL PERCENTAGE (The "Excel" Logic)
+    // 3. ðŸ§® CALCULATE GLOBAL PERCENTAGE (The "Excel" Logic)
     var result = new Dictionary<int, Dictionary<int, double>>();
 
     // Step A: Calculate Grand Total (Total rows in this session filter)
@@ -10458,7 +10449,7 @@ public async Task<IActionResult> GetLtePredictionStats([FromQuery] long projectI
     }
     catch (Exception ex)
     {
-        return StatusCode(500, new { Status = 0, Message = "Error calculating stats: " + ex.Message });
+        return StatusCode(500, new { Status = 0, Message = "Error calculating stats: " + SafeException.Get(ex) });
     }
 }
 
@@ -10603,7 +10594,7 @@ public async Task<IActionResult> GetLtePredictionLocationStats(
     }
     catch (Exception ex)
     {
-        return StatusCode(500, new { Status = 0, Message = "Error calculating location stats: " + ex.Message });
+        return StatusCode(500, new { Status = 0, Message = "Error calculating location stats: " + SafeException.Get(ex) });
     }
 }
 
@@ -10706,7 +10697,7 @@ public async Task<IActionResult> GetLtePredictionLocationStatsRefined(
     }
     catch (Exception ex)
     {
-        return StatusCode(500, new { Status = 0, Message = "Error calculating location stats: " + ex.Message });
+        return StatusCode(500, new { Status = 0, Message = "Error calculating location stats: " + SafeException.Get(ex) });
     }
 }
 
@@ -10888,7 +10879,7 @@ ORDER BY b.id DESC;";
     }
     catch (Exception ex)
     {
-        return StatusCode(500, new { Status = 0, Message = "Error fetching site prediction base data: " + ex.Message });
+        return StatusCode(500, new { Status = 0, Message = "Error fetching site prediction base data: " + SafeException.Get(ex) });
     }
 }
 
@@ -11139,7 +11130,7 @@ WHERE NOT EXISTS (SELECT 1 FROM optimized_rows);";
     }
     catch (Exception ex)
     {
-        return StatusCode(500, new { Status = 0, Message = "Error fetching site prediction optimised data: " + ex.Message });
+        return StatusCode(500, new { Status = 0, Message = "Error fetching site prediction optimised data: " + SafeException.Get(ex) });
     }
 }
 
@@ -11267,3 +11258,5 @@ public class LocationStats
         }
     }
 }
+
+

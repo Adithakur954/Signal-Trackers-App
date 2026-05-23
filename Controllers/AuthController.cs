@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Authorization;
+﻿using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -425,3 +425,5 @@ namespace SignalTracker.Controllers
         public List<string> enabled_features { get; set; } = new();
     }
 }
+
+

@@ -1,4 +1,4 @@
-namespace SignalTracker.DTO.PythonBridge
+﻿namespace SignalTracker.DTO.PythonBridge
 {
     public class RfOptimizationBulkRequest
     {
@@ -23,3 +23,5 @@ namespace SignalTracker.DTO.PythonBridge
         public DateTime? created_at { get; set; }
     }
 }
+
+

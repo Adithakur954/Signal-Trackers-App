@@ -1,4 +1,4 @@
-namespace SignalTracker.Middleware;
+﻿namespace SignalTracker.Middleware;
 
 public sealed class SecurityHeadersMiddleware
 {
@@ -59,3 +59,5 @@ public sealed class SecurityHeadersMiddleware
         }
     }
 }
+
+

@@ -1,4 +1,4 @@
-namespace SignalTracker.DTO.PythonBridge
+﻿namespace SignalTracker.DTO.PythonBridge
 {
     public class LtePredictionOptimisedBulkRequest
     {
@@ -25,3 +25,5 @@ namespace SignalTracker.DTO.PythonBridge
         public int? scenario_id { get; set; }
     }
 }
+
+

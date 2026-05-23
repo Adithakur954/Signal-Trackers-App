@@ -1,4 +1,4 @@
-namespace SignalTracker.Middleware;
+﻿namespace SignalTracker.Middleware;
 
 public static class ApplicationBuilderExtensions
 {
@@ -12,3 +12,5 @@ public static class ApplicationBuilderExtensions
         return app.UseMiddleware<CookiePartitionMiddleware>();
     }
 }
+
+

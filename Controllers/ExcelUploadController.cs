@@ -173,10 +173,10 @@ namespace SignalTracker.Controllers
 
                 return Ok(new { Status = 1, Data = data });
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                Console.WriteLine($"❌ Error in GetUploadedExcelFiles: {ex.Message}");
-                return StatusCode(500, new { Status = 0, Message = "Server error: " + ex.Message });
+                Console.WriteLine("❌ Error in GetUploadedExcelFiles: operation failed (see server logs)");
+                return StatusCode(500, new { Status = 0, Message = "An internal server error occurred." });
             }
         }
 
@@ -324,7 +324,7 @@ if (UploadFileType == 1)
                     try
                     {
                         excel_details.status = 0;
-                        excel_details.errors = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+                        excel_details.errors = SafeException.GetInnermost(ex);
                         db.SaveChanges();
                     }
                     catch { }
@@ -332,7 +332,7 @@ if (UploadFileType == 1)
                 return Json(new ReturnAPIResponse
                 {
                     Status = 0,
-                    Message = ex.InnerException != null ? ex.InnerException.Message : ex.Message
+                    Message = SafeException.GetInnermost(ex)
                 });
             }
         }
@@ -390,7 +390,7 @@ if (UploadFileType == 1)
             }
             catch (Exception ex)
             {
-                message.Message = DisplayMessage.ErrorMessage + " " + ex.Message;
+                message.Message = DisplayMessage.ErrorMessage + " " + SafeException.Get(ex);
             }
             return Json(message);
         }
@@ -631,8 +631,8 @@ if (UploadFileType == 1)
 //             }
 //             catch (Exception ex)
 //             {
-//                 Console.WriteLine($"❌ Error in GetUploadedExcelFiles: {ex.Message}");
-//                 return StatusCode(500, new { Status = 0, Message = "Server error: " + ex.Message });
+//                 Console.WriteLine($"❌ Error in GetUploadedExcelFiles: {SafeException.Get(ex)}");
+//                 return StatusCode(500, new { Status = 0, Message = "Server error: " + SafeException.Get(ex) });
 //             }
 //         }
 
@@ -768,7 +768,7 @@ if (UploadFileType == 1)
 //                 return Json(new ReturnAPIResponse
 //                 {
 //                     Status = 0,
-//                     Message = ex.InnerException != null ? ex.InnerException.Message : ex.Message
+//                     Message = SafeException.GetInnermost(ex)
 //                 });
 //             }
 //         }
@@ -808,7 +808,7 @@ if (UploadFileType == 1)
 //             }
 //             catch (Exception ex)
 //             {
-//                 message.Message = DisplayMessage.ErrorMessage + " " + ex.Message;
+//                 message.Message = DisplayMessage.ErrorMessage + " " + SafeException.Get(ex);
 //             }
 //             return Json(message);
 //         }
@@ -860,3 +860,5 @@ if (UploadFileType == 1)
 //         }
 //     }
 // }
+
+

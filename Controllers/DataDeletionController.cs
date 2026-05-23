@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Mvc;
 using SignalTracker.Services;
 
 namespace SignalTracker.Controllers
@@ -112,3 +112,5 @@ namespace SignalTracker.Controllers
         public bool confirm_permanent_deletion { get; set; }
     }
 }
+
+

@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Http;
+﻿using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using SignalTracker.Helper;
 using SignalTracker.Models;
@@ -49,7 +49,7 @@ public IActionResult GetThresholdSettings()
         cf.SessionCheck();
         int uid = cf.UserId;
 
-        // 1️⃣ User-specific threshold (highest priority)
+        // 1ï¸âƒ£ User-specific threshold (highest priority)
         var userSetting = db.thresholds
             .Where(x => x.user_id == uid && x.is_default == 0)
             .OrderByDescending(x => x.id)
@@ -63,7 +63,7 @@ public IActionResult GetThresholdSettings()
             return Ok(response);
         }
 
-        // 2️⃣ Global default threshold (user_id NULL or 0)
+        // 2ï¸âƒ£ Global default threshold (user_id NULL or 0)
         var defaultSetting = db.thresholds
             .Where(x => x.is_default == 1 && (x.user_id == null || x.user_id == 0))
             .OrderByDescending(x => x.id)
@@ -77,7 +77,7 @@ public IActionResult GetThresholdSettings()
             return Ok(response);
         }
 
-        // 3️⃣ Absolute fallback (first row)
+        // 3ï¸âƒ£ Absolute fallback (first row)
         var fallback = db.thresholds
             .OrderBy(x => x.id)
             .FirstOrDefault();
@@ -96,7 +96,7 @@ public IActionResult GetThresholdSettings()
     catch (Exception ex)
     {
         response.Status = 0;
-        response.Message = "Error: " + ex.Message;
+        response.Message = "Error: " + SafeException.Get(ex);
     }
 
     return Ok(response);
@@ -180,9 +180,11 @@ public IActionResult SaveThreshold([FromBody] thresholds model)
     catch (Exception ex)
     {
         response.Status = 0;
-        response.Message = "Error: " + ex.Message;
+        response.Message = "Error: " + SafeException.Get(ex);
     }
 
     return Ok(response);
 }
    }}
+
+

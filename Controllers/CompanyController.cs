@@ -1,6 +1,7 @@
-using Microsoft.AspNetCore.Authorization;
+﻿using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using SignalTracker.Helper;
 using SignalTracker.Models;
 using SignalTracker.Security;
 using SignalTracker.Services;
@@ -77,9 +78,9 @@ namespace SignalTracker.Controllers
 
                 return Ok(new { Status = 1, Message = "Success", Data = companies });
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                return StatusCode(500, new { Status = 0, Message = "Error fetching companies: " + ex.Message });
+                return StatusCode(500, new { Status = 0, Message = "An internal server error occurred." });
             }
         }
       [HttpPost("SaveCompanyDetails")]
@@ -253,10 +254,10 @@ namespace SignalTracker.Controllers
                                 }
                             }
                         }
-                        catch (Exception ex)
+                        catch (Exception)
                         {
                             // Log error but don't fail the request since primary succeeded
-                            Console.WriteLine($"Error saving to TW database: {ex.Message}");
+                            Console.WriteLine("Error saving to TW database: operation failed (see server logs)");
                         }
                     }
 
@@ -336,7 +337,7 @@ else
         existingCompany.total_granted_licenses = request.total_granted_licenses;
     }
 
-    // 2️ Update total used licenses
+    // 2ï¸ Update total used licenses
     if (request.total_used_licenses >= 0)
     {
         if (request.total_used_licenses > existingCompany.total_granted_licenses)
@@ -360,14 +361,14 @@ else
         Message = "Company and License details updated successfully"
     });
 } }
-            catch (Exception ex)
+            catch (Exception)
             {
-                return StatusCode(500, new { Status = 0, Message = "Error saving company: " + ex.Message });
+                return StatusCode(500, new { Status = 0, Message = "An internal server error occurred." });
             }
         }
         // Delete Company 
         // ======================================================
-// 5️ DELETE COMPANY (SOFT DELETE)
+// 5ï¸ DELETE COMPANY (SOFT DELETE)
 // ======================================================
 [HttpDelete("deleteCompany")]
 public async Task<IActionResult> DeleteCompany([FromQuery] int id)
@@ -432,13 +433,12 @@ public async Task<IActionResult> DeleteCompany([FromQuery] int id)
             Message = "Company deleted successfully"
         });
     }
-    catch (Exception ex)
+    catch (Exception)
     {
         return StatusCode(500, new
         {
             Status = 0,
-            Message = "Error deleting company",
-            Error = ex.Message
+            Message = "An internal server error occurred."
         });
     }
 }
@@ -485,13 +485,12 @@ public async Task<IActionResult> GetGrantLicenseHistory([FromQuery] int? company
             Data = data
         });
     }
-    catch (Exception ex)
+    catch (Exception)
     {
         return StatusCode(500, new
         {
             Status = 0,
-            Message = "Error fetching license history",
-            Error = ex.Message
+            Message = "An internal server error occurred."
         });
     }
 }
@@ -563,7 +562,7 @@ public async Task<IActionResult> GrantLicense([FromBody] GrantLicenseRequest req
         {
             Status = 0,
             Message = "Error granting license",
-            Error = ex.InnerException?.Message ?? ex.Message
+            Error = SafeException.Get(ex?.InnerException) ?? SafeException.Get(ex)
         });
     }
 }
@@ -680,7 +679,7 @@ public async Task<IActionResult> GetUsedLicenses(
         {
             Status = 0,
             Message = "Error fetching used licenses",
-            Error = ex.InnerException?.Message ?? ex.Message
+            Error = SafeException.Get(ex?.InnerException) ?? SafeException.Get(ex)
         });
     }
 }
@@ -764,7 +763,7 @@ public async Task<IActionResult> RevokeLicense([FromQuery] int licenseId)
         {
             Status = 0,
             Message = "Error revoking license",
-            Error = ex.Message
+            Error = SafeException.Get(ex)
         });
     }
 }
@@ -858,7 +857,7 @@ public async Task<IActionResult> UpdateUser([FromQuery] int userId, [FromBody] U
         {
             Status = 0,
             Message = "Error updating user",
-            Error = ex.Message
+            Error = SafeException.Get(ex)
         });
     }
 }
@@ -902,7 +901,7 @@ public async Task<IActionResult> RevokeUser([FromQuery] int userId)
         {
             Status = 0,
             Message = "Error revoking user",
-            Error = ex.Message
+            Error = SafeException.Get(ex)
         });
     }
 }
@@ -946,7 +945,7 @@ public async Task<IActionResult> DeleteUser([FromQuery] int userId)
         {
             Status = 0,
             Message = "Error deleting user",
-            Error = ex.Message
+            Error = SafeException.Get(ex)
         });
     }
 }
@@ -1038,7 +1037,7 @@ public async Task<IActionResult> UpdateIssuedLicense([FromQuery] int licenseId, 
         {
             Status = 0,
             Message = "Error updating issued license",
-            Error = ex.Message
+            Error = SafeException.Get(ex)
         });
     }
 }
@@ -1067,3 +1066,5 @@ public class UpdateIssuedLicenseRequest
     public string? features_csv { get; set; }
 }
 }}
+
+

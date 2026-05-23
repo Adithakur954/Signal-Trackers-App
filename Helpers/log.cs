@@ -49,7 +49,7 @@ namespace SignalTracker.Helper
             {
                 ex = ex.InnerException;
             }
-            return ex.Message;
+            return SafeException.Get(ex);
         }
 
         private static int GetLineNumber(Exception ex)
@@ -74,3 +74,5 @@ namespace SignalTracker.Helper
         }
     }
 }
+
+

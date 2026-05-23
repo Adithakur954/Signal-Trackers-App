@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Authorization;
+﻿using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using SignalTracker.DTO.PythonBridge;
 using SignalTracker.Services;
@@ -718,3 +718,5 @@ namespace SignalTracker.Controllers
         }
     }
 }
+
+

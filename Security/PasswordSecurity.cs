@@ -1,4 +1,4 @@
-using System.Security.Cryptography;
+﻿using System.Security.Cryptography;
 using System.Text;
 
 namespace SignalTracker.Security;
@@ -96,3 +96,5 @@ public static class PasswordSecurity
         }
     }
 }
+
+

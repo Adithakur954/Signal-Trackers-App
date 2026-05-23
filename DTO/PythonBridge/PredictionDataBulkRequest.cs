@@ -1,4 +1,4 @@
-namespace SignalTracker.DTO.PythonBridge
+﻿namespace SignalTracker.DTO.PythonBridge
 {
     public class PredictionDataBulkRequest
     {
@@ -27,3 +27,5 @@ namespace SignalTracker.DTO.PythonBridge
         public string? etilt { get; set; }
     }
 }
+
+

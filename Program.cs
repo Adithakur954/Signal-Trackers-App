@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Http.Features;
+﻿using Microsoft.AspNetCore.Http.Features;
 using Microsoft.EntityFrameworkCore;
 using SignalTracker.Configuration;
 using SignalTracker.Middleware;
@@ -129,7 +129,7 @@ internal class Program
                     var mux = ConnectionMultiplexer.Connect(redisOptions);
 
                     mux.ConnectionFailed += (_, e) =>
-                        Console.WriteLine($"Redis connection failed: {e.Exception?.Message}");
+                        Console.WriteLine("Redis connection failed: operation failed (see server logs)");
 
                     mux.ConnectionRestored += (_, _) =>
                         Console.WriteLine("Redis connection restored");
@@ -146,9 +146,9 @@ internal class Program
                     return new RedisService(mux);
                 });
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                Console.WriteLine($"Redis failed: {ex.Message}");
+                Console.WriteLine("Redis failed: operation failed (see server logs)");
                 builder.Services.AddDistributedMemoryCache();
                 builder.Services.AddSingleton(_ => new RedisService(null));
             }
@@ -239,3 +239,5 @@ internal class Program
         app.Run();
     }
 }
+
+

@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Authentication.Cookies;
+﻿using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.CookiePolicy;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.HttpOverrides;
@@ -107,8 +107,37 @@ public static class SecurityServiceExtensions
         services.Configure<ForwardedHeadersOptions>(options =>
         {
             options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
-            options.KnownNetworks.Clear();
-            options.KnownProxies.Clear();
+            options.ForwardLimit = 1;
+
+            var knownProxies = configuration.GetSection("Security:ForwardedHeaders:KnownProxies").Get<string[]>() ?? Array.Empty<string>();
+            var knownNetworks = configuration.GetSection("Security:ForwardedHeaders:KnownNetworks").Get<string[]>() ?? Array.Empty<string>();
+
+            if (knownProxies.Length > 0)
+            {
+                options.KnownProxies.Clear();
+                foreach (var proxy in knownProxies)
+                {
+                    if (System.Net.IPAddress.TryParse(proxy, out var address))
+                    {
+                        options.KnownProxies.Add(address);
+                    }
+                }
+            }
+
+            if (knownNetworks.Length > 0)
+            {
+                options.KnownNetworks.Clear();
+                foreach (var network in knownNetworks)
+                {
+                    var parts = network.Split('/');
+                    if (parts.Length == 2
+                        && System.Net.IPAddress.TryParse(parts[0], out var networkAddress)
+                        && int.TryParse(parts[1], out var prefixLength))
+                    {
+                        options.KnownNetworks.Add(new Microsoft.AspNetCore.HttpOverrides.IPNetwork(networkAddress, prefixLength));
+                    }
+                }
+            }
         });
 
         var httpsRedirectionPort = HostingConfiguration.GetHttpsRedirectionPort(configuration);
@@ -145,3 +174,5 @@ public static class SecurityServiceExtensions
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
     }
 }
+
+

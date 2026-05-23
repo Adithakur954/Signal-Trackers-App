@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
 
@@ -55,3 +55,5 @@ namespace SignalTracker.Models
         public string? nodeb_id_cell_id { get; set; }
     }
 }
+
+

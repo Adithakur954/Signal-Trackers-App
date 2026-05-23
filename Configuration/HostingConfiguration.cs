@@ -1,4 +1,4 @@
-namespace SignalTracker.Configuration;
+﻿namespace SignalTracker.Configuration;
 
 public static class HostingConfiguration
 {
@@ -39,3 +39,5 @@ public static class HostingConfiguration
         return int.TryParse(envPort, out var parsedPort) ? parsedPort : null;
     }
 }
+
+

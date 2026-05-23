@@ -1,4 +1,4 @@
-namespace SignalTracker.DTO.PythonBridge
+﻿namespace SignalTracker.DTO.PythonBridge
 {
     public class LteSitePredictionRowsRequest
     {
@@ -62,3 +62,5 @@ namespace SignalTracker.DTO.PythonBridge
         public string? BaselineJobId { get; set; }
     }
 }
+
+

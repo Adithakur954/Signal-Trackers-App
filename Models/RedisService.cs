@@ -1,5 +1,6 @@
-
+﻿
 using SignalTracker.Controllers;
+using SignalTracker.Helper;
 using StackExchange.Redis;
 using System.IO.Compression;
 using System.Text;
@@ -45,7 +46,7 @@ namespace SignalTracker.Models
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Redis PingAsync error: {ex.Message}");
+                Console.WriteLine($"Redis PingAsync error: {SafeException.Get(ex)}");
                 return false;
             }
         }
@@ -80,7 +81,7 @@ namespace SignalTracker.Models
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Redis GetObjectAsync error [{key}]: {ex.Message}");
+                Console.WriteLine($"Redis GetObjectAsync error [{key}]: {SafeException.Get(ex)}");
                 return null;
             }
         }
@@ -99,7 +100,7 @@ namespace SignalTracker.Models
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Redis SetObjectAsync error [{key}]: {ex.Message}");
+                Console.WriteLine($"Redis SetObjectAsync error [{key}]: {SafeException.Get(ex)}");
                 return false;
             }
         }
@@ -115,7 +116,7 @@ namespace SignalTracker.Models
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Redis GetStringAsync error [{key}]: {ex.Message}");
+                Console.WriteLine($"Redis GetStringAsync error [{key}]: {SafeException.Get(ex)}");
                 return null;
             }
         }
@@ -132,7 +133,7 @@ namespace SignalTracker.Models
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Redis SetStringAsync error [{key}]: {ex.Message}");
+                Console.WriteLine($"Redis SetStringAsync error [{key}]: {SafeException.Get(ex)}");
                 return false;
             }
         }
@@ -149,7 +150,7 @@ namespace SignalTracker.Models
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Redis TrySetStringAsync error [{key}]: {ex.Message}");
+                Console.WriteLine($"Redis TrySetStringAsync error [{key}]: {SafeException.Get(ex)}");
                 return false;
             }
         }
@@ -164,7 +165,7 @@ namespace SignalTracker.Models
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Redis DeleteAsync error [{key}]: {ex.Message}");
+                Console.WriteLine($"Redis DeleteAsync error [{key}]: {SafeException.Get(ex)}");
                 return false;
             }
         }
@@ -199,7 +200,7 @@ namespace SignalTracker.Models
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Redis GetKeysAsync error: {ex.Message}");
+                Console.WriteLine($"Redis GetKeysAsync error: {SafeException.Get(ex)}");
             }
 
             return keys;
@@ -268,7 +269,7 @@ namespace SignalTracker.Models
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Redis DeleteByPatternAsync error: {ex.Message}");
+                Console.WriteLine($"Redis DeleteByPatternAsync error: {SafeException.Get(ex)}");
                 return 0;
             }
         }
@@ -322,3 +323,5 @@ namespace SignalTracker.Models
         }
     }
 }
+
+

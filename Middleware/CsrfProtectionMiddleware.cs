@@ -1,4 +1,4 @@
-using SignalTracker.Security;
+﻿using SignalTracker.Security;
 
 namespace SignalTracker.Middleware;
 
@@ -81,3 +81,5 @@ public sealed class CsrfProtectionMiddleware
         });
     }
 }
+
+

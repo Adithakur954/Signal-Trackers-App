@@ -1,4 +1,4 @@
-using System.Net.Http;
+﻿using System.Net.Http;
 
 namespace SignalTracker.Services
 {
@@ -75,7 +75,7 @@ namespace SignalTracker.Services
             var stripCountryCode = GetBool("SMS_STRIP_COUNTRY_CODE", true);
 
             // Strip leading country code to get to bare 10-digit number
-            // e.g. 916307252260 → 6307252260, +918130653366 → 8130653366
+            // e.g. 916307252260 â†’ 6307252260, +918130653366 â†’ 8130653366
             if (stripCountryCode
                 && !string.IsNullOrWhiteSpace(defaultCountryCode)
                 && digits.Length > defaultCountryCode.Length
@@ -137,3 +137,5 @@ namespace SignalTracker.Services
         }
     }
 }
+
+

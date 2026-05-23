@@ -1,4 +1,4 @@
-namespace SignalTracker.DTO.PythonBridge
+﻿namespace SignalTracker.DTO.PythonBridge
 {
     public class SessionIdsPagedRequest
     {
@@ -13,3 +13,5 @@ namespace SignalTracker.DTO.PythonBridge
         public string DownloadPath { get; set; } = string.Empty;
     }
 }
+
+

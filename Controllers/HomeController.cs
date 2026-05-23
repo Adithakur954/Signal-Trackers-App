@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
 using SignalTracker.Models;
 using Microsoft.EntityFrameworkCore;
@@ -568,3 +568,5 @@ namespace SignalTracker.Controllers
         }
     }
 }
+
+

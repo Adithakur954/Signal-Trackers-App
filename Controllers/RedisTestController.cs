@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Authorization;
+﻿using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using SignalTracker.Models;
 using System;
@@ -71,9 +71,9 @@ namespace SignalTracker.Controllers
                     data = value
                 });
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                Console.WriteLine($"Redis health probe failed: {ex.Message}");
+                Console.WriteLine("Redis health probe failed: operation failed (see server logs)");
                 return StatusCode(503, new
                 {
                     success = false,
@@ -84,3 +84,5 @@ namespace SignalTracker.Controllers
         }
     }
 }
+
+

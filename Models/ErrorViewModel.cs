@@ -1,4 +1,4 @@
-namespace SignalTracker.Models
+﻿namespace SignalTracker.Models
 {
     public class ErrorViewModel
     {
@@ -7,3 +7,5 @@ namespace SignalTracker.Models
         public bool ShowRequestId => !string.IsNullOrEmpty(RequestId);
     }
 }
+
+

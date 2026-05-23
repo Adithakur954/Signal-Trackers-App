@@ -1,4 +1,4 @@
-// Models/NetworkLogDtos.cs
+﻿// Models/NetworkLogDtos.cs
 namespace SignalTracker.Models
 {
     public class NetworkLogResponse
@@ -59,3 +59,5 @@ namespace SignalTracker.Models
         public string durationHHMMSS { get; set; } = "";
     }
 }
+
+
