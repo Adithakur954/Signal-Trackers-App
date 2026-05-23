@@ -24,6 +24,14 @@ namespace SignalTracker.Models
 
         public bool IsConnected => _multiplexer?.IsConnected ?? false;
 
+        private static TimeSpan CacheCommandTimeout { get; } = TimeSpan.FromMilliseconds(750);
+
+        private static async Task<T> WithTimeoutAsync<T>(Task<T> task, T fallback)
+        {
+            var completed = await Task.WhenAny(task, Task.Delay(CacheCommandTimeout));
+            return ReferenceEquals(completed, task) ? await task : fallback;
+        }
+
         // ---------------- BASIC ----------------
 
         public async Task<bool> PingAsync()
@@ -48,7 +56,7 @@ namespace SignalTracker.Models
 
             try
             {
-                var value = await _db.StringGetAsync(key);
+                var value = await WithTimeoutAsync(_db.StringGetAsync(key), RedisValue.Null);
                 if (value.IsNullOrEmpty) return null;
 
                 var payload = (byte[])value!;
@@ -85,7 +93,9 @@ namespace SignalTracker.Models
             {
                 var jsonBytes = JsonSerializer.SerializeToUtf8Bytes(value);
                 var payload = CreateStoredPayload(jsonBytes);
-                return await _db.StringSetAsync(key, payload, TimeSpan.FromSeconds(ttlSeconds));
+                return await WithTimeoutAsync(
+                    _db.StringSetAsync(key, payload, TimeSpan.FromSeconds(ttlSeconds), flags: CommandFlags.FireAndForget),
+                    true);
             }
             catch (Exception ex)
             {
@@ -100,7 +110,7 @@ namespace SignalTracker.Models
 
             try
             {
-                var value = await _db.StringGetAsync(key);
+                var value = await WithTimeoutAsync(_db.StringGetAsync(key), RedisValue.Null);
                 return value.IsNullOrEmpty ? null : value.ToString();
             }
             catch (Exception ex)
@@ -116,7 +126,9 @@ namespace SignalTracker.Models
 
             try
             {
-                return await _db.StringSetAsync(key, value, TimeSpan.FromSeconds(ttlSeconds));
+                return await WithTimeoutAsync(
+                    _db.StringSetAsync(key, value, TimeSpan.FromSeconds(ttlSeconds), flags: CommandFlags.FireAndForget),
+                    true);
             }
             catch (Exception ex)
             {
@@ -131,7 +143,9 @@ namespace SignalTracker.Models
 
             try
             {
-                return await _db.StringSetAsync(key, value, TimeSpan.FromSeconds(ttlSeconds), when: When.NotExists);
+                return await WithTimeoutAsync(
+                    _db.StringSetAsync(key, value, TimeSpan.FromSeconds(ttlSeconds), when: When.NotExists),
+                    false);
             }
             catch (Exception ex)
             {
@@ -146,7 +160,7 @@ namespace SignalTracker.Models
 
             try
             {
-                return await _db.KeyDeleteAsync(key);
+                return await WithTimeoutAsync(_db.KeyDeleteAsync(key), false);
             }
             catch (Exception ex)
             {
@@ -202,7 +216,7 @@ namespace SignalTracker.Models
         public async Task<bool> ExtendTtlAsync(string key, int ttlSeconds)
         {
             if (_db == null) return false;
-            return await _db.KeyExpireAsync(key, TimeSpan.FromSeconds(ttlSeconds));
+            return await WithTimeoutAsync(_db.KeyExpireAsync(key, TimeSpan.FromSeconds(ttlSeconds)), false);
         }
 
         // ---------------- MAINTENANCE ----------------
@@ -246,7 +260,7 @@ namespace SignalTracker.Models
                 long deleted = 0;
                 foreach (var key in keys)
                 {
-                    if (_db != null && await _db.KeyDeleteAsync(key))
+                    if (_db != null && await WithTimeoutAsync(_db.KeyDeleteAsync(key, flags: CommandFlags.FireAndForget), true))
                         deleted++;
                 }
 
@@ -269,7 +283,7 @@ namespace SignalTracker.Models
             if (_db == null)
                 return;
 
-            await _db.KeyDeleteAsync(redisKey);
+            await WithTimeoutAsync(_db.KeyDeleteAsync(redisKey, flags: CommandFlags.FireAndForget), true);
         }
 
         internal async Task<bool> SetObjectAsync(object cacheKey, MapViewController.NetworkLogFullResponse cacheModel, int ttlSeconds)

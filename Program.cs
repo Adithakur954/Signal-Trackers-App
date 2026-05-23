@@ -116,9 +116,9 @@ internal class Program
             {
                 var redisOptions = ConfigurationOptions.Parse(redisConnString, true);
                 redisOptions.AbortOnConnectFail = false;
-                redisOptions.ConnectTimeout = 15000;
-                redisOptions.SyncTimeout = 15000;
-                redisOptions.AsyncTimeout = 15000;
+                redisOptions.ConnectTimeout = 3000;
+                redisOptions.SyncTimeout = 3000;
+                redisOptions.AsyncTimeout = 3000;
                 redisOptions.ConnectRetry = 5;
                 redisOptions.KeepAlive = 15;
                 redisOptions.ConfigCheckSeconds = 15;
