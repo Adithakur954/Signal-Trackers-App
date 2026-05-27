@@ -165,7 +165,10 @@ namespace SignalTracker.Services
             if (string.IsNullOrWhiteSpace(connectionString)) return null;
 
             var options = new DbContextOptionsBuilder<ApplicationDbContext>()
-                .UseMySql(connectionString, new MySqlServerVersion(new Version(8, 0, 29)))
+                .UseMySql(connectionString, new MySqlServerVersion(new Version(8, 0, 29)), mysqlOptions =>
+                {
+                    mysqlOptions.EnableRetryOnFailure(3, TimeSpan.FromSeconds(5), null);
+                })
                 .Options;
 
             return new ApplicationDbContext(options);

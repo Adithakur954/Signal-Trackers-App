@@ -88,7 +88,10 @@ internal class Program
             var connectionString = connectionProvider.GetConnectionString();
             var serverVersion = new MySqlServerVersion(new Version(8, 0, 29));
 
-            options.UseMySql(connectionString, serverVersion);
+            options.UseMySql(connectionString, serverVersion, mysqlOptions =>
+            {
+                mysqlOptions.EnableRetryOnFailure(3, TimeSpan.FromSeconds(5), null);
+            });
         });
 
         Console.WriteLine("Dynamic Database Provider configured");
