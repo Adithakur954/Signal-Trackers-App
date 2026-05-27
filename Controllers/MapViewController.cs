@@ -4494,7 +4494,7 @@ public async Task<JsonResult> GetProviderWiseVolume([FromQuery] MapFilter filter
     try
     {
         var cacheKey = BuildMapViewCacheKey(
-            "provider-wise-volume",
+            "provider-wise-volume-v2",
             sessionIdsParam,
             filters?.StartDate,
             filters?.EndDate,
@@ -4573,6 +4573,9 @@ WITH ordered_logs AS (
     FROM tbl_network_log
     WHERE session_id IN ({sessionIdsPlaceholder})
       AND primary_cell_info_1 LIKE '%mRegistered=YES%'
+      AND m_alpha_long IS NOT NULL
+      AND TRIM(m_alpha_long) <> ''
+      AND LOWER(TRIM(m_alpha_long)) <> 'unknown'
       AND (@from IS NULL OR timestamp >= @from)
       AND (@to IS NULL OR timestamp < @to)
       AND (@provider IS NULL OR LOWER(m_alpha_long) LIKE @provider)
@@ -4598,7 +4601,8 @@ SELECT
         NULLIF(UNIX_TIMESTAMP(MAX(timestamp)) - UNIX_TIMESTAMP(MIN(timestamp)), 0), 3) AS avg_ul_mbps
 
 FROM ordered_logs
-WHERE gap_sec IS NULL OR gap_sec <= 120
+WHERE tech <> 'Unknown'
+  AND (gap_sec IS NULL OR gap_sec <= 120)
 GROUP BY session_id, provider, tech;
 ";
 
@@ -4622,6 +4626,14 @@ GROUP BY session_id, provider, tech;
     // Fix: Handle potential DBNull for strings
     string provider = rd.IsDBNull(1) ? "unknown" : rd.GetString(1);
     string tech = rd.IsDBNull(2) ? "unknown" : rd.GetString(2);
+
+    if (string.IsNullOrWhiteSpace(provider) ||
+        provider.Equals("unknown", StringComparison.OrdinalIgnoreCase) ||
+        string.IsNullOrWhiteSpace(tech) ||
+        tech.Equals("unknown", StringComparison.OrdinalIgnoreCase))
+    {
+        continue;
+    }
 
     double dlGb = rd.IsDBNull(3) ? 0 : Convert.ToDouble(rd.GetValue(3));
     double ulGb = rd.IsDBNull(4) ? 0 : Convert.ToDouble(rd.GetValue(4));
