@@ -40,9 +40,7 @@ internal class Program
             builder.Configuration.AddJsonFile(userSecretsPath, optional: true, reloadOnChange: true);
         }
 
-        // ----------------------------------------------------
-        // CONTROLLERS & APPLICATION SERVICES
-        // ----------------------------------------------------
+     
         builder.Services.AddScoped<UserScopeService>();
         builder.Services.AddScoped<LicenseFeatureService>();
         builder.Services.AddScoped<PythonBridgeService>();

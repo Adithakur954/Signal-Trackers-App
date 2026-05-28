@@ -115,7 +115,7 @@ namespace SignalTracker.Controllers
 
                     string hashedPassword = PasswordSecurity.HashPassword(request.password);
 
-                    // C. Generate Unique Company Code
+                    // C. Generate  Company Code
                     string companyCode;
                     do
                     {
@@ -146,7 +146,6 @@ namespace SignalTracker.Controllers
                         total_granted_licenses = request.total_granted_licenses > 0 ? request.total_granted_licenses : 10, 
                         total_used_licenses = 0,
 
-                        // FIX 2: Removed ternary '?' check on int. Direct assignment.
                         ask_for_otp = request.ask_for_otp, 
                         otp_phone_number = request.otp_phone_number,
                         blacklisted_phone_number = request.blacklisted_phone_number,

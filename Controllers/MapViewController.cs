@@ -17,7 +17,6 @@ using SignalTracker.Security;
 using System.Data;          // ConnectionState, DbType, etc.
 using System.Data.Common;   // DbCommand, DbConnection
 
-// alias to avoid any confusion with old nested type
 using TempPoint = SignalTracker.Models.TempPlainDto;
 using System.Diagnostics;
 using MySqlConnector;
@@ -183,9 +182,7 @@ namespace SignalTracker.Controllers
             public Dictionary<string, object?> optimized { get; set; } = new(StringComparer.OrdinalIgnoreCase);
         }
 
-        // =========================================================================
-        // Technology / Band classifier (4G/5G/NSA/LTE-FDD/TDD detection)
-        // =========================================================================
+    
         private static class TechClassifier
         {
             private static readonly HashSet<int> LteTddBands = new HashSet<int>
@@ -314,17 +311,15 @@ namespace SignalTracker.Controllers
             }
         }
 
-        // =========================================================
-        // =============== User / Session endpoints ================
-        // =========================================================
+        
 
         public class UserModel
         {
             public string name { get; set; } = string.Empty;
-            public string mobile { get; set; } = string.Empty;
-            public string make { get; set; } = string.Empty;
-            public string model { get; set; } = string.Empty;
-            public string os { get; set; } = string.Empty;
+                public string mobile { get; set; } = string.Empty;
+                public string make { get; set; } = string.Empty;
+                public string model { get; set; } = string.Empty;
+                public string os { get; set; } = string.Empty;
             public string operator_name { get; set; } = string.Empty;
             public string? device_id { get; set; }
             public string? gcm_id { get; set; }
@@ -6841,6 +6836,60 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             if (pci.HasValue) Add(cmd, "@pci", pci.Value);
         }
 
+        private static List<int> ParsePolygonIds(string? polygonIdsCsv)
+        {
+            var result = new List<int>();
+            if (string.IsNullOrWhiteSpace(polygonIdsCsv)) return result;
+
+            foreach (var token in polygonIdsCsv.Split(',', StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (int.TryParse(token.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var id) && id > 0)
+                {
+                    result.Add(id);
+                }
+            }
+
+            return result.Distinct().ToList();
+        }
+
+        private static void AddPolygonIdsParameters(DbCommand cmd, IReadOnlyList<int> polygonIds)
+        {
+            for (var i = 0; i < polygonIds.Count; i++)
+            {
+                Add(cmd, $"@poly_{i}", polygonIds[i]);
+            }
+        }
+
+        private static string BuildPolygonFilterClause(
+            IReadOnlyList<int> polygonIds,
+            string latExpr,
+            string lonExpr)
+        {
+            if (polygonIds == null || polygonIds.Count == 0) return string.Empty;
+
+            var polyParams = string.Join(", ", polygonIds.Select((_, i) => $"@poly_{i}"));
+
+            // Note: existing map_regions data may be stored in lat/lon order.
+            // We accept either orientation to avoid dropping valid rows.
+            return $@"
+                AND EXISTS (
+                    SELECT 1
+                    FROM map_regions mr_filter
+                    WHERE mr_filter.tbl_project_id = @pid
+                      AND mr_filter.id IN ({polyParams})
+                      AND (
+                        ST_Contains(
+                          mr_filter.region,
+                          ST_GeomFromText(CONCAT('POINT(', {lonExpr}, ' ', {latExpr}, ')'), 4326)
+                        )
+                        OR ST_Contains(
+                          mr_filter.region,
+                          ST_GeomFromText(CONCAT('POINT(', {latExpr}, ' ', {lonExpr}, ')'), 4326)
+                        )
+                      )
+                )";
+        }
+
         private static string? NormalizeSitePredictionOperator(string? value)
         {
             if (string.IsNullOrWhiteSpace(value))
@@ -7406,7 +7455,8 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             [FromQuery] int offset = 0,
             [FromQuery] string version = "combined",
             [FromQuery] int simple = 0,
-            [FromQuery] int? scenario = null)
+            [FromQuery] int? scenario = null,
+            [FromQuery(Name = "polygon_ids")] string? polygonIdsCsv = null)
         {
             if (projectId <= 0)
                 return BadRequest(new { Status = 0, Message = "projectId is required" });
@@ -7446,6 +7496,15 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             }
 
             await using var cmd = conn.CreateCommand();
+            var polygonIds = ParsePolygonIds(polygonIdsCsv);
+            var polygonFilterCombined = BuildPolygonFilterClause(
+                polygonIds,
+                "COALESCE(spo.latitude, sp.latitude)",
+                "COALESCE(spo.longitude, sp.longitude)");
+            var polygonFilterOriginal = BuildPolygonFilterClause(
+                polygonIds,
+                "sp.latitude",
+                "sp.longitude");
             var filterClause = requestedVersion == "combined"
                 ? BuildSitePredictionDualFilterClause(
                     site,
@@ -7686,6 +7745,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                     WHERE COALESCE(spo.tbl_project_id, sp.tbl_project_id) = @pid
                     {scenarioFilterClause}
                     {filterClause}
+                    {polygonFilterCombined}
                     ) ranked_optimized
                     WHERE rn = 1
                 ),
@@ -7735,6 +7795,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                     LEFT JOIN site_prediction_optimized spo ON 1 = 0
                     WHERE sp.tbl_project_id = @pid
                     {filterClause}
+                    {polygonFilterOriginal}
                       AND NOT EXISTS (
                           SELECT 1
                           FROM optimized_sites os
@@ -7794,6 +7855,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 LEFT JOIN tbl_project p ON p.id = sp.tbl_project_id
                 WHERE sp.tbl_project_id = @pid
                 {filterClause}
+                {polygonFilterOriginal}
                 ORDER BY sp.id DESC;";
 
             Add(cmd, "@pid", projectId);
@@ -7802,6 +7864,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 Add(cmd, "@scenario", activeScenario.Value);
             }
             AddSitePredictionFilterParameters(cmd, site, cell_id, cluster, technology, band, pci);
+            AddPolygonIdsParameters(cmd, polygonIds);
 
             var list = new List<Dictionary<string, object?>>();
             await using var r = await cmd.ExecuteReaderAsync();
