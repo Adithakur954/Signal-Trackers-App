@@ -62,7 +62,10 @@ namespace SignalTracker.Controllers
                 return null;
 
             var optionsBuilder = new DbContextOptionsBuilder<ApplicationDbContext>();
-            optionsBuilder.UseMySql(twConnectionString, new MySqlServerVersion(new Version(8, 0, 29)));
+            optionsBuilder.UseMySql(twConnectionString, new MySqlServerVersion(new Version(8, 0, 29)), mysqlOptions =>
+            {
+                mysqlOptions.EnableRetryOnFailure(3, TimeSpan.FromSeconds(5), null);
+            });
 
             using var twDb = new ApplicationDbContext(optionsBuilder.Options);
 
@@ -95,7 +98,10 @@ namespace SignalTracker.Controllers
                     if (string.IsNullOrWhiteSpace(twConnectionString)) return;
 
                     var optionsBuilder = new DbContextOptionsBuilder<ApplicationDbContext>();
-                    optionsBuilder.UseMySql(twConnectionString, new MySqlServerVersion(new Version(8, 0, 29)));
+                    optionsBuilder.UseMySql(twConnectionString, new MySqlServerVersion(new Version(8, 0, 29)), mysqlOptions =>
+                    {
+                        mysqlOptions.EnableRetryOnFailure(3, TimeSpan.FromSeconds(5), null);
+                    });
 
                     await using var twDb = new ApplicationDbContext(optionsBuilder.Options);
                     var trackedUser = await twDb.tbl_user.FirstOrDefaultAsync(u => u.id == user.id);
@@ -355,20 +361,34 @@ namespace SignalTracker.Controllers
                 });
             }
 
-            // This query will now automatically run against the user's specific database
-            var user = await _db.tbl_user
-                .AsNoTracking()
-                .Where(u => u.email == email)
-                .Select(u => new UserSummaryDto
+            UserSummaryDto? user;
+            try
+            {
+                // This query will now automatically run against the user's specific database
+                user = await _db.tbl_user
+                    .AsNoTracking()
+                    .Where(u => u.email == email)
+                    .Select(u => new UserSummaryDto
+                    {
+                        id = u.id,
+                        name = u.name,
+                        email = u.email,
+                        m_user_type_id = u.m_user_type_id,
+                        country_code = u.country_code, // Added to DTO
+                        company_id = u.company_id
+                    })
+                    .FirstOrDefaultAsync(ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Auth status check failed for {Email}", email);
+                return StatusCode(503, new
                 {
-                    id = u.id,
-                    name = u.name,
-                    email = u.email,
-                    m_user_type_id = u.m_user_type_id,
-                    country_code = u.country_code, // Added to DTO
-                    company_id = u.company_id
-                })
-                .FirstOrDefaultAsync(ct);
+                    authenticated = false,
+                    user = (object?)null,
+                    message = "Database is busy. Please try again shortly."
+                });
+            }
 
             if (user is null)
             {

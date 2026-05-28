@@ -24,7 +24,10 @@ protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
         var connectionString = _connectionProvider.GetConnectionString();
         var serverVersion = new MySqlServerVersion(new Version(8, 0, 29));
 
-        optionsBuilder.UseMySql(connectionString, serverVersion);
+        optionsBuilder.UseMySql(connectionString, serverVersion, mysqlOptions =>
+        {
+            mysqlOptions.EnableRetryOnFailure(3, TimeSpan.FromSeconds(5), null);
+        });
     }
 }
 

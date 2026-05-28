@@ -196,7 +196,10 @@ namespace SignalTracker.Controllers
                             {
                                 var optionsBuilder = new DbContextOptionsBuilder<ApplicationDbContext>();
                                 var serverVersion = new MySqlServerVersion(new Version(8, 0, 29));
-                                optionsBuilder.UseMySql(secondaryConnectionString, serverVersion);
+                                optionsBuilder.UseMySql(secondaryConnectionString, serverVersion, mysqlOptions =>
+                                {
+                                    mysqlOptions.EnableRetryOnFailure(3, TimeSpan.FromSeconds(5), null);
+                                });
 
                                 using (var secondaryDb = new ApplicationDbContext(optionsBuilder.Options))
                                 {

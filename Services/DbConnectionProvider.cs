@@ -114,14 +114,14 @@ namespace SignalTracker.Services
                 ["Convert Zero DateTime"] = true
             };
 
-            if (builder.MaximumPoolSize <= 0 || builder.MaximumPoolSize > 100)
+            if (builder.MaximumPoolSize <= 0 || builder.MaximumPoolSize > 30)
             {
-                builder.MaximumPoolSize = 100;
+                builder.MaximumPoolSize = 30;
             }
 
-            if (builder.MinimumPoolSize > 5)
+            if (builder.MinimumPoolSize > 2)
             {
-                builder.MinimumPoolSize = 5;
+                builder.MinimumPoolSize = 2;
             }
 
             if (builder.MinimumPoolSize > builder.MaximumPoolSize)

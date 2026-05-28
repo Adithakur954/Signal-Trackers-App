@@ -114,7 +114,10 @@ namespace SignalTracker.Controllers
                 return null;
 
             var optionsBuilder = new DbContextOptionsBuilder<ApplicationDbContext>();
-            optionsBuilder.UseMySql(twConnectionString, new MySqlServerVersion(new Version(8, 0, 29)));
+            optionsBuilder.UseMySql(twConnectionString, new MySqlServerVersion(new Version(8, 0, 29)), mysqlOptions =>
+            {
+                mysqlOptions.EnableRetryOnFailure(3, TimeSpan.FromSeconds(5), null);
+            });
 
             using var twDb = new ApplicationDbContext(optionsBuilder.Options);
 
@@ -147,7 +150,10 @@ namespace SignalTracker.Controllers
                     if (string.IsNullOrWhiteSpace(twConnectionString)) return;
 
                     var optionsBuilder = new DbContextOptionsBuilder<ApplicationDbContext>();
-                    optionsBuilder.UseMySql(twConnectionString, new MySqlServerVersion(new Version(8, 0, 29)));
+                    optionsBuilder.UseMySql(twConnectionString, new MySqlServerVersion(new Version(8, 0, 29)), mysqlOptions =>
+                    {
+                        mysqlOptions.EnableRetryOnFailure(3, TimeSpan.FromSeconds(5), null);
+                    });
 
                     await using var twDb = new ApplicationDbContext(optionsBuilder.Options);
                     var trackedUser = await twDb.tbl_user.FirstOrDefaultAsync(u => u.id == user.id);
