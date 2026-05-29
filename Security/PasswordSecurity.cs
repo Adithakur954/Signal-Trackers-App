@@ -14,7 +14,19 @@ public static class PasswordSecurity
 
         if (IsBcryptHash(storedPassword))
         {
-            return BCrypt.Net.BCrypt.Verify(submittedPassword, storedPassword);
+            if (BCrypt.Net.BCrypt.Verify(submittedPassword, storedPassword))
+            {
+                return true;
+            }
+
+            // Legacy frontend versions sent SHA-256(password), and the backend
+            // then bcrypt-hashed that value during user/company creation.
+            if (allowPlainTextFallback && !IsSha256Hex(submittedPassword))
+            {
+                return BCrypt.Net.BCrypt.Verify(Sha256Hex(submittedPassword), storedPassword);
+            }
+
+            return false;
         }
 
         var storedPasswordTrimmed = storedPassword.Trim();
