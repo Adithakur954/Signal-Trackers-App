@@ -55,7 +55,7 @@ namespace SignalTracker.Controllers
             public int? company_id { get; set; }
         }
 
-        private async Task<LoginUserDto?> FindTwUserAsync(string email)
+        private async Task<LoginUserDto?> FindTwUserAsync(string emailNormalized)
         {
             var twConnectionString = MySqlConnectionStringHelper.EnsureZeroDateTimeHandling(_configuration.GetConnectionString("MySqlConnection2"));
             if (string.IsNullOrWhiteSpace(twConnectionString))
@@ -71,7 +71,7 @@ namespace SignalTracker.Controllers
 
             return await twDb.tbl_user
                 .AsNoTracking()
-                .Where(u => u.email == email && u.isactive == 1)
+                .Where(u => u.email != null && u.email.ToLower() == emailNormalized && u.isactive == 1)
                 .Select(u => new LoginUserDto
                 {
                     id = u.id,
@@ -143,6 +143,12 @@ namespace SignalTracker.Controllers
         [HttpPost("login")]
         public async Task<IActionResult> Login([FromBody] LoginRequest model)
         {
+            if (model == null || string.IsNullOrWhiteSpace(model.Email) || string.IsNullOrWhiteSpace(model.Password))
+            {
+                return Unauthorized(new { message = "Invalid email or password" });
+            }
+
+            var emailNormalized = model.Email.Trim().ToLowerInvariant();
             var requestedCountry = (model.country_code ?? string.Empty).Trim().ToUpperInvariant();
             bool preferTw = requestedCountry == "TW";
 
@@ -151,7 +157,7 @@ namespace SignalTracker.Controllers
 
             if (preferTw)
             {
-                var twUser = await FindTwUserAsync(model.Email);
+                var twUser = await FindTwUserAsync(emailNormalized);
                 if (twUser != null && PasswordSecurity.VerifyPassword(model.Password, twUser.password, allowPlainTextFallback: true))
                 {
                     user = twUser;
@@ -163,7 +169,7 @@ namespace SignalTracker.Controllers
                 // Default authentication on main DB; fallback to TW
                 user = await _db.tbl_user
                     .AsNoTracking()
-                    .Where(u => u.email == model.Email && u.isactive == 1)
+                    .Where(u => u.email != null && u.email.ToLower() == emailNormalized && u.isactive == 1)
                     .Select(u => new LoginUserDto
                     {
                         id = u.id,
@@ -181,7 +187,7 @@ namespace SignalTracker.Controllers
                     var resolvedCountry = (user.country_code ?? string.Empty).Trim().ToUpperInvariant();
                     if (resolvedCountry == "TW")
                     {
-                        var twUser = await FindTwUserAsync(model.Email);
+                        var twUser = await FindTwUserAsync(emailNormalized);
                         if (twUser != null && PasswordSecurity.VerifyPassword(model.Password, twUser.password, allowPlainTextFallback: true))
                         {
                             user = twUser;
@@ -191,7 +197,7 @@ namespace SignalTracker.Controllers
                 }
                 else
                 {
-                    var twUser = await FindTwUserAsync(model.Email);
+                    var twUser = await FindTwUserAsync(emailNormalized);
                     if (twUser != null && PasswordSecurity.VerifyPassword(model.Password, twUser.password, allowPlainTextFallback: true))
                     {
                         user = twUser;
