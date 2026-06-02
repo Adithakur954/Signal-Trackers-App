@@ -261,15 +261,34 @@ namespace SignalTracker.Controllers
                 {
                     if (obj.ForceLogin == true)
                     {
-                        await _redis.DeleteAsync(userLockKey);
                         // Backward compatibility: clear old single global lock key as well.
                         await _redis.DeleteAsync(LegacyGlobalLoginLockKey);
+                        lockAcquired = await _redis.SetStringAsync(userLockKey, lockValue, UserLoginLockTtlSeconds);
+                        if (!lockAcquired)
+                        {
+                            return Json(new { success = false, message = "Login service is temporarily unavailable. Please try again." });
+                        }
                     }
-
-                    lockAcquired = await _redis.TrySetStringAsync(userLockKey, lockValue, UserLoginLockTtlSeconds);
-                    if (!lockAcquired)
+                    else
                     {
-                        return Json(new { success = false, message = "Sorry, someone is already logged in. Please try again later." });
+                        var lockResult = await _redis.TrySetStringWhenNotExistsAsync(userLockKey, lockValue, UserLoginLockTtlSeconds);
+                        if (lockResult == RedisSetWhenNotExistsResult.AlreadyExists)
+                        {
+                            return Json(new { success = false, message = "Sorry, someone is already logged in. Please try again later." });
+                        }
+                        if (lockResult == RedisSetWhenNotExistsResult.Unavailable)
+                        {
+                            if (_configuration.GetValue<bool>("Security:RequireRedisLoginLock"))
+                            {
+                                return Json(new { success = false, message = "Login service is temporarily unavailable. Please try again." });
+                            }
+
+                            _logger.LogWarning("Redis login lock unavailable for {Email}; allowing login because RequireRedisLoginLock is false.", user.email);
+                        }
+                        else
+                        {
+                            lockAcquired = true;
+                        }
                     }
                 }
                 else if (_configuration.GetValue<bool>("Security:RequireRedisLoginLock"))

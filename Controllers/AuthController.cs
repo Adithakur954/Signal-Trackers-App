@@ -221,15 +221,30 @@ namespace SignalTracker.Controllers
             {
                 if (model.ForceLogin == true)
                 {
-                    await _redis.DeleteAsync(userLockKey);
                     // Backward compatibility: clear old single global lock key as well.
                     await _redis.DeleteAsync(LegacyGlobalLoginLockKey);
+                    var forcedLockAcquired = await _redis.SetStringAsync(userLockKey, lockValue, UserLoginLockTtlSeconds);
+                    if (!forcedLockAcquired)
+                    {
+                        return StatusCode(503, new { message = "Login service is temporarily unavailable. Please try again." });
+                    }
                 }
-
-                var lockAcquired = await _redis.TrySetStringAsync(userLockKey, lockValue, UserLoginLockTtlSeconds);
-                if (!lockAcquired)
+                else
                 {
-                    return Unauthorized(new { message = "Sorry, someone is already logged in. Please try again later." });
+                    var lockResult = await _redis.TrySetStringWhenNotExistsAsync(userLockKey, lockValue, UserLoginLockTtlSeconds);
+                    if (lockResult == RedisSetWhenNotExistsResult.AlreadyExists)
+                    {
+                        return Unauthorized(new { message = "Sorry, someone is already logged in. Please try again later." });
+                    }
+                    if (lockResult == RedisSetWhenNotExistsResult.Unavailable)
+                    {
+                        if (_configuration.GetValue<bool>("Security:RequireRedisLoginLock"))
+                        {
+                            return StatusCode(503, new { message = "Login service is temporarily unavailable. Please try again." });
+                        }
+
+                        _logger.LogWarning("Redis login lock unavailable for {Email}; allowing login because RequireRedisLoginLock is false.", user.email);
+                    }
                 }
             }
             else if (_configuration.GetValue<bool>("Security:RequireRedisLoginLock"))

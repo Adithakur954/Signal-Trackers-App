@@ -8,6 +8,13 @@ using System.Text.Json;
 
 namespace SignalTracker.Models
 {
+    public enum RedisSetWhenNotExistsResult
+    {
+        Set,
+        AlreadyExists,
+        Unavailable
+    }
+
     public class RedisService
     {
         private const byte StoredJsonMarker = 0;
@@ -152,6 +159,28 @@ namespace SignalTracker.Models
             {
                 Console.WriteLine($"Redis TrySetStringAsync error [{key}]: {SafeException.Get(ex)}");
                 return false;
+            }
+        }
+
+        public async Task<RedisSetWhenNotExistsResult> TrySetStringWhenNotExistsAsync(string key, string value, int ttlSeconds = 300)
+        {
+            if (_db == null) return RedisSetWhenNotExistsResult.Unavailable;
+
+            try
+            {
+                var task = _db.StringSetAsync(key, value, TimeSpan.FromSeconds(ttlSeconds), when: When.NotExists);
+                var completed = await Task.WhenAny(task, Task.Delay(CacheCommandTimeout));
+                if (!ReferenceEquals(completed, task))
+                    return RedisSetWhenNotExistsResult.Unavailable;
+
+                return await task
+                    ? RedisSetWhenNotExistsResult.Set
+                    : RedisSetWhenNotExistsResult.AlreadyExists;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Redis TrySetStringWhenNotExistsAsync error [{key}]: {SafeException.Get(ex)}");
+                return RedisSetWhenNotExistsResult.Unavailable;
             }
         }
 
