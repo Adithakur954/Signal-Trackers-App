@@ -910,6 +910,18 @@ public class IndoorOutdoorLogDto
         public string? log_grid { get; set; }
     }
 
+    public class tbl_indoor_planning_floor
+    {
+        public int id { get; set; }
+        public string project_name { get; set; } = string.Empty;
+        public string floor_name { get; set; } = "Level 1";
+        public string? plan_json { get; set; }
+        public int? created_by_user_id { get; set; }
+        public string? created_by_user_name { get; set; }
+        public DateTime created_at { get; set; } = DateTime.UtcNow;
+        public DateTime updated_at { get; set; } = DateTime.UtcNow;
+    }
+
     public class tbl_savepolygon
     {
         public int id { get; set; }

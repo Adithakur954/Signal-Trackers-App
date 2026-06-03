@@ -69,6 +69,7 @@ protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
 
         // ======= Projects, Regions, Uploads =======
         public DbSet<tbl_project> tbl_project => Set<tbl_project>();
+        public DbSet<tbl_indoor_planning_floor> tbl_indoor_planning_floor => Set<tbl_indoor_planning_floor>();
         public DbSet<map_regions> map_regions => Set<map_regions>();
         public DbSet<tbl_upload_history> tbl_upload_history => Set<tbl_upload_history>();
         public DbSet<tbl_dashboard_cache> tbl_dashboard_cache { get; set; }
@@ -239,6 +240,13 @@ protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
             {
                 e.HasKey(x => x.id);
                 e.ToTable("tbl_project");
+            });
+
+            modelBuilder.Entity<tbl_indoor_planning_floor>(e =>
+            {
+                e.HasKey(x => x.id);
+                e.ToTable("tbl_indoor_planning_floor");
+                e.HasIndex(x => x.updated_at).HasDatabaseName("ix_indoor_planning_floor_updated_at");
             });
 
             modelBuilder.Entity<map_regions>(e =>
