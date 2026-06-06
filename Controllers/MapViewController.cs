@@ -1972,6 +1972,12 @@ public class AvailablePolygonsResponse
             public int? CompanyId { get; set; }
         }
 
+        public class UpdateProjectSessionsModel
+        {
+            public int ProjectId { get; set; }
+            public List<int>? SessionIds { get; set; }
+        }
+
         private async Task<(int? CompanyId, string? Error)> ResolveProjectCompanyIdAsync(CreateProjectModel? model)
         {
             var isSuperAdmin = _userScope.IsSuperAdmin(User);
@@ -3261,6 +3267,72 @@ public async Task<IActionResult> DeleteProject([FromQuery] int projectId)
     }
 }
 
+[HttpPut, Route("UpdateProjectSessions")]
+public async Task<IActionResult> UpdateProjectSessions([FromBody] UpdateProjectSessionsModel model)
+{
+    if (model == null || model.ProjectId <= 0)
+    {
+        return BadRequest(new { Status = 0, Message = "ProjectId is required." });
+    }
+
+    try
+    {
+        var project = await db.tbl_project.FirstOrDefaultAsync(p => p.id == model.ProjectId);
+        if (project == null)
+        {
+            return NotFound(new { Status = 0, Message = "Project not found." });
+        }
+
+        int targetCompanyId = _userScope.GetTargetCompanyId(User, null);
+        if (!_userScope.IsSuperAdmin(User) && project.company_id != targetCompanyId)
+        {
+            return Unauthorized(new { Status = 0, Message = "Unauthorized to update this project." });
+        }
+
+        var sessionIds = (model.SessionIds ?? new List<int>())
+            .Where(id => id > 0)
+            .Distinct()
+            .ToList();
+
+        project.ref_session_id = sessionIds.Any() ? string.Join(",", sessionIds) : null;
+        await db.SaveChangesAsync();
+        await InvalidateProjectListCachesAsync();
+        await InvalidateMapViewCachesAsync();
+
+        return Ok(new
+        {
+            Status = 1,
+            Message = "Project sessions updated successfully.",
+            Data = new
+            {
+                project.id,
+                project.project_name,
+                project.ref_session_id,
+                project.from_date,
+                project.to_date,
+                project.provider,
+                project.tech,
+                project.band,
+                project.earfcn,
+                project.apps,
+                project.grid_size,
+                project.log_grid,
+                project.created_on,
+                project.status
+            }
+        });
+    }
+    catch (Exception ex)
+    {
+        return StatusCode(500, new
+        {
+            Status = 0,
+            Message = "Error updating project sessions.",
+            Details = SafeException.Get(ex)
+        });
+    }
+}
+
 [HttpGet("session/provider-network-time/combined")]
 public async Task<IActionResult> GetCombinedProviderNetworkTime(
     [FromQuery] string sessionIds)
@@ -4489,7 +4561,7 @@ public async Task<JsonResult> GetProviderWiseVolume([FromQuery] MapFilter filter
     try
     {
         var cacheKey = BuildMapViewCacheKey(
-            "provider-wise-volume-v2",
+            "provider-wise-volume-v4",
             sessionIdsParam,
             filters?.StartDate,
             filters?.EndDate,
@@ -4540,10 +4612,10 @@ public async Task<JsonResult> GetProviderWiseVolume([FromQuery] MapFilter filter
         // FINAL SQL
         // -----------------------------
         string sql = $@"
-WITH ordered_logs AS (
+WITH base_logs AS (
     SELECT
         session_id,
-        LOWER(m_alpha_long) AS provider,
+        LOWER(TRIM(m_alpha_long)) AS provider,
         CASE
             WHEN network IS NULL OR TRIM(network) = '' THEN 'Unknown'
             WHEN UPPER(TRIM(network)) LIKE '%5G%'
@@ -4558,13 +4630,18 @@ WITH ordered_logs AS (
         timestamp,
         CAST(total_rx_kb AS DECIMAL(18,4)) AS total_rx_kb,
         CAST(total_tx_kb AS DECIMAL(18,4)) AS total_tx_kb,
-        UNIX_TIMESTAMP(timestamp)
-        - UNIX_TIMESTAMP(
-            LAG(timestamp) OVER (
-                PARTITION BY session_id, LOWER(m_alpha_long)
-                ORDER BY timestamp
-            )
-        ) AS gap_sec
+        CASE
+            WHEN dl_tpt IS NOT NULL
+              AND TRIM(CAST(dl_tpt AS CHAR)) REGEXP '^-?[0-9]+(\\.[0-9]+)?$'
+            THEN CAST(dl_tpt AS DECIMAL(18,4))
+            ELSE NULL
+        END AS dl_tpt_mbps,
+        CASE
+            WHEN ul_tpt IS NOT NULL
+              AND TRIM(CAST(ul_tpt AS CHAR)) REGEXP '^-?[0-9]+(\\.[0-9]+)?$'
+            THEN CAST(ul_tpt AS DECIMAL(18,4))
+            ELSE NULL
+        END AS ul_tpt_mbps
     FROM tbl_network_log
     WHERE session_id IN ({sessionIdsPlaceholder})
       AND primary_cell_info_1 LIKE '%mRegistered=YES%'
@@ -4574,6 +4651,25 @@ WITH ordered_logs AS (
       AND (@from IS NULL OR timestamp >= @from)
       AND (@to IS NULL OR timestamp < @to)
       AND (@provider IS NULL OR LOWER(m_alpha_long) LIKE @provider)
+),
+ordered_logs AS (
+    SELECT
+        session_id,
+        provider,
+        tech,
+        timestamp,
+        total_rx_kb,
+        total_tx_kb,
+        dl_tpt_mbps,
+        ul_tpt_mbps,
+        UNIX_TIMESTAMP(timestamp)
+        - UNIX_TIMESTAMP(
+            LAG(timestamp) OVER (
+                PARTITION BY session_id, provider, tech
+                ORDER BY timestamp
+            )
+        ) AS gap_sec
+    FROM base_logs
 )
 
 SELECT
@@ -4581,19 +4677,16 @@ SELECT
     provider,
     tech,
 
-    -- Volume in GB
-    ROUND(((MAX(total_rx_kb) - MIN(total_rx_kb)) * 10) / 1024 / 1024, 2) AS dl_gb,
-    ROUND(((MAX(total_tx_kb) - MIN(total_tx_kb))) / 1024 / 1024, 2) AS ul_gb,
+	    -- Volume in GB
+	    ROUND(GREATEST(MAX(total_rx_kb) - MIN(total_rx_kb), 0) / 1024 / 1024, 2) AS dl_gb,
+	    ROUND(GREATEST(MAX(total_tx_kb) - MIN(total_tx_kb), 0) / 1024 / 1024, 2) AS ul_gb,
 
     -- Duration (INT64)
     UNIX_TIMESTAMP(MAX(timestamp)) - UNIX_TIMESTAMP(MIN(timestamp)) AS duration_sec,
 
-    -- Avg Throughput in Mbps
-    ROUND((((MAX(total_rx_kb) - MIN(total_rx_kb)) * 10) / 1024) /
-        NULLIF(UNIX_TIMESTAMP(MAX(timestamp)) - UNIX_TIMESTAMP(MIN(timestamp)), 0), 3) AS avg_dl_mbps,
-
-    ROUND(((MAX(total_tx_kb) - MIN(total_tx_kb)) / 1024) /
-        NULLIF(UNIX_TIMESTAMP(MAX(timestamp)) - UNIX_TIMESTAMP(MIN(timestamp)), 0), 3) AS avg_ul_mbps
+    -- Avg throughput comes from logged dl_tpt / ul_tpt samples, grouped by technology.
+    ROUND(AVG(NULLIF(dl_tpt_mbps, 0)), 3) AS avg_dl_mbps,
+    ROUND(AVG(NULLIF(ul_tpt_mbps, 0)), 3) AS avg_ul_mbps
 
 FROM ordered_logs
 WHERE tech <> 'Unknown'
@@ -11333,5 +11426,3 @@ public class LocationStats
         }
     }
 }
-
-

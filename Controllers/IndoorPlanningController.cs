@@ -49,14 +49,14 @@ namespace SignalTracker.Controllers
                 })
                 .FirstOrDefaultAsync();
 
-            return project == null ? NotFound(new { message = "Indoor planning project not found." }) : Ok(project);
+            return project == null ? NotFound(new { message = "Omni Site Signal project not found." }) : Ok(project);
         }
 
         [HttpPost("projects")]
         public async Task<IActionResult> CreateProject([FromBody] CreateIndoorPlanningProjectRequest request)
         {
             var name = string.IsNullOrWhiteSpace(request?.Name)
-                ? $"Indoor Planning {DateTime.Now:dd MMM yyyy}"
+                ? $"Omni Site Signal {DateTime.Now:dd MMM yyyy}"
                 : request.Name.Trim();
 
             var now = DateTime.UtcNow;
@@ -87,7 +87,7 @@ namespace SignalTracker.Controllers
         public async Task<IActionResult> SaveFloor(int id, [FromBody] SaveIndoorPlanningFloorRequest request)
         {
             var project = await _db.tbl_indoor_planning_floor.FirstOrDefaultAsync(x => x.id == id);
-            if (project == null) return NotFound(new { message = "Indoor planning project not found." });
+            if (project == null) return NotFound(new { message = "Omni Site Signal project not found." });
 
             if (!string.IsNullOrWhiteSpace(request?.Name)) project.project_name = request.Name.Trim();
             if (!string.IsNullOrWhiteSpace(request?.FloorName)) project.floor_name = request.FloorName.Trim();
@@ -95,10 +95,10 @@ namespace SignalTracker.Controllers
             project.updated_at = DateTime.UtcNow;
 
             await _db.SaveChangesAsync();
-            return Ok(new { message = "Floor saved.", id = project.id });
+            return Ok(new { message = "Omni Site Signal floor saved.", id = project.id });
         }
 
-        private const string DefaultPlanJson = "{\"siteName\":\"Default Indoor Project\",\"selectedFloorId\":\"level-1\",\"rooms\":[],\"doors\":[],\"windows\":[],\"sites\":[],\"wifiPoints\":[],\"furniture\":[]}";
+        private const string DefaultPlanJson = "{\"siteName\":\"Omni Site Signal\",\"selectedFloorId\":\"level-1\",\"rooms\":[],\"doors\":[],\"windows\":[],\"sites\":[],\"wifiPoints\":[],\"furniture\":[]}";
     }
 
     public class CreateIndoorPlanningProjectRequest
