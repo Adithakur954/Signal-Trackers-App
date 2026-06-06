@@ -4561,7 +4561,7 @@ public async Task<JsonResult> GetProviderWiseVolume([FromQuery] MapFilter filter
     try
     {
         var cacheKey = BuildMapViewCacheKey(
-            "provider-wise-volume-v4",
+            "provider-wise-volume-v10",
             sessionIdsParam,
             filters?.StartDate,
             filters?.EndDate,
@@ -4611,46 +4611,105 @@ public async Task<JsonResult> GetProviderWiseVolume([FromQuery] MapFilter filter
         // -----------------------------
         // FINAL SQL
         // -----------------------------
-        string sql = $@"
-WITH base_logs AS (
+string sql = $@"
+WITH session_provider_counts AS (
     SELECT
         session_id,
         LOWER(TRIM(m_alpha_long)) AS provider,
-        CASE
-            WHEN network IS NULL OR TRIM(network) = '' THEN 'Unknown'
-            WHEN UPPER(TRIM(network)) LIKE '%5G%'
-              OR UPPER(TRIM(network)) LIKE '%NR%'
-              OR UPPER(TRIM(network)) LIKE '%NSA%'
-              OR UPPER(TRIM(network)) = 'SA'
-              OR UPPER(TRIM(network)) LIKE '% SA%' THEN '5G'
-            WHEN UPPER(TRIM(network)) LIKE '%4G%'
-              OR UPPER(TRIM(network)) LIKE '%LTE%' THEN '4G'
-            ELSE 'Unknown'
-        END AS tech,
-        timestamp,
-        CAST(total_rx_kb AS DECIMAL(18,4)) AS total_rx_kb,
-        CAST(total_tx_kb AS DECIMAL(18,4)) AS total_tx_kb,
-        CASE
-            WHEN dl_tpt IS NOT NULL
-              AND TRIM(CAST(dl_tpt AS CHAR)) REGEXP '^-?[0-9]+(\\.[0-9]+)?$'
-            THEN CAST(dl_tpt AS DECIMAL(18,4))
-            ELSE NULL
-        END AS dl_tpt_mbps,
-        CASE
-            WHEN ul_tpt IS NOT NULL
-              AND TRIM(CAST(ul_tpt AS CHAR)) REGEXP '^-?[0-9]+(\\.[0-9]+)?$'
-            THEN CAST(ul_tpt AS DECIMAL(18,4))
-            ELSE NULL
-        END AS ul_tpt_mbps
+        COUNT(*) AS provider_count
     FROM tbl_network_log
     WHERE session_id IN ({sessionIdsPlaceholder})
-      AND primary_cell_info_1 LIKE '%mRegistered=YES%'
       AND m_alpha_long IS NOT NULL
       AND TRIM(m_alpha_long) <> ''
       AND LOWER(TRIM(m_alpha_long)) <> 'unknown'
-      AND (@from IS NULL OR timestamp >= @from)
-      AND (@to IS NULL OR timestamp < @to)
-      AND (@provider IS NULL OR LOWER(m_alpha_long) LIKE @provider)
+    GROUP BY session_id, LOWER(TRIM(m_alpha_long))
+),
+session_providers AS (
+    SELECT session_id, provider
+    FROM (
+        SELECT
+            session_id,
+            provider,
+            ROW_NUMBER() OVER (
+                PARTITION BY session_id
+                ORDER BY provider_count DESC, provider
+            ) AS rn
+        FROM session_provider_counts
+    ) ranked_providers
+    WHERE rn = 1
+),
+base_logs AS (
+    SELECT
+        l.session_id,
+        COALESCE(NULLIF(LOWER(TRIM(l.m_alpha_long)), ''), sp.provider) AS provider,
+        CASE
+            WHEN l.network IS NULL OR TRIM(l.network) = '' THEN 'Unknown'
+            WHEN (
+                    UPPER(TRIM(l.network)) LIKE '%4G%'
+                 OR UPPER(TRIM(l.network)) LIKE '%LTE%'
+                 )
+              AND (
+                    UPPER(TRIM(l.network)) LIKE '%LTE ANCHOR%'
+                 OR UPPER(TRIM(l.network)) LIKE '%LTE-ANCHOR%'
+                 OR UPPER(TRIM(l.network)) LIKE '%LTE_ANCHOR%'
+                 OR UPPER(TRIM(l.network)) LIKE '%ENDC%'
+                 OR UPPER(TRIM(l.network)) LIKE '%EN-DC%'
+                 OR UPPER(TRIM(l.network)) LIKE '%NSA%'
+                 )
+              AND NOT (
+                    UPPER(TRIM(l.network)) LIKE '%5G%'
+                 OR UPPER(TRIM(l.network)) REGEXP '(^|[^A-Z0-9])NR([^A-Z0-9]|$)'
+                 ) THEN 'LTE Anchor / ENDC'
+            WHEN (
+                    UPPER(TRIM(l.network)) LIKE '%5G%'
+                 OR UPPER(TRIM(l.network)) REGEXP '(^|[^A-Z0-9])NR([^A-Z0-9]|$)'
+                 )
+              AND (
+                    UPPER(TRIM(l.network)) LIKE '%NSA%'
+                 OR UPPER(TRIM(l.network)) LIKE '%ENDC%'
+                 OR UPPER(TRIM(l.network)) LIKE '%EN-DC%'
+                 ) THEN '5G NSA'
+            WHEN (
+                    UPPER(TRIM(l.network)) LIKE '%5G%'
+                 OR UPPER(TRIM(l.network)) REGEXP '(^|[^A-Z0-9])NR([^A-Z0-9]|$)'
+                 OR UPPER(TRIM(l.network)) = 'SA'
+                 OR UPPER(TRIM(l.network)) LIKE '% SA%'
+                 ) THEN '5G SA'
+            WHEN UPPER(TRIM(l.network)) LIKE '%4G%'
+              OR UPPER(TRIM(l.network)) LIKE '%LTE%' THEN '4G'
+            WHEN UPPER(TRIM(l.network)) LIKE '%3G%'
+              OR UPPER(TRIM(l.network)) LIKE '%WCDMA%'
+              OR UPPER(TRIM(l.network)) LIKE '%UMTS%'
+              OR UPPER(TRIM(l.network)) LIKE '%HSPA%' THEN '3G'
+            WHEN UPPER(TRIM(l.network)) LIKE '%2G%'
+              OR UPPER(TRIM(l.network)) LIKE '%GSM%'
+              OR UPPER(TRIM(l.network)) LIKE '%EDGE%'
+              OR UPPER(TRIM(l.network)) LIKE '%GPRS%' THEN '2G'
+            ELSE 'Unknown'
+        END AS tech,
+        l.timestamp,
+        CAST(l.total_rx_kb AS DECIMAL(18,4)) AS total_rx_kb,
+        CAST(l.total_tx_kb AS DECIMAL(18,4)) AS total_tx_kb,
+        CASE
+            WHEN l.dl_tpt IS NOT NULL
+              AND TRIM(CAST(l.dl_tpt AS CHAR)) REGEXP '^-?[0-9]+(\\.[0-9]+)?$'
+            THEN CAST(l.dl_tpt AS DECIMAL(18,4))
+            ELSE NULL
+        END AS dl_tpt_mbps,
+        CASE
+            WHEN l.ul_tpt IS NOT NULL
+              AND TRIM(CAST(l.ul_tpt AS CHAR)) REGEXP '^-?[0-9]+(\\.[0-9]+)?$'
+            THEN CAST(l.ul_tpt AS DECIMAL(18,4))
+            ELSE NULL
+        END AS ul_tpt_mbps
+    FROM tbl_network_log l
+    LEFT JOIN session_providers sp ON sp.session_id = l.session_id
+    WHERE l.session_id IN ({sessionIdsPlaceholder})
+      AND COALESCE(NULLIF(LOWER(TRIM(l.m_alpha_long)), ''), sp.provider) IS NOT NULL
+      AND COALESCE(NULLIF(LOWER(TRIM(l.m_alpha_long)), ''), sp.provider) <> 'unknown'
+      AND (@from IS NULL OR l.timestamp >= @from)
+      AND (@to IS NULL OR l.timestamp < @to)
+      AND (@provider IS NULL OR COALESCE(NULLIF(LOWER(TRIM(l.m_alpha_long)), ''), sp.provider) LIKE @provider)
 ),
 ordered_logs AS (
     SELECT
@@ -4670,12 +4729,38 @@ ordered_logs AS (
             )
         ) AS gap_sec
     FROM base_logs
+),
+filtered_logs AS (
+    SELECT *
+    FROM ordered_logs
+    WHERE tech <> 'Unknown'
+      AND (gap_sec IS NULL OR gap_sec <= 120)
+),
+ranked_logs AS (
+    SELECT
+        filtered_logs.*,
+        ROW_NUMBER() OVER (
+            PARTITION BY session_id, provider, tech
+            ORDER BY CASE WHEN NULLIF(dl_tpt_mbps, 0) IS NULL THEN 1 ELSE 0 END, dl_tpt_mbps
+        ) AS dl_rn,
+        COUNT(NULLIF(dl_tpt_mbps, 0)) OVER (
+            PARTITION BY session_id, provider, tech
+        ) AS dl_cnt,
+        ROW_NUMBER() OVER (
+            PARTITION BY session_id, provider, tech
+            ORDER BY CASE WHEN NULLIF(ul_tpt_mbps, 0) IS NULL THEN 1 ELSE 0 END, ul_tpt_mbps
+        ) AS ul_rn,
+        COUNT(NULLIF(ul_tpt_mbps, 0)) OVER (
+            PARTITION BY session_id, provider, tech
+        ) AS ul_cnt
+    FROM filtered_logs
 )
 
 SELECT
     session_id,
     provider,
     tech,
+    COUNT(*) AS sample_count,
 
 	    -- Volume in GB
 	    ROUND(GREATEST(MAX(total_rx_kb) - MIN(total_rx_kb), 0) / 1024 / 1024, 2) AS dl_gb,
@@ -4685,12 +4770,35 @@ SELECT
     UNIX_TIMESTAMP(MAX(timestamp)) - UNIX_TIMESTAMP(MIN(timestamp)) AS duration_sec,
 
     -- Avg throughput comes from logged dl_tpt / ul_tpt samples, grouped by technology.
+    ROUND(MIN(NULLIF(dl_tpt_mbps, 0)), 3) AS min_dl_mbps,
+    ROUND(MAX(NULLIF(dl_tpt_mbps, 0)), 3) AS max_dl_mbps,
     ROUND(AVG(NULLIF(dl_tpt_mbps, 0)), 3) AS avg_dl_mbps,
-    ROUND(AVG(NULLIF(ul_tpt_mbps, 0)), 3) AS avg_ul_mbps
+    ROUND(STDDEV_SAMP(NULLIF(dl_tpt_mbps, 0)), 3) AS stddev_dl_mbps,
+    ROUND(AVG(
+        CASE
+            WHEN dl_cnt > 0
+             AND dl_rn IN (FLOOR((dl_cnt + 1) / 2), FLOOR((dl_cnt + 2) / 2))
+            THEN NULLIF(dl_tpt_mbps, 0)
+            ELSE NULL
+        END
+    ), 3) AS median_dl_mbps,
+    COUNT(DISTINCT NULLIF(dl_tpt_mbps, 0)) AS distinct_dl_count,
 
-FROM ordered_logs
-WHERE tech <> 'Unknown'
-  AND (gap_sec IS NULL OR gap_sec <= 120)
+    ROUND(MIN(NULLIF(ul_tpt_mbps, 0)), 3) AS min_ul_mbps,
+    ROUND(MAX(NULLIF(ul_tpt_mbps, 0)), 3) AS max_ul_mbps,
+    ROUND(AVG(NULLIF(ul_tpt_mbps, 0)), 3) AS avg_ul_mbps,
+    ROUND(STDDEV_SAMP(NULLIF(ul_tpt_mbps, 0)), 3) AS stddev_ul_mbps,
+    ROUND(AVG(
+        CASE
+            WHEN ul_cnt > 0
+             AND ul_rn IN (FLOOR((ul_cnt + 1) / 2), FLOOR((ul_cnt + 2) / 2))
+            THEN NULLIF(ul_tpt_mbps, 0)
+            ELSE NULL
+        END
+    ), 3) AS median_ul_mbps,
+    COUNT(DISTINCT NULLIF(ul_tpt_mbps, 0)) AS distinct_ul_count
+
+FROM ranked_logs
 GROUP BY session_id, provider, tech;
 ";
 
@@ -4723,14 +4831,27 @@ GROUP BY session_id, provider, tech;
         continue;
     }
 
-    double dlGb = rd.IsDBNull(3) ? 0 : Convert.ToDouble(rd.GetValue(3));
-    double ulGb = rd.IsDBNull(4) ? 0 : Convert.ToDouble(rd.GetValue(4));
+    int sampleCount = rd.IsDBNull(3) ? 0 : Convert.ToInt32(rd.GetValue(3));
+
+    double dlGb = rd.IsDBNull(4) ? 0 : Convert.ToDouble(rd.GetValue(4));
+    double ulGb = rd.IsDBNull(5) ? 0 : Convert.ToDouble(rd.GetValue(5));
 
     // Also verify your duration cast; if it's MySQL, it might be a Decimal/Double
-    long duration = rd.IsDBNull(5) ? 0L : Convert.ToInt64(rd.GetValue(5));
+    long duration = rd.IsDBNull(6) ? 0L : Convert.ToInt64(rd.GetValue(6));
 
-    double avgDlMbps = rd.IsDBNull(6) ? 0 : Convert.ToDouble(rd.GetValue(6));
-    double avgUlMbps = rd.IsDBNull(7) ? 0 : Convert.ToDouble(rd.GetValue(7));
+    double minDlMbps = rd.IsDBNull(7) ? 0 : Convert.ToDouble(rd.GetValue(7));
+    double maxDlMbps = rd.IsDBNull(8) ? 0 : Convert.ToDouble(rd.GetValue(8));
+    double avgDlMbps = rd.IsDBNull(9) ? 0 : Convert.ToDouble(rd.GetValue(9));
+    double stddevDlMbps = rd.IsDBNull(10) ? 0 : Convert.ToDouble(rd.GetValue(10));
+    double medianDlMbps = rd.IsDBNull(11) ? 0 : Convert.ToDouble(rd.GetValue(11));
+    int distinctDlCount = rd.IsDBNull(12) ? 0 : Convert.ToInt32(rd.GetValue(12));
+
+    double minUlMbps = rd.IsDBNull(13) ? 0 : Convert.ToDouble(rd.GetValue(13));
+    double maxUlMbps = rd.IsDBNull(14) ? 0 : Convert.ToDouble(rd.GetValue(14));
+    double avgUlMbps = rd.IsDBNull(15) ? 0 : Convert.ToDouble(rd.GetValue(15));
+    double stddevUlMbps = rd.IsDBNull(16) ? 0 : Convert.ToDouble(rd.GetValue(16));
+    double medianUlMbps = rd.IsDBNull(17) ? 0 : Convert.ToDouble(rd.GetValue(17));
+    int distinctUlCount = rd.IsDBNull(18) ? 0 : Convert.ToInt32(rd.GetValue(18));
 
             string sessionKey = sessionId.ToString();
 
@@ -4746,11 +4867,25 @@ GROUP BY session_id, provider, tech;
 
             providerDict[tech] = new
             {
+                sample_count = sampleCount,
                 dl_gb = dlGb,
                 ul_gb = ulGb,
                 duration_sec = duration,
+                min_dl_mbps = minDlMbps,
+                max_dl_mbps = maxDlMbps,
                 avg_dl_mbps = avgDlMbps,
-                avg_ul_mbps = avgUlMbps
+                stddev_dl_mbps = stddevDlMbps,
+                median_dl_mbps = medianDlMbps,
+                distinct_dl_count = distinctDlCount,
+                is_constant_dl_tpt = sampleCount > 1 && distinctDlCount == 1,
+                min_ul_mbps = minUlMbps,
+                max_ul_mbps = maxUlMbps,
+                avg_ul_mbps = avgUlMbps,
+                stddev_ul_mbps = stddevUlMbps,
+                median_ul_mbps = medianUlMbps,
+                distinct_ul_count = distinctUlCount,
+                is_constant_ul_tpt = sampleCount > 1 && distinctUlCount == 1,
+                is_constant_tpt = sampleCount > 1 && distinctDlCount == 1 && distinctUlCount == 1
             };
         }
 
