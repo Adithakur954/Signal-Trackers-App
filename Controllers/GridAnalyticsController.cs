@@ -1212,11 +1212,44 @@ namespace SignalTracker.Controllers
 
                 await using var cmd = conn.CreateCommand();
                 cmd.CommandText = @"
-                    SELECT scenario_id, scenario_name, status, created_at
-                    FROM lte_optimization_scenarios
-                    WHERE project_id = @pid
-                    ORDER BY scenario_id DESC, id DESC
-                    LIMIT 6;";
+                    SELECT
+                        scenario_id,
+                        COALESCE(
+                            MAX(CASE WHEN source_rank = 1 AND scenario_name <> '' THEN scenario_name END),
+                            MAX(CASE WHEN scenario_name <> '' THEN scenario_name END),
+                            CONCAT('Scenario ', scenario_id)
+                        ) AS scenario_name,
+                        COALESCE(
+                            MAX(CASE WHEN source_rank = 1 AND status <> '' THEN status END),
+                            MAX(CASE WHEN status <> '' THEN status END),
+                            'stored'
+                        ) AS status,
+                        MAX(created_at) AS created_at
+                    FROM (
+                        SELECT
+                            scenario_id,
+                            COALESCE(scenario_name, '') AS scenario_name,
+                            COALESCE(status, '') AS status,
+                            created_at,
+                            1 AS source_rank
+                        FROM lte_optimization_scenarios
+                        WHERE project_id = @pid
+
+                        UNION ALL
+
+                        SELECT
+                            scenario_id,
+                            CONCAT('Scenario ', scenario_id) AS scenario_name,
+                            'stored' AS status,
+                            NULL AS created_at,
+                            2 AS source_rank
+                        FROM lte_prediction_optimised_results
+                        WHERE project_id = @pid
+                          AND scenario_id IS NOT NULL
+                    ) scenarios
+                    WHERE scenario_id > 0
+                    GROUP BY scenario_id
+                    ORDER BY scenario_id DESC;";
                 AddParam(cmd, "@pid", projectId);
 
                 var rows = new List<object>();
@@ -1983,6 +2016,5 @@ WHERE spo.tbl_project_id = @pid;";
         }
     }
 }
-
 
 

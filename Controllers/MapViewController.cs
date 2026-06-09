@@ -9047,12 +9047,12 @@ public async Task<IActionResult> GetSitePredictionScenarios([FromQuery] long pro
             if (model.ProjectId <= 0)
                 return BadRequest(new { Status = 0, Message = "ProjectId is required." });
 
-            if (model.ScenarioId <= 0 || model.ScenarioId > 6)
+            if (model.ScenarioId <= 0)
             {
                 return BadRequest(new
                 {
                     Status = 0,
-                    Message = "scenario_id must be between 1 and 6"
+                    Message = "scenario_id must be greater than 0"
                 });
             }
 
@@ -9073,13 +9073,22 @@ public async Task<IActionResult> GetSitePredictionScenarios([FromQuery] long pro
                 Add(deleteCmd, "@scenarioId", model.ScenarioId);
 
                 var deletedRows = await deleteCmd.ExecuteNonQueryAsync();
+                await using var deleteScenarioCmd = conn.CreateCommand();
+                deleteScenarioCmd.Transaction = tx;
+                deleteScenarioCmd.CommandText = @"
+                    DELETE FROM lte_optimization_scenarios
+                    WHERE project_id = @pid
+                      AND scenario_id = @scenarioId;";
+                Add(deleteScenarioCmd, "@pid", model.ProjectId);
+                Add(deleteScenarioCmd, "@scenarioId", model.ScenarioId);
+                var deletedScenarioRows = await deleteScenarioCmd.ExecuteNonQueryAsync();
                 await tx.CommitAsync();
                 await InvalidateMapViewCachesAsync();
 
                 return Ok(new
                 {
                     Status = 1,
-                    Message = deletedRows > 0
+                    Message = deletedRows > 0 || deletedScenarioRows > 0
                         ? $"LTE optimized Scenario {model.ScenarioId} deleted successfully."
                         : $"No LTE optimized rows found for Scenario {model.ScenarioId}.",
                     ProjectId = model.ProjectId,
@@ -9087,6 +9096,7 @@ public async Task<IActionResult> GetSitePredictionScenarios([FromQuery] long pro
                     ScenarioName = $"Scenario {model.ScenarioId}",
                     RowsAffected = deletedRows,
                     DeletedOptimisedRows = deletedRows,
+                    DeletedScenarioRows = deletedScenarioRows,
                     Table = "lte_prediction_optimised_results"
                 });
             }
