@@ -26,18 +26,47 @@ namespace SignalTracker.Controllers
         private readonly RedisService _redis;
         private readonly UserScopeService _userScope;
         private readonly LicenseFeatureService _licenseFeatureService;
+        private readonly IConfiguration _configuration;
         private const double METERS_PER_DEGREE_LAT = 111320.0;
 
         public GridAnalyticsController(
             ApplicationDbContext context,
             RedisService redis,
             UserScopeService userScope,
-            LicenseFeatureService licenseFeatureService)
+            LicenseFeatureService licenseFeatureService,
+            IConfiguration configuration)
         {
             _db = context;
             _redis = redis;
             _userScope = userScope;
             _licenseFeatureService = licenseFeatureService;
+            _configuration = configuration;
+        }
+
+        private bool IsPythonBridgeAuthorized()
+        {
+            var configuredKey =
+                _configuration["PythonBridge:ApiKey"]
+                ?? Environment.GetEnvironmentVariable("PYTHON_BRIDGE_API_KEY")
+                ?? Environment.GetEnvironmentVariable("SIGNAL_TRACKERS_BRIDGE_KEY")
+                ?? "s-tracer-local-bridge";
+
+            if (string.IsNullOrWhiteSpace(configuredKey))
+            {
+                return false;
+            }
+
+            Request.Headers.TryGetValue("X-Python-Bridge-Key", out var incoming);
+            if (string.IsNullOrWhiteSpace(incoming.ToString()))
+            {
+                return false;
+            }
+
+            return string.Equals(
+                configuredKey.Trim(),
+                incoming.ToString().Trim(),
+                StringComparison.Ordinal
+            );
         }
 
         private int GetCurrentUserId()
@@ -563,6 +592,7 @@ namespace SignalTracker.Controllers
         // GET api/GridAnalytics/GetGridAnalytics
         // Fetches stored grid analytics for a project from the DB
         // =====================================================================
+        [AllowAnonymous]
         [HttpGet("GetGridAnalytics")]
         public async Task<IActionResult> GetGridAnalytics(
             [FromQuery] int projectId,
@@ -571,14 +601,21 @@ namespace SignalTracker.Controllers
             [FromQuery] string? version = null,
             [FromQuery] int? scenario_id = null)
         {
-            if (!await CanUseGridFeatureAsync())
+            var bridgeAuthorized = IsPythonBridgeAuthorized();
+            var userAuthenticated = User?.Identity?.IsAuthenticated == true;
+            if (!bridgeAuthorized && !userAuthenticated)
+            {
+                return Unauthorized(new { Status = 0, Message = "Unauthorized." });
+            }
+
+            if (!bridgeAuthorized && !await CanUseGridFeatureAsync())
                 return StatusCode(403, new { Status = 0, Message = "Feature disabled in license: grid_fetch", Code = "FEATURE_NOT_ENABLED" });
 
             var sw = Stopwatch.StartNew();
 
             // Auth & Scoping
-            int targetCompanyId = _userScope.GetTargetCompanyId(User, company_id);
-            bool isSuperAdmin = _userScope.IsSuperAdmin(User);
+            int targetCompanyId = bridgeAuthorized ? 0 : _userScope.GetTargetCompanyId(User, company_id);
+            bool isSuperAdmin = bridgeAuthorized || _userScope.IsSuperAdmin(User);
             if (!isSuperAdmin && targetCompanyId == 0)
                 return Unauthorized(new { Status = 0, Message = "Unauthorized. Unable to resolve company context." });
 

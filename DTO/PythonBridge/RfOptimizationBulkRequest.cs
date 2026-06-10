@@ -7,6 +7,15 @@
         public List<RfOptimizationRow> Rows { get; set; } = new();
     }
 
+    public class RfOptimizationRowsRequest
+    {
+        public long ProjectId { get; set; }
+        public int? ScenarioId { get; set; }
+        public string? Operator { get; set; }
+        public int Limit { get; set; } = 50000;
+        public int Offset { get; set; } = 0;
+    }
+
     public class RfOptimizationRow
     {
         public string? @operator { get; set; }

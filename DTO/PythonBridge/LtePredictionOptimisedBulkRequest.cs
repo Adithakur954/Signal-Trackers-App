@@ -23,6 +23,7 @@
         public string? nodeb_id_cell_id { get; set; }
         public string? Technology { get; set; }
         public int? scenario_id { get; set; }
+        public int? public_scenario_id { get; set; }
     }
 }
 

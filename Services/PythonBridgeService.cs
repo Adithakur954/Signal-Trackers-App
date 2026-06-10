@@ -1,4 +1,5 @@
 ﻿using System.Data;
+using System.Data.Common;
 using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
@@ -142,6 +143,78 @@ namespace SignalTracker.Services
                 return dateTime;
             }
             return DateTime.TryParse(Convert.ToString(value), out var parsed) ? parsed : null;
+        }
+
+        private static async Task EnsureBaselineSmoothedColumnsAsync(
+            System.Data.Common.DbConnection conn,
+            System.Data.Common.DbTransaction transaction,
+            CancellationToken cancellationToken)
+        {
+            var requiredColumns = new Dictionary<string, string>
+            {
+                ["pred_rsrp_smoothed"] = "DOUBLE NULL",
+                ["pred_rsrq_smoothed"] = "DOUBLE NULL",
+                ["pred_sinr_smoothed"] = "DOUBLE NULL"
+            };
+
+            await using var checkCommand = conn.CreateCommand();
+            checkCommand.Transaction = transaction;
+            checkCommand.CommandText = @"
+                SELECT COLUMN_NAME
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = 'lte_prediction_baseline_results';";
+
+            var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            await using (var reader = await checkCommand.ExecuteReaderAsync(cancellationToken))
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    existing.Add(Convert.ToString(reader.GetValue(0)) ?? string.Empty);
+                }
+            }
+
+            foreach (var column in requiredColumns)
+            {
+                if (existing.Contains(column.Key))
+                {
+                    continue;
+                }
+
+                await using var alterCommand = conn.CreateCommand();
+                alterCommand.Transaction = transaction;
+                alterCommand.CommandText = $"ALTER TABLE lte_prediction_baseline_results ADD COLUMN {column.Key} {column.Value};";
+                await alterCommand.ExecuteNonQueryAsync(cancellationToken);
+            }
+        }
+
+        private static async Task EnsureOptimisedResultsPublicScenarioIdColumnAsync(
+            DbConnection conn,
+            DbTransaction? transaction,
+            CancellationToken cancellationToken)
+        {
+            await using var checkCommand = conn.CreateCommand();
+            checkCommand.Transaction = transaction;
+            checkCommand.CommandText = @"
+                SELECT COUNT(*)
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = 'lte_prediction_optimised_results'
+                  AND COLUMN_NAME = 'public_scenario_id';";
+
+            var existsValue = await checkCommand.ExecuteScalarAsync(cancellationToken);
+            var exists = existsValue != null && existsValue != DBNull.Value && Convert.ToInt32(existsValue) > 0;
+            if (exists)
+            {
+                return;
+            }
+
+            await using var alterCommand = conn.CreateCommand();
+            alterCommand.Transaction = transaction;
+            alterCommand.CommandText = @"
+                ALTER TABLE lte_prediction_optimised_results
+                ADD COLUMN public_scenario_id INT NULL AFTER scenario_id;";
+            await alterCommand.ExecuteNonQueryAsync(cancellationToken);
         }
 
         public async Task<(int Limit, int Offset, List<Dictionary<string, object?>> Rows)> GetDriveTestRowsAsync(
@@ -490,7 +563,19 @@ namespace SignalTracker.Services
 
             var limit = Math.Clamp(request.Limit, 1, 50000);
             var offset = Math.Max(request.Offset, 0);
-            var cacheKey = BuildCacheKey("lte_baseline", request.ProjectId, limit, offset);
+            var lastId = Math.Max(request.LastId ?? offset, 0);
+            var jobId = request.JobId?.Trim();
+            var operatorFilter = request.Operator?.Trim();
+            var hasJobFilter = !string.IsNullOrWhiteSpace(jobId);
+            var hasOperatorFilter = !string.IsNullOrWhiteSpace(operatorFilter)
+                && !string.Equals(operatorFilter, "all", StringComparison.OrdinalIgnoreCase);
+            var cacheKey = BuildCacheKey(
+                "lte_baseline",
+                request.ProjectId,
+                jobId ?? "latest-or-all",
+                operatorFilter ?? "all",
+                limit,
+                lastId);
 
             return await GetCachedOrLoadRowsAsync(
                 cacheKey,
@@ -505,16 +590,129 @@ namespace SignalTracker.Services
                     }
 
                     await using var command = conn.CreateCommand();
-                    command.CommandText = @"
-                SELECT *
+                    var requestedColumns = new[]
+                    {
+                        "project_id",
+                        "job_id",
+                        "grid_id",
+                        "lat",
+                        "lon",
+                        "nodeb_id_cell_id",
+                        "frontend_site_sector_key",
+                        "sector",
+                        "site_id",
+                        "node_b_id",
+                        "nodeb_id",
+                        "cell_id",
+                        "operator",
+                        "Technology",
+                        "technology",
+                        "pred_rsrp",
+                        "pred_rsrq",
+                        "pred_sinr",
+                        "serving_pci",
+                        "serving_earfcn",
+                        "serving_frequency_mhz",
+                        "best_interferer_cell_id",
+                        "best_interferer_pci",
+                        "best_interferer_earfcn",
+                        "best_interferer_distance_m",
+                        "best_interferer_azimuth_delta_deg",
+                        "best_interferer_proxy_phys_dbm",
+                        "neighbor_1_cell_id",
+                        "neighbor_1_pci",
+                        "neighbor_1_earfcn",
+                        "neighbor_1_proxy_rsrp_dbm",
+                        "neighbor_1_distance_m",
+                        "neighbor_1_azimuth_delta_deg",
+                        "neighbor_2_cell_id",
+                        "neighbor_2_pci",
+                        "neighbor_2_earfcn",
+                        "neighbor_2_proxy_rsrp_dbm",
+                        "neighbor_2_distance_m",
+                        "neighbor_2_azimuth_delta_deg",
+                        "interference_gap_db",
+                        "interference_ratio_linear",
+                        "interference_sum_proxy_dbm",
+                        "sinr_proxy_db",
+                        "created_at",
+                        "id"
+                    };
+                    var existingColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    await using (var columnCommand = conn.CreateCommand())
+                    {
+                        columnCommand.CommandText = @"
+                            SELECT COLUMN_NAME
+                            FROM INFORMATION_SCHEMA.COLUMNS
+                            WHERE TABLE_SCHEMA = DATABASE()
+                              AND TABLE_NAME = 'lte_prediction_baseline_results';";
+                        await using var columnReader = await columnCommand.ExecuteReaderAsync(cancellationToken);
+                        while (await columnReader.ReadAsync(cancellationToken))
+                        {
+                            existingColumns.Add(Convert.ToString(columnReader.GetValue(0)) ?? string.Empty);
+                        }
+                    }
+
+                    var selectColumns = requestedColumns
+                        .Where(existingColumns.Contains)
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+                    if (selectColumns.Count == 0)
+                    {
+                        selectColumns.Add("*");
+                    }
+
+                    var filters = new List<string> { "project_id = @pid" };
+                    if (hasJobFilter && existingColumns.Contains("job_id"))
+                    {
+                        filters.Add("job_id = @job_id");
+                    }
+                    if (hasOperatorFilter && existingColumns.Contains("operator"))
+                    {
+                        filters.Add("LOWER(TRIM(`operator`)) = LOWER(TRIM(@operator))");
+                    }
+                    var useKeysetPaging = existingColumns.Contains("id");
+                    if (useKeysetPaging && lastId > 0)
+                    {
+                        filters.Add("`id` > @last_id");
+                    }
+                    var orderColumn = existingColumns.Contains("id")
+                        ? "id"
+                        : existingColumns.Contains("created_at")
+                            ? "created_at"
+                            : selectColumns.FirstOrDefault(col => col != "*");
+                    var orderSql = string.IsNullOrWhiteSpace(orderColumn)
+                        ? string.Empty
+                        : $"ORDER BY `{orderColumn}`";
+                    var pagingSql = useKeysetPaging
+                        ? "LIMIT @lim"
+                        : "LIMIT @lim OFFSET @off";
+
+                    command.CommandText = $@"
+                SELECT {string.Join(", ", selectColumns.Select(col => col == "*" ? "*" : $"`{col}`"))}
                 FROM lte_prediction_baseline_results
-                WHERE project_id = @pid
-                ORDER BY id
-                LIMIT @lim OFFSET @off;";
+                WHERE {string.Join(" AND ", filters)}
+                {orderSql}
+                {pagingSql};";
 
                     PythonBridgeDbTool.AddParam(command, "@pid", request.ProjectId);
+                    if (hasJobFilter && existingColumns.Contains("job_id"))
+                    {
+                        PythonBridgeDbTool.AddParam(command, "@job_id", jobId!);
+                    }
+                    if (hasOperatorFilter && existingColumns.Contains("operator"))
+                    {
+                        PythonBridgeDbTool.AddParam(command, "@operator", operatorFilter!);
+                    }
+                    if (useKeysetPaging && lastId > 0)
+                    {
+                        PythonBridgeDbTool.AddParam(command, "@last_id", lastId);
+                    }
                     PythonBridgeDbTool.AddParam(command, "@lim", limit);
-                    PythonBridgeDbTool.AddParam(command, "@off", offset);
+                    if (!useKeysetPaging)
+                    {
+                        PythonBridgeDbTool.AddParam(command, "@off", offset);
+                    }
 
                     await using var reader = await command.ExecuteReaderAsync(cancellationToken);
                     return await PythonBridgeDbTool.ReadRowsAsync(reader, cancellationToken);
@@ -754,36 +952,49 @@ namespace SignalTracker.Services
                 await conn.OpenAsync(cancellationToken);
             }
 
+            await EnsureOptimisedResultsPublicScenarioIdColumnAsync(conn, transaction: null, cancellationToken);
             await using var transaction = await conn.BeginTransactionAsync(cancellationToken);
             var inserted = 0;
 
-            foreach (var row in rows)
+            foreach (var batch in rows.Chunk(300))
             {
                 await using var command = conn.CreateCommand();
                 command.Transaction = transaction;
-                command.CommandText = @"
+
+                var valuesSql = new List<string>();
+                for (var i = 0; i < batch.Length; i++)
+                {
+                    var row = batch[i];
+                    valuesSql.Add($@"(@project_id{i}, @job_id{i}, @lat{i}, @lon{i},
+                        @pred_rsrp{i}, @pred_rsrq{i}, @pred_sinr{i},
+                        @node_b_id{i}, @cell_id{i}, @technology{i}, @operator{i},
+                        @created_at{i}, @site_id{i}, @nodeb_id_cell_id{i},
+                        @scenario_id{i}, @public_scenario_id{i})");
+
+                    PythonBridgeDbTool.AddParam(command, $"@project_id{i}", request.ProjectId);
+                    PythonBridgeDbTool.AddParam(command, $"@job_id{i}", request.JobId);
+                    PythonBridgeDbTool.AddParam(command, $"@lat{i}", row.lat);
+                    PythonBridgeDbTool.AddParam(command, $"@lon{i}", row.lon);
+                    PythonBridgeDbTool.AddParam(command, $"@pred_rsrp{i}", row.pred_rsrp);
+                    PythonBridgeDbTool.AddParam(command, $"@pred_rsrq{i}", row.pred_rsrq);
+                    PythonBridgeDbTool.AddParam(command, $"@pred_sinr{i}", row.pred_sinr);
+                    PythonBridgeDbTool.AddParam(command, $"@node_b_id{i}", row.node_b_id);
+                    PythonBridgeDbTool.AddParam(command, $"@cell_id{i}", row.cell_id);
+                    PythonBridgeDbTool.AddParam(command, $"@technology{i}", row.Technology ?? "4G");
+                    PythonBridgeDbTool.AddParam(command, $"@operator{i}", row.@operator ?? row.operator_name);
+                    PythonBridgeDbTool.AddParam(command, $"@created_at{i}", row.created_at ?? DateTime.UtcNow);
+                    PythonBridgeDbTool.AddParam(command, $"@site_id{i}", row.site_id);
+                    PythonBridgeDbTool.AddParam(command, $"@nodeb_id_cell_id{i}", row.nodeb_id_cell_id);
+                    PythonBridgeDbTool.AddParam(command, $"@scenario_id{i}", row.scenario_id);
+                    PythonBridgeDbTool.AddParam(command, $"@public_scenario_id{i}", row.public_scenario_id);
+                }
+
+                command.CommandText = $@"
                     INSERT INTO lte_prediction_optimised_results
                     (project_id, job_id, lat, lon, pred_rsrp, pred_rsrq, pred_sinr,
-                     node_b_id, cell_id, Technology, `operator`, created_at, site_id, nodeb_id_cell_id, scenario_id)
-                    VALUES
-                    (@project_id, @job_id, @lat, @lon, @pred_rsrp, @pred_rsrq, @pred_sinr,
-                     @node_b_id, @cell_id, @technology, @operator, @created_at, @site_id, @nodeb_id_cell_id, @scenario_id);";
-
-                PythonBridgeDbTool.AddParam(command, "@project_id", request.ProjectId);
-                PythonBridgeDbTool.AddParam(command, "@job_id", request.JobId);
-                PythonBridgeDbTool.AddParam(command, "@lat", row.lat);
-                PythonBridgeDbTool.AddParam(command, "@lon", row.lon);
-                PythonBridgeDbTool.AddParam(command, "@pred_rsrp", row.pred_rsrp);
-                PythonBridgeDbTool.AddParam(command, "@pred_rsrq", row.pred_rsrq);
-                PythonBridgeDbTool.AddParam(command, "@pred_sinr", row.pred_sinr);
-                PythonBridgeDbTool.AddParam(command, "@node_b_id", row.node_b_id);
-                PythonBridgeDbTool.AddParam(command, "@cell_id", row.cell_id);
-                PythonBridgeDbTool.AddParam(command, "@technology", row.Technology ?? "4G");
-                PythonBridgeDbTool.AddParam(command, "@operator", row.@operator ?? row.operator_name);
-                PythonBridgeDbTool.AddParam(command, "@created_at", row.created_at ?? DateTime.UtcNow);
-                PythonBridgeDbTool.AddParam(command, "@site_id", row.site_id);
-                PythonBridgeDbTool.AddParam(command, "@nodeb_id_cell_id", row.nodeb_id_cell_id);
-                PythonBridgeDbTool.AddParam(command, "@scenario_id", row.scenario_id);
+                     node_b_id, cell_id, Technology, `operator`, created_at, site_id,
+                     nodeb_id_cell_id, scenario_id, public_scenario_id)
+                    VALUES {string.Join(", ", valuesSql)};";
 
                 inserted += await command.ExecuteNonQueryAsync(cancellationToken);
             }
@@ -822,7 +1033,9 @@ namespace SignalTracker.Services
                 {
                     var row = batch[i];
                     valuesSql.Add($@"(@project_id{i}, @job_id{i}, @lat{i}, @lat_6dp{i}, @lon{i}, @lon_6dp{i},
-                     @pred_rsrp{i}, @pred_rsrq{i}, @pred_sinr{i}, @node_b_id{i}, @cell_id{i},
+                     @pred_rsrp{i}, @pred_rsrq{i}, @pred_sinr{i},
+                     @pred_rsrp_smoothed{i}, @pred_rsrq_smoothed{i}, @pred_sinr_smoothed{i},
+                     @node_b_id{i}, @cell_id{i},
                      @operator{i}, @created_at{i}, @site_id{i}, @nodeb_id_cell_id{i}, @technology{i})");
 
                     PythonBridgeDbTool.AddParam(command, $"@project_id{i}", RowValue(row, "project_id") ?? request.ProjectId);
@@ -834,6 +1047,9 @@ namespace SignalTracker.Services
                     PythonBridgeDbTool.AddParam(command, $"@pred_rsrp{i}", RowValue(row, "pred_rsrp"));
                     PythonBridgeDbTool.AddParam(command, $"@pred_rsrq{i}", RowValue(row, "pred_rsrq"));
                     PythonBridgeDbTool.AddParam(command, $"@pred_sinr{i}", RowValue(row, "pred_sinr"));
+                    PythonBridgeDbTool.AddParam(command, $"@pred_rsrp_smoothed{i}", RowValue(row, "pred_rsrp_smoothed"));
+                    PythonBridgeDbTool.AddParam(command, $"@pred_rsrq_smoothed{i}", RowValue(row, "pred_rsrq_smoothed"));
+                    PythonBridgeDbTool.AddParam(command, $"@pred_sinr_smoothed{i}", RowValue(row, "pred_sinr_smoothed"));
                     PythonBridgeDbTool.AddParam(command, $"@node_b_id{i}", RowValue(row, "node_b_id"));
                     PythonBridgeDbTool.AddParam(command, $"@cell_id{i}", RowValue(row, "cell_id"));
                     PythonBridgeDbTool.AddParam(command, $"@operator{i}", RowValue(row, "operator"));
@@ -846,7 +1062,9 @@ namespace SignalTracker.Services
                 command.CommandText = $@"
                     INSERT INTO lte_prediction_baseline_results
                     (project_id, job_id, lat, lat_6dp, lon, lon_6dp,
-                     pred_rsrp, pred_rsrq, pred_sinr, node_b_id, cell_id,
+                     pred_rsrp, pred_rsrq, pred_sinr,
+                     pred_rsrp_smoothed, pred_rsrq_smoothed, pred_sinr_smoothed,
+                     node_b_id, cell_id,
                      `operator`, created_at, site_id, nodeb_id_cell_id, Technology)
                     VALUES
                     {string.Join(",", valuesSql)}
@@ -859,6 +1077,9 @@ namespace SignalTracker.Services
                      pred_rsrp = VALUES(pred_rsrp),
                      pred_rsrq = VALUES(pred_rsrq),
                      pred_sinr = VALUES(pred_sinr),
+                     pred_rsrp_smoothed = VALUES(pred_rsrp_smoothed),
+                     pred_rsrq_smoothed = VALUES(pred_rsrq_smoothed),
+                     pred_sinr_smoothed = VALUES(pred_sinr_smoothed),
                      node_b_id = VALUES(node_b_id),
                      cell_id = VALUES(cell_id),
                      `operator` = VALUES(`operator`),
@@ -1064,6 +1285,103 @@ namespace SignalTracker.Services
             return value == null || value == DBNull.Value ? 1 : Convert.ToInt32(value);
         }
 
+        public async Task<int?> GetLatestRfOptimizationScenarioIdAsync(
+            long projectId,
+            string? @operator = null,
+            CancellationToken cancellationToken = default
+        )
+        {
+            var operatorFilter = @operator?.Trim();
+            var hasOperatorFilter = !string.IsNullOrWhiteSpace(operatorFilter)
+                && !string.Equals(operatorFilter, "all", StringComparison.OrdinalIgnoreCase);
+
+            var conn = _db.Database.GetDbConnection();
+            if (conn.State != ConnectionState.Open)
+            {
+                await conn.OpenAsync(cancellationToken);
+            }
+
+            await using var command = conn.CreateCommand();
+            command.CommandText = $@"
+                SELECT MAX(scenario_id)
+                FROM rf_optimization_results
+                WHERE project_id = @pid
+                {(hasOperatorFilter ? "AND LOWER(TRIM(`operator`)) = LOWER(TRIM(@operator))" : string.Empty)};";
+            PythonBridgeDbTool.AddParam(command, "@pid", projectId);
+            if (hasOperatorFilter)
+            {
+                PythonBridgeDbTool.AddParam(command, "@operator", operatorFilter!);
+            }
+
+            var value = await command.ExecuteScalarAsync(cancellationToken);
+            return value == null || value == DBNull.Value ? null : Convert.ToInt32(value);
+        }
+
+        public async Task<(int Limit, int Offset, List<Dictionary<string, object?>> Rows)> GetRfOptimizationRowsAsync(
+            long projectId,
+            int? scenarioId,
+            string? @operator = null,
+            int limit = 50000,
+            int offset = 0,
+            CancellationToken cancellationToken = default
+        )
+        {
+            limit = Math.Clamp(limit, 1, 50000);
+            offset = Math.Max(offset, 0);
+            var operatorFilter = @operator?.Trim();
+            var hasOperatorFilter = !string.IsNullOrWhiteSpace(operatorFilter)
+                && !string.Equals(operatorFilter, "all", StringComparison.OrdinalIgnoreCase);
+
+            var conn = _db.Database.GetDbConnection();
+            if (conn.State != ConnectionState.Open)
+            {
+                await conn.OpenAsync(cancellationToken);
+            }
+
+            await using var command = conn.CreateCommand();
+            var filters = new List<string> { "project_id = @pid" };
+            PythonBridgeDbTool.AddParam(command, "@pid", projectId);
+
+            if (scenarioId.HasValue)
+            {
+                filters.Add("scenario_id = @scenario_id");
+                PythonBridgeDbTool.AddParam(command, "@scenario_id", scenarioId.Value);
+            }
+
+            if (hasOperatorFilter)
+            {
+                filters.Add("LOWER(TRIM(`operator`)) = LOWER(TRIM(@operator))");
+                PythonBridgeDbTool.AddParam(command, "@operator", operatorFilter!);
+            }
+
+            command.CommandText = $@"
+                SELECT
+                    project_id,
+                    scenario_id,
+                    `operator`,
+                    cell_id,
+                    technology,
+                    parameter,
+                    current_value,
+                    recommended_value,
+                    reason,
+                    swap_sector_detected,
+                    rsrp_threshold,
+                    rsrq_threshold,
+                    sinr_threshold,
+                    created_at
+                FROM rf_optimization_results
+                WHERE {string.Join(" AND ", filters)}
+                ORDER BY cell_id, parameter, id
+                LIMIT @lim OFFSET @off;";
+            PythonBridgeDbTool.AddParam(command, "@lim", limit);
+            PythonBridgeDbTool.AddParam(command, "@off", offset);
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            var rows = await PythonBridgeDbTool.ReadRowsAsync(reader, cancellationToken);
+            return (limit, offset, rows);
+        }
+
         public async Task<string?> GetLatestLteBaselineJobIdAsync(
             long projectId,
             CancellationToken cancellationToken = default
@@ -1099,15 +1417,12 @@ namespace SignalTracker.Services
                 await conn.OpenAsync(cancellationToken);
             }
 
-            await using var command = conn.CreateCommand();
-            command.CommandText = @"
-                SELECT COALESCE(MAX(scenario_id), 0) + 1
-                FROM lte_optimization_scenarios
-                WHERE project_id = @pid;";
-            PythonBridgeDbTool.AddParam(command, "@pid", projectId);
-
-            var value = await command.ExecuteScalarAsync(cancellationToken);
-            return value == null || value == DBNull.Value ? 1 : Convert.ToInt32(value);
+            return await GetNextAvailableLteOptimizationScenarioIdAsync(
+                conn,
+                transaction: null,
+                projectId,
+                cancellationToken
+            );
         }
 
         public async Task<(long RowId, int ScenarioId)> CreateLteOptimizationScenarioAsync(
@@ -1120,21 +1435,36 @@ namespace SignalTracker.Services
                 throw new ArgumentException("ProjectId is required.");
             }
 
-            var scenarioId = await GetNextLteOptimizationScenarioIdAsync(request.ProjectId, cancellationToken);
-            if (scenarioId > 6)
-            {
-                throw new InvalidOperationException(
-                    $"Maximum scenario limit reached for project_id={request.ProjectId}. Only 6 scenarios are allowed per project."
-                );
-            }
-
             var conn = _db.Database.GetDbConnection();
             if (conn.State != ConnectionState.Open)
             {
                 await conn.OpenAsync(cancellationToken);
             }
 
+            await using var transaction = await conn.BeginTransactionAsync(cancellationToken);
+            await PruneOldestLteOptimizationScenariosIfNeededAsync(
+                conn,
+                transaction,
+                request.ProjectId,
+                maxScenarios: 6,
+                cancellationToken
+            );
+
+            var scenarioId = await GetNextAvailableLteOptimizationScenarioIdAsync(
+                conn,
+                transaction,
+                request.ProjectId,
+                cancellationToken
+            );
+            if (scenarioId > 6)
+            {
+                throw new InvalidOperationException(
+                    $"No available public scenario slot for project_id={request.ProjectId}. Scenario pruning did not free a 1..6 slot."
+                );
+            }
+
             await using var command = conn.CreateCommand();
+            command.Transaction = transaction;
             command.CommandText = @"
                 INSERT INTO lte_optimization_scenarios (
                     project_id, scenario_id, baseline_job_id, scenario_name, scenario_description,
@@ -1175,9 +1505,125 @@ namespace SignalTracker.Services
             await command.ExecuteNonQueryAsync(cancellationToken);
 
             await using var idCommand = conn.CreateCommand();
+            idCommand.Transaction = transaction;
             idCommand.CommandText = "SELECT LAST_INSERT_ID();";
             var rowId = await idCommand.ExecuteScalarAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
             return (Convert.ToInt64(rowId), scenarioId);
+        }
+
+        private static async Task<int> GetNextAvailableLteOptimizationScenarioIdAsync(
+            DbConnection conn,
+            DbTransaction? transaction,
+            long projectId,
+            CancellationToken cancellationToken
+        )
+        {
+            var usedIds = new HashSet<int>();
+
+            await using var command = conn.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = @"
+                SELECT scenario_id
+                FROM lte_optimization_scenarios
+                WHERE project_id = @pid
+                  AND scenario_id IS NOT NULL
+                ORDER BY scenario_id ASC;";
+            PythonBridgeDbTool.AddParam(command, "@pid", projectId);
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (!reader.IsDBNull(0))
+                {
+                    usedIds.Add(Convert.ToInt32(reader.GetValue(0)));
+                }
+            }
+
+            for (var scenarioId = 1; scenarioId <= 6; scenarioId++)
+            {
+                if (!usedIds.Contains(scenarioId))
+                {
+                    return scenarioId;
+                }
+            }
+
+            return 7;
+        }
+
+        private static async Task PruneOldestLteOptimizationScenariosIfNeededAsync(
+            DbConnection conn,
+            DbTransaction transaction,
+            long projectId,
+            int maxScenarios,
+            CancellationToken cancellationToken
+        )
+        {
+            while (true)
+            {
+                await using (var countCommand = conn.CreateCommand())
+                {
+                    countCommand.Transaction = transaction;
+                    countCommand.CommandText = @"
+                        SELECT COUNT(*)
+                        FROM lte_optimization_scenarios
+                        WHERE project_id = @pid;";
+                    PythonBridgeDbTool.AddParam(countCommand, "@pid", projectId);
+
+                    var countValue = await countCommand.ExecuteScalarAsync(cancellationToken);
+                    var scenarioCount = countValue == null || countValue == DBNull.Value
+                        ? 0
+                        : Convert.ToInt32(countValue);
+                    if (scenarioCount < maxScenarios)
+                    {
+                        break;
+                    }
+                }
+
+                long? oldestRowId = null;
+                await using (var oldestCommand = conn.CreateCommand())
+                {
+                    oldestCommand.Transaction = transaction;
+                    oldestCommand.CommandText = @"
+                        SELECT id
+                        FROM lte_optimization_scenarios
+                        WHERE project_id = @pid
+                        ORDER BY COALESCE(created_at, updated_at, '1970-01-01') ASC, id ASC
+                        LIMIT 1;";
+                    PythonBridgeDbTool.AddParam(oldestCommand, "@pid", projectId);
+
+                    var oldestValue = await oldestCommand.ExecuteScalarAsync(cancellationToken);
+                    if (oldestValue != null && oldestValue != DBNull.Value)
+                    {
+                        oldestRowId = Convert.ToInt64(oldestValue);
+                    }
+                }
+
+                if (!oldestRowId.HasValue)
+                {
+                    break;
+                }
+
+                await using (var deleteResultsCommand = conn.CreateCommand())
+                {
+                    deleteResultsCommand.Transaction = transaction;
+                    deleteResultsCommand.CommandText = @"
+                        DELETE FROM lte_prediction_optimised_results
+                        WHERE scenario_id = @scenario_row_id;";
+                    PythonBridgeDbTool.AddParam(deleteResultsCommand, "@scenario_row_id", oldestRowId.Value);
+                    await deleteResultsCommand.ExecuteNonQueryAsync(cancellationToken);
+                }
+
+                await using (var deleteScenarioCommand = conn.CreateCommand())
+                {
+                    deleteScenarioCommand.Transaction = transaction;
+                    deleteScenarioCommand.CommandText = @"
+                        DELETE FROM lte_optimization_scenarios
+                        WHERE id = @scenario_row_id;";
+                    PythonBridgeDbTool.AddParam(deleteScenarioCommand, "@scenario_row_id", oldestRowId.Value);
+                    await deleteScenarioCommand.ExecuteNonQueryAsync(cancellationToken);
+                }
+            }
         }
 
         public async Task UpdateLteOptimizationScenarioStatusAsync(
@@ -1331,6 +1777,88 @@ namespace SignalTracker.Services
 
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             return await PythonBridgeDbTool.ReadRowsAsync(reader, cancellationToken);
+        }
+
+        public async Task<(int Limit, int Offset, List<Dictionary<string, object?>> Rows)> GetFrontendGridCellsAsync(
+            long projectId,
+            long? scenarioId,
+            double? gridSizeMeters,
+            int limit,
+            int offset,
+            CancellationToken cancellationToken = default
+        )
+        {
+            limit = Math.Clamp(limit, 1, 50000);
+            offset = Math.Max(offset, 0);
+
+            var conn = _db.Database.GetDbConnection();
+            if (conn.State != ConnectionState.Open)
+            {
+                await conn.OpenAsync(cancellationToken);
+            }
+
+            var selectedScenarioId = scenarioId;
+            if (!selectedScenarioId.HasValue)
+            {
+                await using var scenarioCommand = conn.CreateCommand();
+                scenarioCommand.CommandText = @"
+                    SELECT scenario_id
+                    FROM grid_analytics_results
+                    WHERE project_id = @project_id
+                    GROUP BY scenario_id
+                    ORDER BY COUNT(*) DESC, MAX(created_at) DESC
+                    LIMIT 1;";
+                PythonBridgeDbTool.AddParam(scenarioCommand, "@project_id", projectId);
+                var scalar = await scenarioCommand.ExecuteScalarAsync(cancellationToken);
+                if (scalar == null || scalar == DBNull.Value)
+                {
+                    return (limit, offset, new List<Dictionary<string, object?>>());
+                }
+                selectedScenarioId = Convert.ToInt64(scalar);
+            }
+
+            await using var command = conn.CreateCommand();
+            var filters = new List<string> { "project_id = @project_id" };
+            PythonBridgeDbTool.AddParam(command, "@project_id", projectId);
+
+            if (selectedScenarioId.HasValue)
+            {
+                filters.Add("scenario_id = @scenario_id");
+                PythonBridgeDbTool.AddParam(command, "@scenario_id", selectedScenarioId.Value);
+            }
+            else
+            {
+                filters.Add("scenario_id IS NULL");
+            }
+
+            if (gridSizeMeters.HasValue)
+            {
+                filters.Add("grid_size_meters = @grid_size_meters");
+                PythonBridgeDbTool.AddParam(command, "@grid_size_meters", gridSizeMeters.Value);
+            }
+
+            PythonBridgeDbTool.AddParam(command, "@lim", limit);
+            PythonBridgeDbTool.AddParam(command, "@off", offset);
+
+            command.CommandText = $@"
+                SELECT
+                    grid_id,
+                    center_lat,
+                    center_lon,
+                    min_lat,
+                    max_lat,
+                    min_lon,
+                    max_lon,
+                    grid_size_meters,
+                    scenario_id
+                FROM grid_analytics_results
+                WHERE {string.Join(" AND ", filters)}
+                ORDER BY grid_id
+                LIMIT @lim OFFSET @off;";
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            var rows = await PythonBridgeDbTool.ReadRowsAsync(reader, cancellationToken);
+            return (limit, offset, rows);
         }
 
         public async Task<(int Limit, int Offset, List<Dictionary<string, object?>> Rows)> GetReportNetworkLogsAsync(

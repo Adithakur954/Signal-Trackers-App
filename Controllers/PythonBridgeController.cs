@@ -431,6 +431,51 @@ namespace SignalTracker.Controllers
             return Ok(new { Status = 1, ScenarioId = scenarioId });
         }
 
+        [HttpGet("GetLatestRfOptimizationScenarioId")]
+        public async Task<IActionResult> GetLatestRfOptimizationScenarioId(
+            [FromQuery] long projectId,
+            [FromQuery] string? @operator)
+        {
+            var authResult = EnsureAuthorized();
+            if (authResult is not null) return authResult;
+
+            if (projectId <= 0)
+            {
+                return BadRequest(new { Status = 0, Message = "projectId is required." });
+            }
+
+            var scenarioId = await _pythonBridgeService.GetLatestRfOptimizationScenarioIdAsync(
+                projectId,
+                @operator,
+                HttpContext.RequestAborted
+            );
+
+            return Ok(new { Status = 1, ScenarioId = scenarioId });
+        }
+
+        [HttpGet("GetRfOptimizationRows")]
+        public async Task<IActionResult> GetRfOptimizationRows([FromQuery] RfOptimizationRowsRequest request)
+        {
+            var authResult = EnsureAuthorized();
+            if (authResult is not null) return authResult;
+
+            if (request == null || request.ProjectId <= 0)
+            {
+                return BadRequest(new { Status = 0, Message = "ProjectId is required." });
+            }
+
+            var result = await _pythonBridgeService.GetRfOptimizationRowsAsync(
+                request.ProjectId,
+                request.ScenarioId,
+                request.Operator,
+                request.Limit,
+                request.Offset,
+                HttpContext.RequestAborted
+            );
+
+            return Ok(new { Status = 1, result.Limit, result.Offset, Rows = result.Rows });
+        }
+
         [HttpGet("GetLatestLteBaselineJobId")]
         public async Task<IActionResult> GetLatestLteBaselineJobId([FromQuery] long projectId)
         {
@@ -553,6 +598,41 @@ namespace SignalTracker.Controllers
                 project_exists = summary.ProjectExists,
                 site_noMl_count = summary.SiteNoMlCount,
                 source = "signal-trackers"
+            });
+        }
+
+        [HttpGet("GetFrontendGridCells")]
+        public async Task<IActionResult> GetFrontendGridCells(
+            [FromQuery] long projectId,
+            [FromQuery] long? scenarioId,
+            [FromQuery] double? gridSizeMeters,
+            [FromQuery] int limit = 50000,
+            [FromQuery] int offset = 0)
+        {
+            var authResult = EnsureAuthorized();
+            if (authResult is not null) return authResult;
+
+            if (projectId <= 0)
+            {
+                return BadRequest(new { Status = 0, Message = "projectId is required." });
+            }
+
+            var result = await _pythonBridgeService.GetFrontendGridCellsAsync(
+                projectId,
+                scenarioId,
+                gridSizeMeters,
+                limit,
+                offset,
+                HttpContext.RequestAborted
+            );
+
+            return Ok(new
+            {
+                Status = 1,
+                Count = result.Rows.Count,
+                Limit = result.Limit,
+                Offset = result.Offset,
+                Data = result.Rows
             });
         }
 
