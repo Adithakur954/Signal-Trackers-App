@@ -9190,24 +9190,30 @@ public async Task<IActionResult> GetSitePredictionScenarios([FromQuery] long pro
 
                 await using var tx = await conn.BeginTransactionAsync();
 
-                var whereParts = new List<string> { "sp.tbl_project_id = @pid" };
+                var sourceLookupParts = new List<string>();
                 if (deleteBySourceId)
                 {
-                    whereParts.Add("sp.id = @sourceId");
+                    sourceLookupParts.Add("sp.id = @sourceId");
                 }
-                else
+
+                if (!string.IsNullOrWhiteSpace(siteValue))
                 {
-                    whereParts.Add("CONVERT(sp.site USING utf8mb4) COLLATE utf8mb4_unicode_ci = @site");
+                    var siteLookupParts = new List<string>
+                    {
+                        "CONVERT(sp.site USING utf8mb4) COLLATE utf8mb4_unicode_ci = @site"
+                    };
                     if (!deleteEntireSite)
                     {
-                        whereParts.Add("CONVERT(sp.sector USING utf8mb4) COLLATE utf8mb4_unicode_ci = @sector");
+                        siteLookupParts.Add("CONVERT(sp.sector USING utf8mb4) COLLATE utf8mb4_unicode_ci = @sector");
                     }
+                    sourceLookupParts.Add($"({string.Join(" AND ", siteLookupParts)})");
                 }
 
                 var selectSql = $@"
                     SELECT sp.id
                     FROM site_prediction sp
-                    WHERE {string.Join(" AND ", whereParts)};";
+                    WHERE sp.tbl_project_id = @pid
+                      AND ({string.Join(" OR ", sourceLookupParts)});";
 
                 var sourceIds = new List<long>();
                 await using (var selectCmd = conn.CreateCommand())
@@ -9216,8 +9222,8 @@ public async Task<IActionResult> GetSitePredictionScenarios([FromQuery] long pro
                     selectCmd.CommandText = selectSql;
                     Add(selectCmd, "@pid", model.ProjectId);
                     if (deleteBySourceId) Add(selectCmd, "@sourceId", model.SourceId!.Value);
-                    if (!deleteBySourceId) Add(selectCmd, "@site", siteValue);
-                    if (!deleteBySourceId && !deleteEntireSite) Add(selectCmd, "@sector", sectorValue);
+                    if (!string.IsNullOrWhiteSpace(siteValue)) Add(selectCmd, "@site", siteValue);
+                    if (!string.IsNullOrWhiteSpace(siteValue) && !deleteEntireSite) Add(selectCmd, "@sector", sectorValue);
 
                     await using var reader = await selectCmd.ExecuteReaderAsync();
                     while (await reader.ReadAsync())
@@ -9229,46 +9235,51 @@ public async Task<IActionResult> GetSitePredictionScenarios([FromQuery] long pro
                     }
                 }
 
-                if (sourceIds.Count == 0)
-                {
-                    await tx.CommitAsync();
-                    return Ok(new
-                    {
-                        Status = 1,
-                        Message = "No matching rows found.",
-                        RowsAffected = 0,
-                    });
-                }
-
                 var sourceIdParamNames = sourceIds.Select((_, idx) => $"@id{idx}").ToList();
                 var sourceIdInClause = string.Join(", ", sourceIdParamNames);
 
-                int deletedSourceRows;
-                await using (var deleteSourceCmd = conn.CreateCommand())
+                int deletedSourceRows = 0;
+                if (sourceIds.Count > 0)
                 {
-                    deleteSourceCmd.Transaction = tx;
-                    deleteSourceCmd.CommandText = $@"
-                        DELETE FROM site_prediction
-                        WHERE id IN ({sourceIdInClause});";
-
-                    for (int i = 0; i < sourceIds.Count; i += 1)
+                    await using var deleteSourceCmd = conn.CreateCommand();
                     {
-                        Add(deleteSourceCmd, sourceIdParamNames[i], sourceIds[i]);
-                    }
+                        deleteSourceCmd.Transaction = tx;
+                        deleteSourceCmd.CommandText = $@"
+                            DELETE FROM site_prediction
+                            WHERE id IN ({sourceIdInClause});";
 
-                    deletedSourceRows = await deleteSourceCmd.ExecuteNonQueryAsync();
+                        for (int i = 0; i < sourceIds.Count; i += 1)
+                        {
+                            Add(deleteSourceCmd, sourceIdParamNames[i], sourceIds[i]);
+                        }
+
+                        deletedSourceRows = await deleteSourceCmd.ExecuteNonQueryAsync();
+                    }
                 }
 
-                int deletedOptimizedRows;
-                await using (var deleteOptimizedCmd = conn.CreateCommand())
+                int deletedOptimizedRows = 0;
+                var optimizedWhere = new List<string>();
+                if (sourceIds.Count > 0)
                 {
-                    var optimizedWhere = new List<string> { $"spo.site_prediction_id IN ({sourceIdInClause})" };
-                    if (!string.IsNullOrWhiteSpace(siteValue))
+                    optimizedWhere.Add($"spo.site_prediction_id IN ({sourceIdInClause})");
+                }
+                if (!string.IsNullOrWhiteSpace(siteValue))
+                {
+                    var optimizedSiteParts = new List<string>
                     {
-                        optimizedWhere.Add(
-                            "(spo.tbl_project_id = @pid AND CONVERT(spo.site USING utf8mb4) COLLATE utf8mb4_unicode_ci = @site)");
+                        "spo.tbl_project_id = @pid",
+                        "CONVERT(spo.site USING utf8mb4) COLLATE utf8mb4_unicode_ci = @site"
+                    };
+                    if (!deleteEntireSite)
+                    {
+                        optimizedSiteParts.Add("CONVERT(spo.sector USING utf8mb4) COLLATE utf8mb4_unicode_ci = @sector");
                     }
+                    optimizedWhere.Add($"({string.Join(" AND ", optimizedSiteParts)})");
+                }
 
+                if (optimizedWhere.Count > 0)
+                {
+                    await using var deleteOptimizedCmd = conn.CreateCommand();
                     deleteOptimizedCmd.Transaction = tx;
                     deleteOptimizedCmd.CommandText = $@"
                         DELETE FROM site_prediction_optimized spo
@@ -9282,6 +9293,10 @@ public async Task<IActionResult> GetSitePredictionScenarios([FromQuery] long pro
                     {
                         Add(deleteOptimizedCmd, "@pid", model.ProjectId);
                         Add(deleteOptimizedCmd, "@site", siteValue);
+                        if (!deleteEntireSite)
+                        {
+                            Add(deleteOptimizedCmd, "@sector", sectorValue);
+                        }
                     }
 
                     deletedOptimizedRows = await deleteOptimizedCmd.ExecuteNonQueryAsync();
@@ -9293,8 +9308,10 @@ public async Task<IActionResult> GetSitePredictionScenarios([FromQuery] long pro
                 return Ok(new
                 {
                     Status = 1,
-                    Message = "Deleted successfully.",
-                    RowsAffected = deletedSourceRows,
+                    Message = deletedSourceRows > 0 || deletedOptimizedRows > 0
+                        ? "Deleted successfully."
+                        : "No matching rows found.",
+                    RowsAffected = deletedSourceRows + deletedOptimizedRows,
                     DeletedSourceRows = deletedSourceRows,
                     DeletedOptimizedRows = deletedOptimizedRows,
                     DeletedSourceIds = sourceIds
