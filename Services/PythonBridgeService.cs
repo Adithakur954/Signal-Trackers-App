@@ -1,5 +1,6 @@
 ﻿using System.Data;
 using System.Data.Common;
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
@@ -13,6 +14,8 @@ namespace SignalTracker.Services
     public class PythonBridgeService
     {
         private const int DefaultBatchSize = 2000;
+        private const int BaselineResultInsertBatchSize = 20000;
+        private const int GeoFeatureInsertBatchSize = 500;
         private const int BridgeReadCacheTtlSeconds = 180;
 
         private readonly ApplicationDbContext _db;
@@ -44,6 +47,54 @@ namespace SignalTracker.Services
             var normalized = parts
                 .Select(p => p == null ? "null" : Convert.ToString(p)?.Trim()?.ToLowerInvariant() ?? "null");
             return $"pybridge:{scope}:{string.Join(":", normalized)}";
+        }
+
+        private static List<int> ParsePolygonIds(string? polygonIdsCsv)
+        {
+            var result = new List<int>();
+            if (string.IsNullOrWhiteSpace(polygonIdsCsv)) return result;
+
+            foreach (var token in polygonIdsCsv.Split(',', StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (int.TryParse(token.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var id) && id > 0)
+                {
+                    result.Add(id);
+                }
+            }
+
+            return result.Distinct().ToList();
+        }
+
+        private static string BuildPolygonFilterClause(IReadOnlyList<int> polygonIds, string latExpr, string lonExpr)
+        {
+            if (polygonIds.Count == 0) return string.Empty;
+
+            var polyParams = string.Join(", ", polygonIds.Select((_, i) => $"@poly_{i}"));
+            return $@"
+                AND EXISTS (
+                    SELECT 1
+                    FROM map_regions mr_filter
+                    WHERE mr_filter.tbl_project_id = @pid
+                      AND mr_filter.id IN ({polyParams})
+                      AND (
+                        ST_Contains(
+                          mr_filter.region,
+                          ST_GeomFromText(CONCAT('POINT(', {lonExpr}, ' ', {latExpr}, ')'), 4326)
+                        )
+                        OR ST_Contains(
+                          mr_filter.region,
+                          ST_GeomFromText(CONCAT('POINT(', {latExpr}, ' ', {lonExpr}, ')'), 4326)
+                        )
+                      )
+                )";
+        }
+
+        private static void AddPolygonIdsParameters(DbCommand command, IReadOnlyList<int> polygonIds)
+        {
+            for (var i = 0; i < polygonIds.Count; i++)
+            {
+                PythonBridgeDbTool.AddParam(command, $"@poly_{i}", polygonIds[i]);
+            }
         }
 
         private async Task<(int Limit, int Offset, List<Dictionary<string, object?>> Rows)> GetCachedOrLoadRowsAsync(
@@ -471,7 +522,10 @@ namespace SignalTracker.Services
             var operatorFilter = request.Operator?.Trim();
             var hasOperatorFilter = !string.IsNullOrWhiteSpace(operatorFilter)
                 && !string.Equals(operatorFilter, "all", StringComparison.OrdinalIgnoreCase);
-            var cacheKey = BuildCacheKey("lte_site_pred", request.ProjectId, operatorFilter ?? "all", limit, offset);
+            var polygonIds = ParsePolygonIds(request.PolygonIds);
+            var polygonFilter = BuildPolygonFilterClause(polygonIds, "latitude", "longitude");
+            var polygonKey = polygonIds.Count > 0 ? string.Join("-", polygonIds) : "all";
+            var cacheKey = BuildCacheKey("lte_site_pred", request.ProjectId, operatorFilter ?? "all", polygonKey, limit, offset);
 
             return await GetCachedOrLoadRowsAsync(
                 cacheKey,
@@ -491,6 +545,7 @@ namespace SignalTracker.Services
                 FROM site_prediction
                 WHERE tbl_project_id = @pid
                 {(hasOperatorFilter ? "AND LOWER(cluster) = LOWER(@operator)" : string.Empty)}
+                {polygonFilter}
                 ORDER BY id
                 LIMIT @lim OFFSET @off;";
 
@@ -499,6 +554,7 @@ namespace SignalTracker.Services
                     {
                         PythonBridgeDbTool.AddParam(command, "@operator", operatorFilter!);
                     }
+                    AddPolygonIdsParameters(command, polygonIds);
                     PythonBridgeDbTool.AddParam(command, "@lim", limit);
                     PythonBridgeDbTool.AddParam(command, "@off", offset);
 
@@ -563,19 +619,20 @@ namespace SignalTracker.Services
 
             var limit = Math.Clamp(request.Limit, 1, 50000);
             var offset = Math.Max(request.Offset, 0);
-            var lastId = Math.Max(request.LastId ?? offset, 0);
+            var lastId = Math.Max(request.LastId ?? 0, 0);
             var jobId = request.JobId?.Trim();
             var operatorFilter = request.Operator?.Trim();
             var hasJobFilter = !string.IsNullOrWhiteSpace(jobId);
             var hasOperatorFilter = !string.IsNullOrWhiteSpace(operatorFilter)
                 && !string.Equals(operatorFilter, "all", StringComparison.OrdinalIgnoreCase);
+            var requestedKeysetPaging = request.LastId.HasValue;
             var cacheKey = BuildCacheKey(
                 "lte_baseline",
                 request.ProjectId,
                 jobId ?? "latest-or-all",
                 operatorFilter ?? "all",
                 limit,
-                lastId);
+                requestedKeysetPaging ? lastId : offset);
 
             return await GetCachedOrLoadRowsAsync(
                 cacheKey,
@@ -671,22 +728,33 @@ namespace SignalTracker.Services
                     {
                         filters.Add("LOWER(TRIM(`operator`)) = LOWER(TRIM(@operator))");
                     }
-                    var useKeysetPaging = existingColumns.Contains("id");
+                    var useKeysetPaging = requestedKeysetPaging && existingColumns.Contains("id");
                     if (useKeysetPaging && lastId > 0)
                     {
                         filters.Add("`id` > @last_id");
                     }
-                    var orderColumn = existingColumns.Contains("id")
-                        ? "id"
-                        : existingColumns.Contains("created_at")
-                            ? "created_at"
-                            : selectColumns.FirstOrDefault(col => col != "*");
-                    var orderSql = string.IsNullOrWhiteSpace(orderColumn)
-                        ? string.Empty
-                        : $"ORDER BY `{orderColumn}`";
                     var pagingSql = useKeysetPaging
                         ? "LIMIT @lim"
                         : "LIMIT @lim OFFSET @off";
+                    var offsetOrderColumns = new[]
+                    {
+                        "nodeb_id_cell_id",
+                        "cell_id",
+                        "grid_id",
+                        "lat",
+                        "lon",
+                        "created_at",
+                        "id"
+                    }
+                        .Where(existingColumns.Contains)
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .Select(col => $"`{col}`")
+                        .ToList();
+                    var orderSql = useKeysetPaging
+                        ? "ORDER BY `id`"
+                        : (offsetOrderColumns.Count > 0
+                            ? $"ORDER BY {string.Join(", ", offsetOrderColumns)}"
+                            : string.Empty);
 
                     command.CommandText = $@"
                 SELECT {string.Join(", ", selectColumns.Select(col => col == "*" ? "*" : $"`{col}`"))}
@@ -723,6 +791,8 @@ namespace SignalTracker.Services
         public async Task<(int Limit, int Offset, List<Dictionary<string, object?>> Rows)> GetSitePredictionOptimizedAsync(
             long projectId,
             string? operatorName,
+            string? polygonIdsCsv,
+            int? scenario,
             int requestedLimit,
             int requestedOffset,
             CancellationToken cancellationToken = default
@@ -738,7 +808,41 @@ namespace SignalTracker.Services
             var normalizedOperator = operatorName?.Trim();
             var hasOperatorFilter = !string.IsNullOrWhiteSpace(normalizedOperator)
                 && !string.Equals(normalizedOperator, "all", StringComparison.OrdinalIgnoreCase);
-            var cacheKey = BuildCacheKey("site_pred_opt", projectId, normalizedOperator ?? "all", limit, offset);
+            var selectedScenario = scenario.HasValue && scenario.Value > 0 ? scenario.Value : (int?)null;
+            var polygonIds = ParsePolygonIds(polygonIdsCsv);
+            var polygonFilter = BuildPolygonFilterClause(polygonIds, "latitude", "longitude");
+            var polygonKey = polygonIds.Count > 0 ? string.Join("-", polygonIds) : "all";
+
+            var conn = _db.Database.GetDbConnection();
+            if (conn.State != ConnectionState.Open)
+            {
+                await conn.OpenAsync(cancellationToken);
+            }
+
+            var effectiveScenario = selectedScenario;
+            if (!effectiveScenario.HasValue)
+            {
+                await using var latestScenarioCommand = conn.CreateCommand();
+                latestScenarioCommand.CommandText = $@"
+                    SELECT MAX(scenario)
+                    FROM site_prediction_optimized
+                    WHERE tbl_project_id = @pid
+                    {(hasOperatorFilter ? "AND cluster = @operator" : string.Empty)};";
+                PythonBridgeDbTool.AddParam(latestScenarioCommand, "@pid", projectId);
+                if (hasOperatorFilter)
+                {
+                    PythonBridgeDbTool.AddParam(latestScenarioCommand, "@operator", normalizedOperator!);
+                }
+
+                var latestScenarioValue = await latestScenarioCommand.ExecuteScalarAsync(cancellationToken);
+                if (latestScenarioValue == null || latestScenarioValue == DBNull.Value)
+                {
+                    return (limit, offset, new List<Dictionary<string, object?>>());
+                }
+                effectiveScenario = Convert.ToInt32(latestScenarioValue);
+            }
+
+            var cacheKey = BuildCacheKey("site_pred_opt", projectId, normalizedOperator ?? "all", effectiveScenario, polygonKey, limit, offset);
 
             return await GetCachedOrLoadRowsAsync(
                 cacheKey,
@@ -746,7 +850,7 @@ namespace SignalTracker.Services
                 offset,
                 async () =>
                 {
-                    var conn = _db.Database.GetDbConnection();
+                    conn = _db.Database.GetDbConnection();
                     if (conn.State != ConnectionState.Open)
                     {
                         await conn.OpenAsync(cancellationToken);
@@ -757,15 +861,19 @@ namespace SignalTracker.Services
                 SELECT *
                 FROM site_prediction_optimized
                 WHERE tbl_project_id = @pid
+                AND scenario = @scenario
                 {(hasOperatorFilter ? "AND cluster = @operator" : string.Empty)}
+                {polygonFilter}
                 ORDER BY id
                 LIMIT @lim OFFSET @off;";
 
                     PythonBridgeDbTool.AddParam(command, "@pid", projectId);
+                    PythonBridgeDbTool.AddParam(command, "@scenario", effectiveScenario.Value);
                     if (hasOperatorFilter)
                     {
                         PythonBridgeDbTool.AddParam(command, "@operator", normalizedOperator!);
                     }
+                    AddPolygonIdsParameters(command, polygonIds);
                     PythonBridgeDbTool.AddParam(command, "@lim", limit);
                     PythonBridgeDbTool.AddParam(command, "@off", offset);
 
@@ -955,8 +1063,21 @@ namespace SignalTracker.Services
             await EnsureOptimisedResultsPublicScenarioIdColumnAsync(conn, transaction: null, cancellationToken);
             await using var transaction = await conn.BeginTransactionAsync(cancellationToken);
             var inserted = 0;
+            var publicScenarioId = rows.FirstOrDefault(row => row.public_scenario_id.HasValue)?.public_scenario_id;
+            if (publicScenarioId.HasValue && publicScenarioId.Value > 0)
+            {
+                await using var deleteCommand = conn.CreateCommand();
+                deleteCommand.Transaction = transaction;
+                deleteCommand.CommandText = @"
+                    DELETE FROM lte_prediction_optimised_results
+                    WHERE project_id = @project_id
+                      AND public_scenario_id = @public_scenario_id;";
+                PythonBridgeDbTool.AddParam(deleteCommand, "@project_id", request.ProjectId);
+                PythonBridgeDbTool.AddParam(deleteCommand, "@public_scenario_id", publicScenarioId.Value);
+                await deleteCommand.ExecuteNonQueryAsync(cancellationToken);
+            }
 
-            foreach (var batch in rows.Chunk(300))
+            foreach (var batch in rows.Chunk(BaselineResultInsertBatchSize))
             {
                 await using var command = conn.CreateCommand();
                 command.Transaction = transaction;
@@ -1115,34 +1236,34 @@ namespace SignalTracker.Services
 
             await using var transaction = await conn.BeginTransactionAsync(cancellationToken);
             var inserted = 0;
-
-            foreach (var batch in rows.Chunk(150))
+            if (request.ReplaceExisting)
             {
-                await using var deleteCommand = conn.CreateCommand();
-                deleteCommand.Transaction = transaction;
+                var normalizedScopes = rows
+                    .Select(row => new
+                    {
+                        ProjectId = Convert.ToInt64(RowValue(row, "project_id") ?? request.ProjectId),
+                        Region = (Convert.ToString(RowValue(row, "region") ?? request.Region ?? "india") ?? "india").Trim().ToLowerInvariant()
+                    })
+                    .Where(scope => scope.ProjectId > 0 && !string.IsNullOrWhiteSpace(scope.Region))
+                    .Distinct()
+                    .ToList();
 
-                var deleteClauses = new List<string>();
-                for (var i = 0; i < batch.Length; i++)
+                foreach (var scope in normalizedScopes)
                 {
-                    var row = batch[i];
-                    deleteClauses.Add($@"(project_id = @d_project_id{i}
-                      AND region = @d_region{i}
-                      AND nodeb_id_cell_id = @d_nodeb_id_cell_id{i}
-                      AND lat = @d_lat{i}
-                      AND lon = @d_lon{i})");
-
-                    PythonBridgeDbTool.AddParam(deleteCommand, $"@d_project_id{i}", RowValue(row, "project_id") ?? request.ProjectId);
-                    PythonBridgeDbTool.AddParam(deleteCommand, $"@d_region{i}", RowValue(row, "region") ?? request.Region ?? "india");
-                    PythonBridgeDbTool.AddParam(deleteCommand, $"@d_nodeb_id_cell_id{i}", RowValue(row, "nodeb_id_cell_id"));
-                    PythonBridgeDbTool.AddParam(deleteCommand, $"@d_lat{i}", RowValue(row, "lat"));
-                    PythonBridgeDbTool.AddParam(deleteCommand, $"@d_lon{i}", RowValue(row, "lon"));
+                    await using var deleteCommand = conn.CreateCommand();
+                    deleteCommand.Transaction = transaction;
+                    deleteCommand.CommandText = @"
+                        DELETE FROM lte_prediction_geo_features
+                        WHERE project_id = @project_id
+                          AND region = @region;";
+                    PythonBridgeDbTool.AddParam(deleteCommand, "@project_id", scope.ProjectId);
+                    PythonBridgeDbTool.AddParam(deleteCommand, "@region", scope.Region);
+                    await deleteCommand.ExecuteNonQueryAsync(cancellationToken);
                 }
+            }
 
-                deleteCommand.CommandText = $@"
-                    DELETE FROM lte_prediction_geo_features
-                    WHERE {string.Join(" OR ", deleteClauses)};";
-                await deleteCommand.ExecuteNonQueryAsync(cancellationToken);
-
+            foreach (var batch in rows.Chunk(GeoFeatureInsertBatchSize))
+            {
                 await using var insertCommand = conn.CreateCommand();
                 insertCommand.Transaction = transaction;
                 var valuesSql = new List<string>();
@@ -1450,12 +1571,14 @@ namespace SignalTracker.Services
                 cancellationToken
             );
 
-            var scenarioId = await GetNextAvailableLteOptimizationScenarioIdAsync(
-                conn,
-                transaction,
-                request.ProjectId,
-                cancellationToken
-            );
+            var scenarioId = request.ScenarioId.HasValue && request.ScenarioId.Value > 0
+                ? request.ScenarioId.Value
+                : await GetNextAvailableLteOptimizationScenarioIdAsync(
+                    conn,
+                    transaction,
+                    request.ProjectId,
+                    cancellationToken
+                );
             if (scenarioId > 6)
             {
                 throw new InvalidOperationException(

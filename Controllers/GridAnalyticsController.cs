@@ -135,6 +135,7 @@ namespace SignalTracker.Controllers
                             project_id INT NOT NULL,
                             region_id INT,
                             scenario_id INT NULL,
+                            public_scenario_id INT NULL,
                             grid_size_meters DOUBLE NOT NULL,
                             grid_id VARCHAR(50) NOT NULL,
                             center_lat DOUBLE NOT NULL,
@@ -194,6 +195,7 @@ namespace SignalTracker.Controllers
                         ["optimized_best_operator_min"] = "VARCHAR(100)",
                         ["optimized_best_operator_max"] = "VARCHAR(100)",
                         ["scenario_id"] = "INT NULL",
+                        ["public_scenario_id"] = "INT NULL",
                     };
 
                     var existingColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -440,6 +442,7 @@ namespace SignalTracker.Controllers
                             project_id = projectId,
                             region_id = regionId,
                             scenario_id = resolvedScenarioId,
+                            public_scenario_id = resolvedScenarioId,
                             grid_size_meters = gridSizeMeters,
                             grid_id = cell.GridId,
                             center_lat = cell.CenterLat, center_lon = cell.CenterLon,
@@ -481,14 +484,28 @@ namespace SignalTracker.Controllers
                     {
                         if (regionId.HasValue && regionId.Value > 0)
                         {
-                            cmdDel.CommandText = "DELETE FROM grid_analytics_results WHERE project_id = @pid AND region_id = @rid AND ((@sid IS NULL AND scenario_id IS NULL) OR scenario_id = @sid)";
+                            cmdDel.CommandText = @"
+                                DELETE FROM grid_analytics_results
+                                WHERE project_id = @pid
+                                  AND region_id = @rid
+                                  AND (
+                                      (@sid IS NULL AND COALESCE(public_scenario_id, scenario_id) IS NULL)
+                                      OR COALESCE(public_scenario_id, scenario_id) = @sid
+                                  )";
                             AddParam(cmdDel, "@rid", regionId.Value);
                             AddParam(cmdDel, "@pid", projectId);
                             AddParam(cmdDel, "@sid", resolvedScenarioId.HasValue ? resolvedScenarioId.Value : DBNull.Value);
                         }
                         else
                         {
-                            cmdDel.CommandText = "DELETE FROM grid_analytics_results WHERE project_id = @pid AND (region_id IS NULL OR region_id <= 0) AND ((@sid IS NULL AND scenario_id IS NULL) OR scenario_id = @sid)";
+                            cmdDel.CommandText = @"
+                                DELETE FROM grid_analytics_results
+                                WHERE project_id = @pid
+                                  AND (region_id IS NULL OR region_id <= 0)
+                                  AND (
+                                      (@sid IS NULL AND COALESCE(public_scenario_id, scenario_id) IS NULL)
+                                      OR COALESCE(public_scenario_id, scenario_id) = @sid
+                                  )";
                             AddParam(cmdDel, "@pid", projectId);
                             AddParam(cmdDel, "@sid", resolvedScenarioId.HasValue ? resolvedScenarioId.Value : DBNull.Value);
                         }
@@ -671,23 +688,23 @@ namespace SignalTracker.Controllers
                     return Ok(new GridAnalyticsResponse { Status = 0, Message = "Table does not exist. Call ComputeAndStoreGridAnalytics first." });
                 }
 
-                // Backward-compat: ensure scenario_id exists before EF query materializes model.
-                await using (var cmdScenarioCol = conn.CreateCommand())
+                // Backward-compat: ensure scenario columns exist before EF query materializes model.
+                var gridScenarioColumns = await GetTableColumnSetAsync(conn, "grid_analytics_results");
+                if (!gridScenarioColumns.Contains("scenario_id"))
                 {
-                    cmdScenarioCol.CommandText = @"
-                        SELECT COUNT(*)
-                        FROM information_schema.columns
-                        WHERE table_schema = DATABASE()
-                          AND table_name = 'grid_analytics_results'
-                          AND column_name = 'scenario_id';";
-                    var scenarioColExists = Convert.ToInt32(await cmdScenarioCol.ExecuteScalarAsync() ?? 0) > 0;
-                    if (!scenarioColExists)
-                    {
-                        await using var cmdAlterScenarioCol = conn.CreateCommand();
-                        cmdAlterScenarioCol.CommandText =
-                            "ALTER TABLE grid_analytics_results ADD COLUMN scenario_id INT NULL AFTER region_id;";
-                        await cmdAlterScenarioCol.ExecuteNonQueryAsync();
-                    }
+                    await using var cmdAlterScenarioCol = conn.CreateCommand();
+                    cmdAlterScenarioCol.CommandText =
+                        "ALTER TABLE grid_analytics_results ADD COLUMN scenario_id INT NULL AFTER region_id;";
+                    await cmdAlterScenarioCol.ExecuteNonQueryAsync();
+                    gridScenarioColumns.Add("scenario_id");
+                }
+
+                if (!gridScenarioColumns.Contains("public_scenario_id"))
+                {
+                    await using var cmdAlterPublicScenarioCol = conn.CreateCommand();
+                    cmdAlterPublicScenarioCol.CommandText =
+                        "ALTER TABLE grid_analytics_results ADD COLUMN public_scenario_id INT NULL AFTER scenario_id;";
+                    await cmdAlterPublicScenarioCol.ExecuteNonQueryAsync();
                 }
 
                 // Fetch directly from DB using EF
@@ -701,9 +718,11 @@ namespace SignalTracker.Controllers
                 if (isScenarioGridVersion)
                 {
                     if (effectiveScenarioId.HasValue)
-                        query = query.Where(g => g.scenario_id == effectiveScenarioId.Value);
+                        query = query.Where(g =>
+                            g.public_scenario_id == effectiveScenarioId.Value ||
+                            (g.public_scenario_id == null && g.scenario_id == effectiveScenarioId.Value));
                     else
-                        query = query.Where(g => g.scenario_id == null);
+                        query = query.Where(g => g.public_scenario_id == null && g.scenario_id == null);
                 }
 
                 storedResults = await query.ToListAsync();
@@ -1247,46 +1266,45 @@ namespace SignalTracker.Controllers
                 if (conn.State != ConnectionState.Open)
                     await conn.OpenAsync();
 
+                var optimizedColumns = await GetTableColumnSetAsync(conn, "lte_prediction_optimised_results");
+                var hasOptimizedPublicScenarioId = optimizedColumns.Contains("public_scenario_id");
+                var optimizedScenarioExpr = hasOptimizedPublicScenarioId
+                    ? "public_scenario_id"
+                    : "scenario_id";
+                var optimizedInternalScenarioExpr = hasOptimizedPublicScenarioId
+                    ? "scenario_id"
+                    : "NULL";
+
                 await using var cmd = conn.CreateCommand();
-                cmd.CommandText = @"
+                cmd.CommandText = $@"
                     SELECT
-                        scenario_id,
+                        opt.public_scenario_id AS scenario_id,
+                        opt.public_scenario_id,
+                        MAX(internal_scenario_id) AS internal_scenario_id,
                         COALESCE(
-                            MAX(CASE WHEN source_rank = 1 AND scenario_name <> '' THEN scenario_name END),
-                            MAX(CASE WHEN scenario_name <> '' THEN scenario_name END),
-                            CONCAT('Scenario ', scenario_id)
+                            MAX(CASE WHEN meta.scenario_name IS NOT NULL AND meta.scenario_name <> '' THEN meta.scenario_name END),
+                            CONCAT('Scenario ', opt.public_scenario_id)
                         ) AS scenario_name,
                         COALESCE(
-                            MAX(CASE WHEN source_rank = 1 AND status <> '' THEN status END),
-                            MAX(CASE WHEN status <> '' THEN status END),
+                            MAX(CASE WHEN meta.status IS NOT NULL AND meta.status <> '' THEN meta.status END),
                             'stored'
                         ) AS status,
-                        MAX(created_at) AS created_at
+                        MAX(COALESCE(meta.created_at, opt.created_at)) AS created_at
                     FROM (
                         SELECT
-                            scenario_id,
-                            COALESCE(scenario_name, '') AS scenario_name,
-                            COALESCE(status, '') AS status,
-                            created_at,
-                            1 AS source_rank
-                        FROM lte_optimization_scenarios
-                        WHERE project_id = @pid
-
-                        UNION ALL
-
-                        SELECT
-                            scenario_id,
-                            CONCAT('Scenario ', scenario_id) AS scenario_name,
-                            'stored' AS status,
-                            NULL AS created_at,
-                            2 AS source_rank
+                            {optimizedScenarioExpr} AS public_scenario_id,
+                            {optimizedInternalScenarioExpr} AS internal_scenario_id,
+                            created_at
                         FROM lte_prediction_optimised_results
                         WHERE project_id = @pid
-                          AND scenario_id IS NOT NULL
-                    ) scenarios
-                    WHERE scenario_id > 0
-                    GROUP BY scenario_id
-                    ORDER BY scenario_id DESC;";
+                          AND {optimizedScenarioExpr} IS NOT NULL
+                          AND {optimizedScenarioExpr} > 0
+                    ) opt
+                    LEFT JOIN lte_optimization_scenarios meta
+                      ON meta.project_id = @pid
+                     AND meta.scenario_id = opt.public_scenario_id
+                    GROUP BY opt.public_scenario_id
+                    ORDER BY opt.public_scenario_id ASC;";
                 AddParam(cmd, "@pid", projectId);
 
                 var rows = new List<object>();
@@ -1294,12 +1312,16 @@ namespace SignalTracker.Controllers
                 while (await rdr.ReadAsync())
                 {
                     var scenarioId = rdr.IsDBNull(0) ? 0 : Convert.ToInt32(rdr.GetValue(0));
-                    var scenarioName = rdr.IsDBNull(1) ? "" : Convert.ToString(rdr.GetValue(1)) ?? "";
-                    var status = rdr.IsDBNull(2) ? "" : Convert.ToString(rdr.GetValue(2)) ?? "";
-                    var createdAt = rdr.IsDBNull(3) ? (DateTime?)null : Convert.ToDateTime(rdr.GetValue(3));
+                    var publicScenarioId = rdr.IsDBNull(1) ? scenarioId : Convert.ToInt32(rdr.GetValue(1));
+                    var internalScenarioId = rdr.IsDBNull(2) ? (int?)null : Convert.ToInt32(rdr.GetValue(2));
+                    var scenarioName = rdr.IsDBNull(3) ? "" : Convert.ToString(rdr.GetValue(3)) ?? "";
+                    var status = rdr.IsDBNull(4) ? "" : Convert.ToString(rdr.GetValue(4)) ?? "";
+                    var createdAt = rdr.IsDBNull(5) ? (DateTime?)null : Convert.ToDateTime(rdr.GetValue(5));
                     rows.Add(new
                     {
-                        scenario_id = scenarioId,
+                        scenario_id = publicScenarioId,
+                        public_scenario_id = publicScenarioId,
+                        internal_scenario_id = internalScenarioId,
                         scenario_name = scenarioName,
                         status,
                         created_at = createdAt
@@ -1317,6 +1339,25 @@ namespace SignalTracker.Controllers
             {
                 return StatusCode(500, new { Status = 0, Message = "Error: " + SafeException.Get(ex) });
             }
+        }
+
+        private static async Task<HashSet<string>> GetTableColumnSetAsync(DbConnection conn, string tableName)
+        {
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT COLUMN_NAME
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = @tableName;";
+            AddParam(cmd, "@tableName", tableName);
+
+            var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            await using var reader = await cmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                columns.Add(Convert.ToString(reader.GetValue(0)) ?? string.Empty);
+            }
+            return columns;
         }
 
         private async Task<int?> ResolveScenarioIdAsync(DbConnection conn, int projectId, int? scenarioId)
@@ -1343,7 +1384,18 @@ namespace SignalTracker.Controllers
             var pts = new List<PredPoint>();
             await using var cmd = conn.CreateCommand();
             var isOptimizedTable = string.Equals(table, "lte_prediction_optimised_results", StringComparison.OrdinalIgnoreCase);
-            var scenarioFilterClause = isOptimizedTable && scenarioId.HasValue ? " AND scenario_id = @sid" : "";
+            var scenarioFilterColumn = "scenario_id";
+            if (isOptimizedTable)
+            {
+                var columns = await GetTableColumnSetAsync(conn, table);
+                if (columns.Contains("public_scenario_id"))
+                {
+                    scenarioFilterColumn = "public_scenario_id";
+                }
+            }
+            var scenarioFilterClause = isOptimizedTable && scenarioId.HasValue
+                ? $" AND `{scenarioFilterColumn}` = @sid"
+                : "";
             var sourceQuery = $@"
 SELECT
     lat,
@@ -1845,7 +1897,7 @@ WHERE spo.tbl_project_id = @pid;";
             return stored
                 .GroupBy(s => new
                 {
-                    ScenarioId = s.scenario_id,
+                    ScenarioId = s.public_scenario_id ?? s.scenario_id,
                     GridSize = Math.Round(s.grid_size_meters, 3)
                 })
                 .OrderByDescending(g => g.Max(s => s.created_at ?? DateTime.MinValue))

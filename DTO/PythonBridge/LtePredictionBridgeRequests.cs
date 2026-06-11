@@ -4,6 +4,7 @@
     {
         public long ProjectId { get; set; }
         public string? Operator { get; set; }
+        public string? PolygonIds { get; set; }
         public int Limit { get; set; } = 50000;
         public int Offset { get; set; } = 0;
     }
@@ -31,12 +32,14 @@
         public long ProjectId { get; set; }
         public string JobId { get; set; } = string.Empty;
         public string? Region { get; set; }
+        public bool ReplaceExisting { get; set; }
         public List<Dictionary<string, object?>> Rows { get; set; } = new();
     }
 
     public class LteOptimizationScenarioCreateRequest
     {
         public long ProjectId { get; set; }
+        public int? ScenarioId { get; set; }
         public string? BaselineJobId { get; set; }
         public string? ScenarioName { get; set; }
         public string? ScenarioDescription { get; set; }

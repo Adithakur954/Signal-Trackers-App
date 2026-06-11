@@ -3357,7 +3357,7 @@ public async Task<IActionResult> GetCombinedProviderNetworkTime(
 
     try
     {
-        var cacheKey = BuildMapViewCacheKey("combined-provider-network-time", sessionIdList);
+        var cacheKey = BuildMapViewCacheKey("combined-provider-network-time-v2", sessionIdList);
         var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
         if (cached != null)
             return Ok(cached);
@@ -3425,23 +3425,23 @@ public async Task<IActionResult> GetCombinedProviderNetworkTime(
                 return p;
             }
 
-            string ResolveGeneration(string? band, string? network, string? primaryCellInfo1, string? allNeighborCellInfo)
+            string ResolveGeneration(string? band, string? network)
             {
-                var t = TechClassifier.Classify(band, network, primaryCellInfo1, allNeighborCellInfo);
+                var t = TechClassifier.Classify(band, network, null, null);
                 return string.IsNullOrWhiteSpace(t.Generation) || t.Generation.Equals("Unknown", StringComparison.OrdinalIgnoreCase)
                     ? "OTHER"
                     : t.Generation.ToUpperInvariant();
             }
 
             var providerCurrent = NormalizeProvider(current.m_alpha_long);
-            var networkCurrent = ResolveGeneration(current.band, current.network, current.primary_cell_info_1, current.all_neigbor_cell_info);
+            var networkCurrent = ResolveGeneration(current.band, current.network);
 
             bool currentUsable = providerCurrent != "UNKNOWN" && networkCurrent != "OTHER";
 
             string provider = currentUsable ? providerCurrent : NormalizeProvider(next.m_alpha_long);
             string networkType = currentUsable
                 ? networkCurrent
-                : ResolveGeneration(next.band, next.network, next.primary_cell_info_1, next.all_neigbor_cell_info);
+                : ResolveGeneration(next.band, next.network);
 
             string key = $"{provider}|{networkType}";
 
@@ -4560,8 +4560,12 @@ public async Task<JsonResult> GetProviderWiseVolume([FromQuery] MapFilter filter
 
     try
     {
+        using var conn = db.Database.GetDbConnection();
+        if (conn.State != ConnectionState.Open)
+            await conn.OpenAsync();
+
         var cacheKey = BuildMapViewCacheKey(
-            "provider-wise-volume-v10",
+            "provider-wise-volume-v11",
             sessionIdsParam,
             filters?.StartDate,
             filters?.EndDate,
@@ -4569,10 +4573,6 @@ public async Task<JsonResult> GetProviderWiseVolume([FromQuery] MapFilter filter
         var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
         if (cached != null)
             return Json(cached);
-
-        using var conn = db.Database.GetDbConnection();
-        if (conn.State != ConnectionState.Open)
-            await conn.OpenAsync();
 
         // -----------------------------
         // Date Filters
@@ -4643,48 +4643,44 @@ base_logs AS (
         l.session_id,
         COALESCE(NULLIF(LOWER(TRIM(l.m_alpha_long)), ''), sp.provider) AS provider,
         CASE
-            WHEN l.network IS NULL OR TRIM(l.network) = '' THEN 'Unknown'
             WHEN (
-                    UPPER(TRIM(l.network)) LIKE '%4G%'
-                 OR UPPER(TRIM(l.network)) LIKE '%LTE%'
-                 )
+                    UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) LIKE '%5G%'
+                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) LIKE '%NRARFCN%'
+                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) LIKE '%MNR%'
+                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) LIKE '%NCI%'
+                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) REGEXP '(^|[^A-Z0-9])NR([^A-Z0-9]|$)'
+                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) REGEXP '(^|[^A-Z0-9])N[0-9]{{1,3}}([^A-Z0-9]|$)'
+                )
               AND (
-                    UPPER(TRIM(l.network)) LIKE '%LTE ANCHOR%'
-                 OR UPPER(TRIM(l.network)) LIKE '%LTE-ANCHOR%'
-                 OR UPPER(TRIM(l.network)) LIKE '%LTE_ANCHOR%'
-                 OR UPPER(TRIM(l.network)) LIKE '%ENDC%'
-                 OR UPPER(TRIM(l.network)) LIKE '%EN-DC%'
-                 OR UPPER(TRIM(l.network)) LIKE '%NSA%'
-                 )
-              AND NOT (
-                    UPPER(TRIM(l.network)) LIKE '%5G%'
-                 OR UPPER(TRIM(l.network)) REGEXP '(^|[^A-Z0-9])NR([^A-Z0-9]|$)'
-                 ) THEN 'LTE Anchor / ENDC'
+                    UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%4G%'
+                 OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%LTE%'
+                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) LIKE '%LTE ANCHOR%'
+                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) LIKE '%LTE-ANCHOR%'
+                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) LIKE '%LTE_ANCHOR%'
+                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) LIKE '%ENDC%'
+                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) LIKE '%EN-DC%'
+                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) LIKE '%NSA%'
+                ) THEN '5G NSA'
             WHEN (
-                    UPPER(TRIM(l.network)) LIKE '%5G%'
-                 OR UPPER(TRIM(l.network)) REGEXP '(^|[^A-Z0-9])NR([^A-Z0-9]|$)'
-                 )
-              AND (
-                    UPPER(TRIM(l.network)) LIKE '%NSA%'
-                 OR UPPER(TRIM(l.network)) LIKE '%ENDC%'
-                 OR UPPER(TRIM(l.network)) LIKE '%EN-DC%'
-                 ) THEN '5G NSA'
-            WHEN (
-                    UPPER(TRIM(l.network)) LIKE '%5G%'
-                 OR UPPER(TRIM(l.network)) REGEXP '(^|[^A-Z0-9])NR([^A-Z0-9]|$)'
-                 OR UPPER(TRIM(l.network)) = 'SA'
-                 OR UPPER(TRIM(l.network)) LIKE '% SA%'
-                 ) THEN '5G SA'
-            WHEN UPPER(TRIM(l.network)) LIKE '%4G%'
-              OR UPPER(TRIM(l.network)) LIKE '%LTE%' THEN '4G'
-            WHEN UPPER(TRIM(l.network)) LIKE '%3G%'
-              OR UPPER(TRIM(l.network)) LIKE '%WCDMA%'
-              OR UPPER(TRIM(l.network)) LIKE '%UMTS%'
-              OR UPPER(TRIM(l.network)) LIKE '%HSPA%' THEN '3G'
-            WHEN UPPER(TRIM(l.network)) LIKE '%2G%'
-              OR UPPER(TRIM(l.network)) LIKE '%GSM%'
-              OR UPPER(TRIM(l.network)) LIKE '%EDGE%'
-              OR UPPER(TRIM(l.network)) LIKE '%GPRS%' THEN '2G'
+                    UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) LIKE '%5G%'
+                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) LIKE '%NRARFCN%'
+                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) LIKE '%MNR%'
+                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) LIKE '%NCI%'
+                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) REGEXP '(^|[^A-Z0-9])NR([^A-Z0-9]|$)'
+                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) REGEXP '(^|[^A-Z0-9])N[0-9]{{1,3}}([^A-Z0-9]|$)'
+                 OR UPPER(TRIM(COALESCE(l.network, ''))) = 'SA'
+                 OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '% SA%'
+                ) THEN '5G SA'
+            WHEN UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%4G%'
+              OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%LTE%' THEN '4G'
+            WHEN UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%3G%'
+              OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%WCDMA%'
+              OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%UMTS%'
+              OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%HSPA%' THEN '3G'
+            WHEN UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%2G%'
+              OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%GSM%'
+              OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%EDGE%'
+              OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%GPRS%' THEN '2G'
             ELSE 'Unknown'
         END AS tech,
         l.timestamp,
@@ -7663,7 +7659,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             [FromQuery] string? technology = null,
             [FromQuery] int? band = null,
             [FromQuery] int? pci = null,
-            [FromQuery] int limit = 200,
+            [FromQuery] int limit = 50000,
             [FromQuery] int offset = 0,
             [FromQuery] int? scenario = null)
         {
@@ -7679,7 +7675,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             [FromQuery] string? technology = null,
             [FromQuery] int? band = null,
             [FromQuery] int? pci = null,
-            [FromQuery] int limit = 5000,
+            [FromQuery] int limit = 50000,
             [FromQuery] int offset = 0,
             [FromQuery] string version = "combined",
             [FromQuery] int simple = 0,
@@ -8107,7 +8103,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 list.Add(row);
             }
 
-            var pageSize = Math.Clamp(limit, 1, 2000);
+            var pageSize = Math.Clamp(limit, 1, 50000);
             var safeOffset = Math.Max(offset, 0);
             var pagedRows = SliceCachedPage(list, pageSize, safeOffset);
             var simplified = simple == 1;
@@ -8212,7 +8208,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             [FromQuery] string? technology = null,
             [FromQuery] int? band = null,
             [FromQuery] int? pci = null,
-            [FromQuery] int limit = 200,
+            [FromQuery] int limit = 50000,
             [FromQuery] int offset = 0)
         {
             if (projectId <= 0)
@@ -8361,7 +8357,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 });
             }
 
-            var pagedRows = SliceCachedPage(allRows, Math.Clamp(limit, 1, 2000), Math.Max(offset, 0));
+            var pagedRows = SliceCachedPage(allRows, Math.Clamp(limit, 1, 50000), Math.Max(offset, 0));
             var response = new
             {
                 Status = 1,
@@ -9062,13 +9058,18 @@ public async Task<IActionResult> GetSitePredictionScenarios([FromQuery] long pro
                 if (conn.State != ConnectionState.Open)
                     await conn.OpenAsync();
 
+                var optimizedColumns = await GetTableColumnSetAsync(conn, "lte_prediction_optimised_results");
+                var scenarioDeleteClause = optimizedColumns.Contains("public_scenario_id")
+                    ? "(public_scenario_id = @scenarioId OR (public_scenario_id IS NULL AND scenario_id = @scenarioId))"
+                    : "scenario_id = @scenarioId";
+
                 await using var tx = await conn.BeginTransactionAsync();
                 await using var deleteCmd = conn.CreateCommand();
                 deleteCmd.Transaction = tx;
-                deleteCmd.CommandText = @"
+                deleteCmd.CommandText = $@"
                     DELETE FROM lte_prediction_optimised_results
                     WHERE project_id = @pid
-                      AND scenario_id = @scenarioId;";
+                      AND {scenarioDeleteClause};";
                 Add(deleteCmd, "@pid", model.ProjectId);
                 Add(deleteCmd, "@scenarioId", model.ScenarioId);
 
@@ -11037,13 +11038,16 @@ public async Task<IActionResult> GetSitePredictionBase(
     [FromQuery(Name = "node_b_id")] string? nodeBId = null,
     [FromQuery(Name = "cell_id")] string? cellId = null,
     [FromQuery(Name = "sector")] string? sector = null,
-    [FromQuery(Name = "sector_id")] string? sectorId = null)
+    [FromQuery(Name = "sector_id")] string? sectorId = null,
+    [FromQuery(Name = "polygon_ids")] string? polygonIdsCsv = null)
 {
     var trimmedNodeBId = string.IsNullOrWhiteSpace(nodeBId) ? null : nodeBId.Trim();
     var trimmedCellId = string.IsNullOrWhiteSpace(cellId) ? null : cellId.Trim();
     var trimmedSector = string.IsNullOrWhiteSpace(sector) ? null : sector.Trim();
     var trimmedSectorId = string.IsNullOrWhiteSpace(sectorId) ? null : sectorId.Trim();
     var lookupSector = trimmedSectorId ?? trimmedSector;
+    var polygonIds = projectId.HasValue ? ParsePolygonIds(polygonIdsCsv) : new List<int>();
+    var polygonFilter = BuildPolygonFilterClause(polygonIds, "b.lat", "b.lon");
     var combinedNodeBCellId =
         !string.IsNullOrWhiteSpace(trimmedNodeBId) && !string.IsNullOrWhiteSpace(trimmedCellId)
             ? $"{trimmedNodeBId}_{trimmedCellId}"
@@ -11052,6 +11056,48 @@ public async Task<IActionResult> GetSitePredictionBase(
                trimmedCellId.Contains("_", StringComparison.Ordinal)
                 ? trimmedCellId
                 : null);
+    var lookupNodeBIds = new List<string>();
+    var lookupCellIds = new List<string>();
+    var lookupNodeBCellIds = new List<string>();
+    void AddLookupValue(List<string> values, string? value)
+    {
+        var text = (value ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(text)) return;
+        if (!values.Any(existing => string.Equals(existing, text, StringComparison.OrdinalIgnoreCase)))
+            values.Add(text);
+    }
+
+    AddLookupValue(lookupNodeBIds, trimmedNodeBId);
+    AddLookupValue(lookupCellIds, trimmedCellId);
+    AddLookupValue(lookupNodeBCellIds, combinedNodeBCellId);
+
+    if (!string.IsNullOrWhiteSpace(trimmedCellId) && trimmedCellId.Contains("_", StringComparison.Ordinal))
+    {
+        var parts = trimmedCellId.Split('_', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length >= 2)
+        {
+            var inferredNodeBId = parts[0];
+            var localCellId = parts[^1];
+            var cellWithoutNode = string.Join("_", parts.Skip(1));
+
+            AddLookupValue(lookupNodeBIds, inferredNodeBId);
+            AddLookupValue(lookupCellIds, localCellId);
+            AddLookupValue(lookupCellIds, cellWithoutNode);
+            AddLookupValue(lookupNodeBCellIds, $"{inferredNodeBId}_{localCellId}");
+            AddLookupValue(lookupNodeBCellIds, $"{inferredNodeBId}_{cellWithoutNode}");
+            AddLookupValue(lookupNodeBCellIds, $"{inferredNodeBId}_{trimmedCellId}");
+        }
+    }
+
+    if (!string.IsNullOrWhiteSpace(trimmedNodeBId) && !string.IsNullOrWhiteSpace(trimmedCellId))
+    {
+        var localCellId = trimmedCellId.Contains("_", StringComparison.Ordinal)
+            ? trimmedCellId.Split('_', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).LastOrDefault()
+            : trimmedCellId;
+        AddLookupValue(lookupCellIds, localCellId);
+        AddLookupValue(lookupNodeBCellIds, $"{trimmedNodeBId}_{localCellId}");
+        AddLookupValue(lookupNodeBCellIds, $"{trimmedNodeBId}_{trimmedCellId}");
+    }
 
     if (string.IsNullOrWhiteSpace(trimmedNodeBId) &&
         string.IsNullOrWhiteSpace(trimmedCellId) &&
@@ -11174,9 +11220,12 @@ SELECT
     {selectSector}
 FROM {tableName} b
 WHERE {string.Join(" AND ", whereParts)}
+{polygonFilter}
 ORDER BY b.id DESC;";
 
         if (projectId.HasValue) Add(cmd, "@project_id", projectId.Value);
+        if (polygonIds.Count > 0) Add(cmd, "@pid", projectId!.Value);
+        AddPolygonIdsParameters(cmd, polygonIds);
         if (!string.IsNullOrWhiteSpace(trimmedNodeBId)) Add(cmd, "@node_b_id", trimmedNodeBId);
         if (!string.IsNullOrWhiteSpace(trimmedCellId)) Add(cmd, "@cell_id", trimmedCellId);
         if (!string.IsNullOrWhiteSpace(combinedNodeBCellId)) Add(cmd, "@node_b_cell_id", combinedNodeBCellId);
@@ -11219,13 +11268,25 @@ public async Task<IActionResult> GetSitePredictionOptimised(
     [FromQuery(Name = "node_b_id")] string? nodeBId = null,
     [FromQuery(Name = "cell_id")] string? cellId = null,
     [FromQuery(Name = "sector")] string? sector = null,
-    [FromQuery(Name = "sector_id")] string? sectorId = null)
+    [FromQuery(Name = "sector_id")] string? sectorId = null,
+    [FromQuery(Name = "scenario")] int? scenario = null,
+    [FromQuery(Name = "scenario_id")] int? scenarioId = null,
+    [FromQuery(Name = "public_scenario_id")] int? publicScenarioId = null,
+    [FromQuery(Name = "site_prediction_scenario_id")] int? sitePredictionScenarioId = null,
+    [FromQuery(Name = "polygon_ids")] string? polygonIdsCsv = null)
 {
     var trimmedNodeBId = string.IsNullOrWhiteSpace(nodeBId) ? null : nodeBId.Trim();
     var trimmedCellId = string.IsNullOrWhiteSpace(cellId) ? null : cellId.Trim();
     var trimmedSector = string.IsNullOrWhiteSpace(sector) ? null : sector.Trim();
     var trimmedSectorId = string.IsNullOrWhiteSpace(sectorId) ? null : sectorId.Trim();
     var lookupSector = trimmedSectorId ?? trimmedSector;
+    var requestedScenario = scenario ?? scenarioId ?? publicScenarioId ?? sitePredictionScenarioId;
+    var selectedScenario = requestedScenario.HasValue && requestedScenario.Value > 0
+        ? requestedScenario.Value
+        : (int?)null;
+    var polygonIds = projectId.HasValue ? ParsePolygonIds(polygonIdsCsv) : new List<int>();
+    var optimizedPolygonFilter = BuildPolygonFilterClause(polygonIds, "o.lat", "o.lon");
+    var baselinePolygonFilter = BuildPolygonFilterClause(polygonIds, "b.lat", "b.lon");
     var combinedNodeBCellId =
         !string.IsNullOrWhiteSpace(trimmedNodeBId) && !string.IsNullOrWhiteSpace(trimmedCellId)
             ? $"{trimmedNodeBId}_{trimmedCellId}"
@@ -11234,6 +11295,48 @@ public async Task<IActionResult> GetSitePredictionOptimised(
                trimmedCellId.Contains("_", StringComparison.Ordinal)
                 ? trimmedCellId
                 : null);
+    var lookupNodeBIds = new List<string>();
+    var lookupCellIds = new List<string>();
+    var lookupNodeBCellIds = new List<string>();
+    void AddLookupValue(List<string> values, string? value)
+    {
+        var text = (value ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(text)) return;
+        if (!values.Any(existing => string.Equals(existing, text, StringComparison.OrdinalIgnoreCase)))
+            values.Add(text);
+    }
+
+    AddLookupValue(lookupNodeBIds, trimmedNodeBId);
+    AddLookupValue(lookupCellIds, trimmedCellId);
+    AddLookupValue(lookupNodeBCellIds, combinedNodeBCellId);
+
+    if (!string.IsNullOrWhiteSpace(trimmedCellId) && trimmedCellId.Contains("_", StringComparison.Ordinal))
+    {
+        var parts = trimmedCellId.Split('_', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length >= 2)
+        {
+            var inferredNodeBId = parts[0];
+            var localCellId = parts[^1];
+            var cellWithoutNode = string.Join("_", parts.Skip(1));
+
+            AddLookupValue(lookupNodeBIds, inferredNodeBId);
+            AddLookupValue(lookupCellIds, localCellId);
+            AddLookupValue(lookupCellIds, cellWithoutNode);
+            AddLookupValue(lookupNodeBCellIds, $"{inferredNodeBId}_{localCellId}");
+            AddLookupValue(lookupNodeBCellIds, $"{inferredNodeBId}_{cellWithoutNode}");
+            AddLookupValue(lookupNodeBCellIds, $"{inferredNodeBId}_{trimmedCellId}");
+        }
+    }
+
+    if (!string.IsNullOrWhiteSpace(trimmedNodeBId) && !string.IsNullOrWhiteSpace(trimmedCellId))
+    {
+        var localCellId = trimmedCellId.Contains("_", StringComparison.Ordinal)
+            ? trimmedCellId.Split('_', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).LastOrDefault()
+            : trimmedCellId;
+        AddLookupValue(lookupCellIds, localCellId);
+        AddLookupValue(lookupNodeBCellIds, $"{trimmedNodeBId}_{localCellId}");
+        AddLookupValue(lookupNodeBCellIds, $"{trimmedNodeBId}_{trimmedCellId}");
+    }
 
     if (string.IsNullOrWhiteSpace(trimmedNodeBId) &&
         string.IsNullOrWhiteSpace(trimmedCellId) &&
@@ -11296,6 +11399,14 @@ public async Task<IActionResult> GetSitePredictionOptimised(
         string Eq(string alias, string column, string paramName) =>
             $"CONVERT(COALESCE({alias}.`{column}`, '') USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(@{paramName} USING utf8mb4) COLLATE utf8mb4_unicode_ci";
 
+        string InLookup(string alias, string column, string paramPrefix, IReadOnlyList<string> values)
+        {
+            var names = values
+                .Select((_, i) => $"@{paramPrefix}_{i}")
+                .ToList();
+            return $"CONVERT(COALESCE({alias}.`{column}`, '') USING utf8mb4) COLLATE utf8mb4_unicode_ci IN ({string.Join(", ", names.Select(name => $"CONVERT({name} USING utf8mb4) COLLATE utf8mb4_unicode_ci"))})";
+        }
+
         string BuildWhereClause(string alias, HashSet<string> columns, string? sectorColumn)
         {
             var andClauses = new List<string>();
@@ -11308,31 +11419,31 @@ public async Task<IActionResult> GetSitePredictionOptimised(
 
             if (hasNodeLookup && hasCellLookup)
             {
-                if (!string.IsNullOrWhiteSpace(combinedNodeBCellId))
+                if (lookupNodeBCellIds.Count > 0)
                 {
-                    if (columns.Contains("node_b_cell_id")) lookupClauses.Add(Eq(alias, "node_b_cell_id", "node_b_cell_id"));
-                    if (columns.Contains("nodeb_id_cell_id")) lookupClauses.Add(Eq(alias, "nodeb_id_cell_id", "node_b_cell_id"));
+                    if (columns.Contains("node_b_cell_id")) lookupClauses.Add(InLookup(alias, "node_b_cell_id", "node_b_cell_id", lookupNodeBCellIds));
+                    if (columns.Contains("nodeb_id_cell_id")) lookupClauses.Add(InLookup(alias, "nodeb_id_cell_id", "node_b_cell_id", lookupNodeBCellIds));
                 }
 
                 if (columns.Contains("node_b_id") && columns.Contains("cell_id"))
-                    lookupClauses.Add($"({Eq(alias, "node_b_id", "node_b_id")} AND {Eq(alias, "cell_id", "cell_id")})");
+                    lookupClauses.Add($"({InLookup(alias, "node_b_id", "node_b_id", lookupNodeBIds)} AND {InLookup(alias, "cell_id", "cell_id", lookupCellIds)})");
                 else if (columns.Contains("site_id") && columns.Contains("cell_id"))
-                    lookupClauses.Add($"({Eq(alias, "site_id", "node_b_id")} AND {Eq(alias, "cell_id", "cell_id")})");
+                    lookupClauses.Add($"({InLookup(alias, "site_id", "node_b_id", lookupNodeBIds)} AND {InLookup(alias, "cell_id", "cell_id", lookupCellIds)})");
             }
             else
             {
                 if (hasNodeLookup)
                 {
-                    if (columns.Contains("node_b_id")) lookupClauses.Add(Eq(alias, "node_b_id", "node_b_id"));
-                    if (columns.Contains("site_id")) lookupClauses.Add(Eq(alias, "site_id", "node_b_id"));
-                    if (columns.Contains("node_b_cell_id")) lookupClauses.Add(Eq(alias, "node_b_cell_id", "node_b_id"));
-                    if (columns.Contains("nodeb_id_cell_id")) lookupClauses.Add(Eq(alias, "nodeb_id_cell_id", "node_b_id"));
+                    if (columns.Contains("node_b_id")) lookupClauses.Add(InLookup(alias, "node_b_id", "node_b_id", lookupNodeBIds));
+                    if (columns.Contains("site_id")) lookupClauses.Add(InLookup(alias, "site_id", "node_b_id", lookupNodeBIds));
+                    if (columns.Contains("node_b_cell_id")) lookupClauses.Add(InLookup(alias, "node_b_cell_id", "node_b_id", lookupNodeBIds));
+                    if (columns.Contains("nodeb_id_cell_id")) lookupClauses.Add(InLookup(alias, "nodeb_id_cell_id", "node_b_id", lookupNodeBIds));
                 }
                 if (hasCellLookup)
                 {
-                    if (columns.Contains("cell_id")) lookupClauses.Add(Eq(alias, "cell_id", "cell_id"));
-                    if (columns.Contains("node_b_cell_id")) lookupClauses.Add(Eq(alias, "node_b_cell_id", "cell_id"));
-                    if (columns.Contains("nodeb_id_cell_id")) lookupClauses.Add(Eq(alias, "nodeb_id_cell_id", "cell_id"));
+                    if (columns.Contains("cell_id")) lookupClauses.Add(InLookup(alias, "cell_id", "cell_id", lookupCellIds));
+                    if (columns.Contains("node_b_cell_id")) lookupClauses.Add(InLookup(alias, "node_b_cell_id", "node_b_cell_id", lookupNodeBCellIds.Count > 0 ? lookupNodeBCellIds : lookupCellIds));
+                    if (columns.Contains("nodeb_id_cell_id")) lookupClauses.Add(InLookup(alias, "nodeb_id_cell_id", "node_b_cell_id", lookupNodeBCellIds.Count > 0 ? lookupNodeBCellIds : lookupCellIds));
                 }
             }
 
@@ -11359,6 +11470,27 @@ public async Task<IActionResult> GetSitePredictionOptimised(
         }
 
         var optimizedWhere = BuildWhereClause("o", optimizedColumns, optimizedSectorColumn);
+        if (selectedScenario.HasValue)
+        {
+            string? scenarioClause = null;
+            if (optimizedColumns.Contains("public_scenario_id") && optimizedColumns.Contains("scenario_id"))
+            {
+                scenarioClause = "(o.`public_scenario_id` = @scenario_id OR (o.`public_scenario_id` IS NULL AND o.`scenario_id` = @scenario_id))";
+            }
+            else if (optimizedColumns.Contains("public_scenario_id"))
+            {
+                scenarioClause = "o.`public_scenario_id` = @scenario_id";
+            }
+            else if (optimizedColumns.Contains("scenario_id"))
+            {
+                scenarioClause = "o.`scenario_id` = @scenario_id";
+            }
+
+            if (!string.IsNullOrWhiteSpace(scenarioClause))
+            {
+                optimizedWhere = $"({optimizedWhere}) AND {scenarioClause}";
+            }
+        }
         var baselineWhere = BuildWhereClause("b", baselineColumns, baselineSectorColumn);
 
         var optimizedSectorSelect = !string.IsNullOrWhiteSpace(optimizedSectorColumn)
@@ -11379,6 +11511,7 @@ WITH optimized_source AS (
         {optimizedSectorSelect}
     FROM lte_prediction_optimised_results o
     WHERE {optimizedWhere}
+    {optimizedPolygonFilter}
 ),
 optimized_rows AS (
     SELECT *
@@ -11408,6 +11541,7 @@ baseline_rows AS (
         {baselineSectorSelect}
     FROM lte_prediction_baseline_results b
     WHERE {baselineWhere}
+    {baselinePolygonFilter}
 )
 SELECT 
     o.id, o.project_id, o.job_id, o.lat, o.lon,
@@ -11429,10 +11563,13 @@ FROM baseline_rows b
 WHERE NOT EXISTS (SELECT 1 FROM optimized_rows);";
 
         if (projectId.HasValue) Add(cmd, "@project_id", projectId.Value);
-        if (!string.IsNullOrWhiteSpace(trimmedNodeBId)) Add(cmd, "@node_b_id", trimmedNodeBId);
-        if (!string.IsNullOrWhiteSpace(trimmedCellId)) Add(cmd, "@cell_id", trimmedCellId);
-        if (!string.IsNullOrWhiteSpace(combinedNodeBCellId)) Add(cmd, "@node_b_cell_id", combinedNodeBCellId);
+        if (polygonIds.Count > 0) Add(cmd, "@pid", projectId!.Value);
+        AddPolygonIdsParameters(cmd, polygonIds);
+        for (var i = 0; i < lookupNodeBIds.Count; i++) Add(cmd, $"@node_b_id_{i}", lookupNodeBIds[i]);
+        for (var i = 0; i < lookupCellIds.Count; i++) Add(cmd, $"@cell_id_{i}", lookupCellIds[i]);
+        for (var i = 0; i < lookupNodeBCellIds.Count; i++) Add(cmd, $"@node_b_cell_id_{i}", lookupNodeBCellIds[i]);
         if (!string.IsNullOrWhiteSpace(lookupSector)) Add(cmd, "@sector_lookup", lookupSector);
+        if (selectedScenario.HasValue) Add(cmd, "@scenario_id", selectedScenario.Value);
 
         var rows = new List<Dictionary<string, object?>>();
         await using var reader = await cmd.ExecuteReaderAsync();
@@ -11452,7 +11589,11 @@ WHERE NOT EXISTS (SELECT 1 FROM optimized_rows);";
             NodeBIdFiltered = trimmedNodeBId,
             CellIdFiltered = trimmedCellId,
             NodeBCellIdFiltered = combinedNodeBCellId,
+            NodeBIdLookupValues = lookupNodeBIds,
+            CellIdLookupValues = lookupCellIds,
+            NodeBCellIdLookupValues = lookupNodeBCellIds,
             SectorFiltered = lookupSector,
+            ScenarioFiltered = selectedScenario,
             Count = rows.Count,
             Data = rows
         };

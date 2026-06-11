@@ -151,6 +151,10 @@ namespace SignalTracker.Controllers
             [FromQuery] long projectId,
             [FromQuery] string? operatorName,
             [FromQuery(Name = "operator")] string? operatorAlias,
+            [FromQuery(Name = "polygon_ids")] string? polygonIds,
+            [FromQuery] int? scenario,
+            [FromQuery] int? scenarioId,
+            [FromQuery] int? sitePredictionScenarioId,
             [FromQuery] int limit = 20000,
             [FromQuery] int offset = 0)
         {
@@ -165,6 +169,8 @@ namespace SignalTracker.Controllers
             var result = await _pythonBridgeService.GetSitePredictionOptimizedAsync(
                 projectId,
                 operatorName ?? operatorAlias,
+                polygonIds,
+                scenario ?? scenarioId ?? sitePredictionScenarioId,
                 limit,
                 offset,
                 HttpContext.RequestAborted
@@ -189,6 +195,12 @@ namespace SignalTracker.Controllers
             if (request == null || request.ProjectId <= 0)
             {
                 return BadRequest(new { Status = 0, Message = "ProjectId is required." });
+            }
+
+            if (string.IsNullOrWhiteSpace(request.PolygonIds) &&
+                Request.Query.TryGetValue("polygon_ids", out var polygonIds))
+            {
+                request.PolygonIds = polygonIds.ToString();
             }
 
             var result = await _pythonBridgeService.GetLteSitePredictionRowsAsync(

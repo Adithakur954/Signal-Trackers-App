@@ -19,6 +19,9 @@ namespace SignalTracker.Models
         [Column("scenario_id")]
         public int? scenario_id { get; set; }
 
+        [Column("public_scenario_id")]
+        public int? public_scenario_id { get; set; }
+
         [Column("grid_size_meters")]
         public double grid_size_meters { get; set; }
 
