@@ -2807,9 +2807,7 @@ public async Task<IActionResult> OutdoorCount(
         [HttpGet("GetSessions")]
 public async Task<IActionResult> GetSessions([FromQuery] int? company_id = null)
 {
-    // =========================================================
-    // 1. SMART SECURITY: RESOLVE COMPANY ID
-    // =========================================================
+    
     int targetCompanyId = GetTargetCompanyId(company_id);
     int currentUserId = _userScope.GetCurrentUserId(User);
     bool useUserScope = !_userScope.IsSuperAdmin(User) && targetCompanyId == 0 && currentUserId > 0;
@@ -2869,6 +2867,7 @@ public async Task<IActionResult> GetSessions([FromQuery] int? company_id = null)
 
                 start_address = s.start_address,
                 end_address = s.end_address,
+                type = s.type,
 
                 CreatedBy = u.name,
                 mobile = u.mobile,

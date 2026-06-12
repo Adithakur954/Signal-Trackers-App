@@ -824,6 +824,12 @@ public class ProjectPolygonItem
             public int? company_id { get; set; }
         }
 
+        public class UpdateProjectPolygonModel : SavePolygonModel
+        {
+            public int PolygonId { get; set; }
+            public int? Id { get; set; }
+        }
+
         public class ReturnAPIResponse
         {
             public int Status { get; set; }
@@ -1255,6 +1261,79 @@ public class ProjectPolygonItem
             {
                 message.Status = 0;
                 message.Message = "Error saving polygon: " + SafeException.Get(ex);
+            }
+
+            return Json(message);
+        }
+
+        [HttpPost("UpdateProjectPolygon")]
+        public async Task<JsonResult> UpdateProjectPolygon([FromBody] UpdateProjectPolygonModel model)
+        {
+            var message = new ReturnAPIResponse();
+
+            try
+            {
+                var polygonId = model?.PolygonId > 0 ? model.PolygonId : model?.Id ?? 0;
+                if (model == null || polygonId <= 0 || model.ProjectId <= 0 || string.IsNullOrWhiteSpace(model.WKT))
+                {
+                    message.Status = 0;
+                    message.Message = "Invalid polygon data (PolygonId, ProjectId and WKT are required).";
+                    return Json(message);
+                }
+
+                var conn = db.Database.GetDbConnection();
+                if (conn.State != ConnectionState.Open) await conn.OpenAsync();
+
+                var mapRegionColumns = await GetTableColumnSetAsync(conn, "map_regions");
+                var hasUpdatedAt = mapRegionColumns.Contains("updated_at");
+
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = hasUpdatedAt
+                    ? @"
+                    UPDATE map_regions
+                    SET region = ST_GeomFromText(@wkt, 4326),
+                        area = @area,
+                        updated_at = NOW()
+                    WHERE id = @polygonId
+                      AND tbl_project_id = @projectId
+                      AND status = 1;"
+                    : @"
+                    UPDATE map_regions
+                    SET region = ST_GeomFromText(@wkt, 4326),
+                        area = @area
+                    WHERE id = @polygonId
+                      AND tbl_project_id = @projectId
+                      AND status = 1;";
+
+                AddParam(cmd, "@polygonId", polygonId);
+                AddParam(cmd, "@projectId", model.ProjectId.Value);
+                AddParam(cmd, "@wkt", model.WKT);
+                AddParam(cmd, "@area", (object?)model.Area ?? DBNull.Value);
+
+                var updatedRows = await cmd.ExecuteNonQueryAsync();
+                if (updatedRows <= 0)
+                {
+                    message.Status = 0;
+                    message.Message = "Polygon was not found for this project.";
+                    return Json(message);
+                }
+
+                await InvalidateMapViewCachesAsync();
+
+                message.Status = 1;
+                message.Message = "Polygon updated successfully.";
+                message.Data = new
+                {
+                    polygonId,
+                    projectId = model.ProjectId.Value,
+                    updated = true,
+                    area = model.Area
+                };
+            }
+            catch (Exception ex)
+            {
+                message.Status = 0;
+                message.Message = "Error updating polygon: " + SafeException.Get(ex);
             }
 
             return Json(message);
