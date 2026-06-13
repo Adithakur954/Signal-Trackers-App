@@ -882,6 +882,9 @@ public class ProjectPolygonItem
                 public long RowId { get; set; }
                 public int SubSessionId { get; set; }
                 public string? SubSessionType { get; set; }
+                public string? Number { get; set; }
+                public string? Direction { get; set; }
+                public string? ResultStatusRaw { get; set; }
                 public float? StartLat { get; set; }
                 public float? StartLon { get; set; }
                 public float? EndLat { get; set; }
@@ -1061,7 +1064,7 @@ public class ProjectPolygonItem
                 statusMetrics.AddObservation(durationMs, speedKbps, fileSizeBytes);
             }
 
-            public void AddSubSessionLocation(long rowId, long? subSessionId, string? subSessionType, float? startLat, float? startLon, float? endLat, float? endLon, double? durationMs, string? resultStatusRaw)
+            public void AddSubSessionLocation(long rowId, long? subSessionId, string? subSessionType, string? number, string? direction, float? startLat, float? startLon, float? endLat, float? endLon, double? durationMs, string? resultStatusRaw)
             {
                 if (!subSessionId.HasValue || subSessionId.Value < int.MinValue || subSessionId.Value > int.MaxValue)
                 {
@@ -1070,9 +1073,15 @@ public class ProjectPolygonItem
 
                 var key = rowId;
                 var normalizedSubSessionType = NormalizeSubSessionType(subSessionType);
+                var normalizedNumber = NormalizeSubSessionText(number);
+                var normalizedDirection = NormalizeSubSessionText(direction);
+                var normalizedResultStatusRaw = NormalizeSubSessionText(resultStatusRaw);
                 if (SubSessionLocationMap.TryGetValue(key, out var existing))
                 {
                     existing.SubSessionType ??= normalizedSubSessionType;
+                    existing.Number ??= normalizedNumber;
+                    existing.Direction ??= normalizedDirection;
+                    existing.ResultStatusRaw ??= normalizedResultStatusRaw;
                     existing.StartLat ??= startLat;
                     existing.StartLon ??= startLon;
                     existing.EndLat ??= endLat;
@@ -1087,6 +1096,9 @@ public class ProjectPolygonItem
                     RowId = rowId,
                     SubSessionId = (int)subSessionId.Value,
                     SubSessionType = normalizedSubSessionType,
+                    Number = normalizedNumber,
+                    Direction = normalizedDirection,
+                    ResultStatusRaw = normalizedResultStatusRaw,
                     StartLat = startLat,
                     StartLon = startLon,
                     EndLat = endLat,
@@ -1103,6 +1115,13 @@ public class ProjectPolygonItem
                     : subSessionType.Trim();
             }
 
+            private static string? NormalizeSubSessionText(string? value)
+            {
+                return string.IsNullOrWhiteSpace(value)
+                    ? null
+                    : value.Trim();
+            }
+
             public object ToResponse()
             {
                 var subSessions = SubSessionLocationMap.Values
@@ -1112,6 +1131,8 @@ public class ProjectPolygonItem
                         id = x.RowId,
                         sub_session_id = x.SubSessionId,
                         sub_session_type = x.SubSessionType,
+                        number = x.Number,
+                        direction = x.Direction,
                         coordinates = new
                         {
                             start_lat = x.StartLat,
@@ -1120,7 +1141,8 @@ public class ProjectPolygonItem
                             end_lon = x.EndLon
                         },
                         duration_ms = x.DurationMs.HasValue ? RoundMetric(x.DurationMs.Value) : (double?)null,
-                        result_status = string.Equals(x.ResultStatus, "1", StringComparison.OrdinalIgnoreCase) ? "success" : "failed"
+                        result_status_raw = x.ResultStatusRaw,
+                        result_status = string.Equals(x.ResultStatus, "1", StringComparison.OrdinalIgnoreCase) ? "connected" : "not_connected"
                     })
                     .ToList();
 
@@ -1663,7 +1685,7 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                     || string.Equals(Request?.Query["includeStatus"], "1", StringComparison.OrdinalIgnoreCase);
 
                 var cacheKey = BuildMapViewCacheKey(
-                    "subsession-v10",
+                    "subsession-v11",
                     requestedSessionIds.Count > 0 ? string.Join("-", requestedSessionIds) : "all",
                     isWithStatusRoute ? "with-status" : "base");
 
@@ -1706,12 +1728,40 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                     "status");
 
                 var resultStatusSql = resultStatusColumn != null
-                    ? $"NULLIF(TRIM(CAST(`{resultStatusColumn.Replace("`", "``")}` AS CHAR)), '')"
+                    ? @"
+                        CASE
+                            WHEN JSON_VALID(json_data) THEN COALESCE(
+                                NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.result_status'))), ''),
+                                NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.connection_status'))), ''),
+                                NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.call_status'))), ''),
+                                NULLIF(TRIM(CAST(`" + resultStatusColumn.Replace("`", "``") + @"` AS CHAR)), '')
+                            )
+                            ELSE NULLIF(TRIM(CAST(`" + resultStatusColumn.Replace("`", "``") + @"` AS CHAR)), '')
+                        END"
                     : @"
                         CASE
                             WHEN JSON_VALID(json_data) THEN NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.result_status'))), '')
                             ELSE NULL
                         END";
+
+                var numberSql = @"
+                    CASE
+                        WHEN JSON_VALID(json_data) THEN COALESCE(
+                            NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.number'))), ''),
+                            NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.phone_number'))), ''),
+                            NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.msisdn'))), '')
+                        )
+                        ELSE NULL
+                    END";
+
+                var directionSql = @"
+                    CASE
+                        WHEN JSON_VALID(json_data) THEN COALESCE(
+                            NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.direction'))), ''),
+                            NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.call_direction'))), '')
+                        )
+                        ELSE NULL
+                    END";
 
                 var durationColumn = await GetFirstExistingColumnAsync(
                     conn,
@@ -1769,7 +1819,9 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                         " + durationSql + @" AS duration_ms,
                         " + speedSql + @" AS speed_kbps,
                         " + fileSizeSql + @" AS file_size_bytes,
-                        " + resultStatusSql + @" AS result_status
+                        " + resultStatusSql + @" AS result_status,
+                        " + numberSql + @" AS number,
+                        " + directionSql + @" AS direction
                     FROM tbl_sub_session
                     WHERE session_id IS NOT NULL";
 
@@ -1812,6 +1864,8 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                         var speedKbps = TryParseNullableDouble(reader.IsDBNull(9) ? null : reader.GetValue(9)?.ToString());
                         var fileSizeBytes = TryParseNullableDouble(reader.IsDBNull(10) ? null : reader.GetValue(10)?.ToString());
                         var resultStatus = reader.IsDBNull(11) ? null : reader.GetValue(11)?.ToString();
+                        var number = reader.IsDBNull(12) ? null : reader.GetValue(12)?.ToString();
+                        var direction = reader.IsDBNull(13) ? null : reader.GetValue(13)?.ToString();
 
                         if (!sessionMap.TryGetValue(currentSessionId, out var sessionAgg))
                         {
@@ -1820,7 +1874,7 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                         }
 
                         sessionAgg.AddSubSession(subSessionId);
-                        sessionAgg.AddSubSessionLocation(rowId, subSessionId, subSessionType, subSessionStartLat, subSessionStartLon, subSessionEndLat, subSessionEndLon, durationMs, resultStatus);
+                        sessionAgg.AddSubSessionLocation(rowId, subSessionId, subSessionType, number, direction, subSessionStartLat, subSessionStartLon, subSessionEndLat, subSessionEndLon, durationMs, resultStatus);
                         sessionAgg.AddMetrics(durationMs, speedKbps, fileSizeBytes, resultStatus);
 
                         overall.AddMetrics(durationMs, speedKbps, fileSizeBytes, resultStatus);
@@ -1883,7 +1937,7 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                     };
                 }
 
-                await SetMapViewCacheAsync(cacheKey, response);
+                await SetMapViewCacheAsync(cacheKey, response, 15);
                 return Json(response);
             }
             catch (Exception ex)
