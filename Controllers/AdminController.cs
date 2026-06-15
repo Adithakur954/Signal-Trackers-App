@@ -4362,6 +4362,8 @@ public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
 public async Task<IActionResult> MonthlySamplesV2(
     [FromQuery] DateTime? from,
     [FromQuery] DateTime? to,
+    [FromQuery] string operatorName = null,
+    [FromQuery] string networkType = null,
     [FromQuery] int? company_id = null)
 {
     // 1. Resolve Company ID from the st.auth cookie claims securely
@@ -4383,10 +4385,38 @@ public async Task<IActionResult> MonthlySamplesV2(
         effectiveTo = tmp;
     }
 
+    var opSet = ParseCsv(operatorName);
+    if (opSet != null)
+    {
+        opSet.Remove("ALL");
+        opSet = opSet
+            .Select(NormalizeOperatorBucket)
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (opSet.Count == 0) opSet = null;
+    }
+
+    var netSet = ParseCsv(networkType);
+    if (netSet != null)
+    {
+        netSet.Remove("ALL");
+        netSet = netSet
+            .Select(NormalizeNetworkBucket)
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (netSet.Count == 0) netSet = null;
+    }
+
     // 2. Build a unique cache key for this specific request
     string fromKey = effectiveFrom.ToString("yyyyMMdd");
     string toKey = effectiveTo.ToString("yyyyMMdd");
-    string cacheKey = $"MonthlySamples:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:{fromKey}:{toKey}";
+    string opKey = opSet != null
+        ? string.Join(",", opSet.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
+        : "ALL";
+    string netKey = netSet != null
+        ? string.Join(",", netSet.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
+        : "ALL";
+    string cacheKey = $"MonthlySamples:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:{opKey}:{netKey}:{fromKey}:{toKey}";
 
     // 3. Try to fetch data from Redis Cache
     if (_redis != null && _redis.IsConnected)
@@ -4405,37 +4435,138 @@ public async Task<IActionResult> MonthlySamplesV2(
     try
     {
         var monthlyData = new List<(int Year, int Month, int Count)>();
+        var conn = db.Database.GetDbConnection();
+        bool shouldClose = false;
 
-        if (targetCompanyId == 0 && !useUserScope)
+        try
         {
-            var rows = await db.tbl_network_log.AsNoTracking()
-                .Where(x => x.timestamp.HasValue
-                         && x.timestamp.Value >= effectiveFrom
-                         && x.timestamp.Value < effectiveTo.AddDays(1))
-                .GroupBy(x => new { x.timestamp.Value.Year, x.timestamp.Value.Month })
-                .Select(g => new { g.Key.Year, g.Key.Month, Count = g.Count() })
-                .OrderBy(x => x.Year)
-                .ThenBy(x => x.Month)
-                .ToListAsync();
+            if (conn.State != System.Data.ConnectionState.Open)
+            {
+                await conn.OpenAsync();
+                shouldClose = true;
+            }
 
-            monthlyData = rows.Select(r => (r.Year, r.Month, r.Count)).ToList();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandTimeout = HeavyQueryTimeoutSeconds;
+
+                var companyClause = targetCompanyId == 0 && !useUserScope
+                    ? "1=1"
+                    : (useUserScope ? "s.user_id = @userId" : "u.company_id = @companyId");
+
+                var sqlBuilder = new StringBuilder(@"
+                    SELECT
+                        YEAR(t.timestamp) AS sampleYear,
+                        MONTH(t.timestamp) AS sampleMonth,
+                        COUNT(*) AS sampleCount
+                    FROM (
+                        SELECT
+                            n.timestamp,
+                            CASE
+                                WHEN UPPER(TRIM(n.m_alpha_long)) LIKE '%AIRTEL%' THEN 'Airtel'
+                                WHEN UPPER(TRIM(n.m_alpha_long)) LIKE '%JIO%' OR UPPER(TRIM(n.m_alpha_long)) LIKE '%JIOTRUE%' THEN 'Jio'
+                                WHEN UPPER(TRIM(n.m_alpha_long)) = 'VI'
+                                  OR UPPER(TRIM(n.m_alpha_long)) LIKE '%VODAFONE%'
+                                  OR UPPER(TRIM(n.m_alpha_long)) LIKE '%IDEA%'
+                                  OR UPPER(TRIM(n.m_alpha_long)) LIKE '%VI INDIA%' THEN 'VI India'
+                                WHEN UPPER(TRIM(n.m_alpha_long)) LIKE '%BSNL%' THEN 'BSNL'
+                                ELSE TRIM(n.m_alpha_long)
+                            END AS operatorName,
+                            CASE
+                                WHEN UPPER(TRIM(n.network)) LIKE '%5G%'
+                                  OR UPPER(TRIM(n.network)) LIKE '%NR%'
+                                  OR UPPER(TRIM(n.network)) LIKE '%NSA%'
+                                  OR UPPER(TRIM(n.network)) = 'SA'
+                                  OR UPPER(TRIM(n.network)) LIKE '% SA%' THEN '5G'
+                                WHEN UPPER(TRIM(n.network)) LIKE '%4G%' OR UPPER(TRIM(n.network)) LIKE '%LTE%' THEN '4G'
+                                WHEN UPPER(TRIM(n.network)) LIKE '%3G%'
+                                  OR UPPER(TRIM(n.network)) LIKE '%WCDMA%'
+                                  OR UPPER(TRIM(n.network)) LIKE '%UMTS%'
+                                  OR UPPER(TRIM(n.network)) LIKE '%HSPA%' THEN '3G'
+                                WHEN UPPER(TRIM(n.network)) LIKE '%2G%'
+                                  OR UPPER(TRIM(n.network)) LIKE '%EDGE%'
+                                  OR UPPER(TRIM(n.network)) LIKE '%GSM%'
+                                  OR UPPER(TRIM(n.network)) LIKE '%GPRS%' THEN '2G'
+                                ELSE TRIM(n.network)
+                            END AS network
+                        FROM tbl_network_log n
+                        __JOINS__
+                        WHERE __COMPANY_CLAUSE__
+                          AND n.timestamp IS NOT NULL
+                          AND n.timestamp >= @from
+                          AND n.timestamp < @toExclusive
+                    ) t
+                    WHERE 1=1
+                ");
+
+                if (opSet is { Count: > 0 })
+                {
+                    var opParams = new List<string>();
+                    int i = 0;
+                    foreach (var op in opSet.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
+                    {
+                        string paramName = $"@op{i++}";
+                        Add(cmd, paramName, op);
+                        opParams.Add(paramName);
+                    }
+
+                    sqlBuilder.AppendLine($"  AND t.operatorName IN ({string.Join(", ", opParams)})");
+                }
+
+                if (netSet is { Count: > 0 })
+                {
+                    var netParams = new List<string>();
+                    int i = 0;
+                    foreach (var net in netSet.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
+                    {
+                        string paramName = $"@net{i++}";
+                        Add(cmd, paramName, net);
+                        netParams.Add(paramName);
+                    }
+
+                    sqlBuilder.AppendLine($"  AND t.network IN ({string.Join(", ", netParams)})");
+                }
+
+                sqlBuilder.AppendLine(@"
+                    GROUP BY sampleYear, sampleMonth
+                    ORDER BY sampleYear, sampleMonth;");
+
+                var joins = targetCompanyId == 0 && !useUserScope
+                    ? ""
+                    : "JOIN tbl_session s ON n.session_id = s.id JOIN tbl_user u ON s.user_id = u.id";
+
+                cmd.CommandText = sqlBuilder.ToString()
+                    .Replace("__JOINS__", joins)
+                    .Replace("__COMPANY_CLAUSE__", companyClause);
+
+                if (targetCompanyId > 0)
+                {
+                    Add(cmd, "@companyId", targetCompanyId);
+                }
+                if (useUserScope)
+                {
+                    Add(cmd, "@userId", currentUserId);
+                }
+                Add(cmd, "@from", effectiveFrom);
+                Add(cmd, "@toExclusive", effectiveTo.AddDays(1));
+
+                using (var reader = await cmd.ExecuteReaderAsync())
+                {
+                    while (await reader.ReadAsync())
+                    {
+                        monthlyData.Add((
+                            reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0)),
+                            reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1)),
+                            reader.IsDBNull(2) ? 0 : Convert.ToInt32(reader.GetValue(2))
+                        ));
+                    }
+                }
+            }
         }
-        else
+        finally
         {
-            var rows = await (
-                from l in db.tbl_network_log.AsNoTracking()
-                join s in db.tbl_session.AsNoTracking() on l.session_id equals s.id
-                join u in db.tbl_user.AsNoTracking() on s.user_id equals u.id
-                where (useUserScope ? s.user_id == currentUserId : u.company_id == targetCompanyId)
-                   && l.timestamp.HasValue
-                   && l.timestamp.Value >= effectiveFrom
-                   && l.timestamp.Value < effectiveTo.AddDays(1)
-                group l by new { l.timestamp.Value.Year, l.timestamp.Value.Month } into g
-                orderby g.Key.Year, g.Key.Month
-                select new { g.Key.Year, g.Key.Month, Count = g.Count() }
-            ).ToListAsync();
-
-            monthlyData = rows.Select(r => (r.Year, r.Month, r.Count)).ToList();
+            if (shouldClose && conn.State == System.Data.ConnectionState.Open)
+                await conn.CloseAsync();
         }
 
         // 5. Format result for the chart (YYYY-MM format)
@@ -6566,6 +6697,5 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
         }
     }
 }
-
 
 

@@ -2706,30 +2706,62 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyEF(
         .Where(log => sessionIds.Contains((long)log.session_id));
 
     if (!string.IsNullOrEmpty(provider))
-        query = query.Where(log => log.m_alpha_long != null && log.m_alpha_long.ToLower().Contains(provider));
+        query = query.Where(log =>
+            ((log.m_alpha_short != null && log.m_alpha_short != "" ? log.m_alpha_short : log.m_alpha_long) ?? "")
+                .ToLower()
+                .Contains(provider));
+
+    var wifiPredicate = (System.Linq.Expressions.Expression<Func<tbl_network_log, bool>>)(log =>
+        log.primary_cell_info_1 != null &&
+        (log.primary_cell_info_1.StartsWith("SSID:") || log.primary_cell_info_1.Contains("BSSID:")));
+    var registeredCellPredicate = (System.Linq.Expressions.Expression<Func<tbl_network_log, bool>>)(log =>
+        log.primary_cell_info_1 != null &&
+        log.primary_cell_info_1.Contains("mRegistered=YES") &&
+        log.rsrp >= -140 && log.rsrp <= -44 &&
+        log.rsrq >= -34 && log.rsrq <= -3 &&
+        log.sinr >= -20 && log.sinr <= 40 &&
+        log.mos >= 1 && log.mos <= 5);
 
     // network type (4G/5G/etc) filtering
     if (!string.IsNullOrWhiteSpace(filters.NetworkType) &&
         !filters.NetworkType.Equals("All", StringComparison.OrdinalIgnoreCase))
     {
         var nt = filters.NetworkType.Trim();
-        query = query.Where(log => log.network != null && EF.Functions.Like(log.network, $"%{nt}%"));
+        if (nt.Equals("wifi", StringComparison.OrdinalIgnoreCase) ||
+            nt.Equals("wi-fi", StringComparison.OrdinalIgnoreCase))
+        {
+            query = query.Where(wifiPredicate);
+        }
+        else
+        {
+            query = query
+                .Where(registeredCellPredicate)
+                .Where(log => log.network != null && EF.Functions.Like(log.network, $"%{nt}%"));
+        }
+    }
+    else
+    {
+        query = query.Where(log =>
+            (
+                log.primary_cell_info_1 != null &&
+                log.primary_cell_info_1.Contains("mRegistered=YES") &&
+                log.rsrp >= -140 && log.rsrp <= -44 &&
+                log.rsrq >= -34 && log.rsrq <= -3 &&
+                log.sinr >= -20 && log.sinr <= 40 &&
+                log.mos >= 1 && log.mos <= 5
+            ) ||
+            (
+                log.primary_cell_info_1 != null &&
+                (log.primary_cell_info_1.StartsWith("SSID:") || log.primary_cell_info_1.Contains("BSSID:"))
+            ));
     }
 
     DateTime? from = filters.StartDate;
     DateTime? to = filters.EndDate?.AddDays(1);
     if (from.HasValue) query = query.Where(log => log.timestamp >= from.Value);
     if (to.HasValue) query = query.Where(log => log.timestamp < to.Value);
-    
-    // âš¡ SIGNAL RANGE CONSTRAINTS
-    query = query.Where(log => log.rsrp >= -140 && log.rsrp <= -44);
-    query = query.Where(log => log.rsrq >= -34 && log.rsrq <= -3);
-    query = query.Where(log => log.sinr >= -20 && log.sinr <= 40);
-    query = query.Where(log => log.mos >= 1 && log.mos <= 5);
-    // Performance: Filter exact match if possible, otherwise Contains
-    query = query.Where(log => log.primary_cell_info_1 != null && log.primary_cell_info_1.Contains("mRegistered=YES"));
 
-    return await query.OrderBy(log => log.timestamp)
+    var rows = await query.OrderBy(log => log.timestamp)
         .Select(log => new NetworkLogCacheRow
         {
             id = log.id,
@@ -2743,7 +2775,9 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyEF(
             apps = log.apps ?? "",
             num_cells = log.num_cells,
             network = log.network ?? "",
-            m_alpha_long = log.m_alpha_long ?? "",
+            m_alpha_long = log.m_alpha_short != null && log.m_alpha_short != ""
+                ? log.m_alpha_short
+                : (log.m_alpha_long ?? ""),
             pci = log.pci ?? "",
             rssi = log.rssi,
             rsrp = log.rsrp,
@@ -2760,9 +2794,16 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyEF(
             image_path = log.image_path ?? "",
             indoor_outdoor = log.indoor_outdoor ?? "",
             nodeb_id = log.nodeb_id ?? "",
-            cell_id = log.cell_id ?? ""
+            cell_id = log.cell_id ?? "",
+            connection_type = log.primary_cell_info_1 != null &&
+                (log.primary_cell_info_1.StartsWith("SSID:") || log.primary_cell_info_1.Contains("BSSID:"))
+                    ? "wifi"
+                    : "network"
         })
         .ToListAsync();
+
+    rows.ForEach(row => row.m_alpha_long = CleanProviderDisplayName(row.m_alpha_long));
+    return rows;
 }
 
 private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
@@ -2778,8 +2819,25 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
     string sql = $@"
         SELECT
             id, session_id, timestamp, lat, lon, battery, Speed, level, apps, num_cells,
-            network, m_alpha_long, pci, rssi, rsrp, rsrq, sinr, mos, jitter, latency, tac,
-            packet_loss, dl_tpt, ul_tpt, band, image_path, indoor_outdoor, nodeb_id, cell_id
+            network,
+            COALESCE(
+                NULLIF(TRIM(BOTH CHAR(39) FROM TRIM(BOTH '""' FROM TRIM(m_alpha_short))), ''),
+                TRIM(BOTH CHAR(39) FROM TRIM(BOTH '""' FROM TRIM(m_alpha_long)))
+            ) AS provider_name,
+            pci, rssi, rsrp, rsrq, sinr, mos, jitter, latency, tac,
+            packet_loss, dl_tpt, ul_tpt, band, image_path, indoor_outdoor, nodeb_id, cell_id,
+            CASE
+                WHEN primary_cell_info_1 LIKE 'SSID:%'
+                  OR primary_cell_info_1 LIKE '%BSSID:%'
+                  OR EXISTS (
+                      SELECT 1
+                      FROM tbl_session s
+                      WHERE s.id = tbl_network_log.session_id
+                        AND LOWER(COALESCE(s.type, '')) = 'wifi'
+                  )
+                THEN 'wifi'
+                ELSE 'network'
+            END AS connection_type
         FROM tbl_network_log
         WHERE {whereClause}
         ORDER BY timestamp;";
@@ -2804,7 +2862,7 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
             apps = rd.IsDBNull(8) ? "" : rd.GetString(8),
             num_cells = rd.IsDBNull(9) ? (int?)null : rd.GetInt32(9),
             network = rd.IsDBNull(10) ? "" : rd.GetString(10),
-            m_alpha_long = rd.IsDBNull(11) ? "" : rd.GetString(11),
+            m_alpha_long = rd.IsDBNull(11) ? "" : CleanProviderDisplayName(rd.GetString(11)),
             pci = rd.IsDBNull(12) ? "" : rd.GetString(12),
             rssi = rd.IsDBNull(13) ? (float?)null : rd.GetFloat(13),
             rsrp = rd.IsDBNull(14) ? (float?)null : rd.GetFloat(14),
@@ -2821,7 +2879,8 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
             image_path = rd.IsDBNull(25) ? "" : rd.GetString(25),
             indoor_outdoor = rd.IsDBNull(26) ? "" : rd.GetString(26),
             nodeb_id = rd.IsDBNull(27) ? "" : rd.GetString(27),
-            cell_id = rd.IsDBNull(28) ? "" : rd.GetString(28)
+            cell_id = rd.IsDBNull(28) ? "" : rd.GetString(28),
+            connection_type = rd.IsDBNull(29) ? "network" : rd.GetString(29)
         });
     }
 
@@ -2878,7 +2937,11 @@ private async Task<Dictionary<string, object>> GetAppSummaryRaw(
             
             -- 13. OPERATOR LIST (The Fix)
             -- This combines all distinct operators into one string like 'Jio, Airtel'
-            GROUP_CONCAT(DISTINCT NULLIF(m_alpha_long, '') ORDER BY m_alpha_long SEPARATOR ', ')
+            GROUP_CONCAT(
+                DISTINCT NULLIF(COALESCE(NULLIF(TRIM(m_alpha_short), ''), m_alpha_long), '')
+                ORDER BY COALESCE(NULLIF(TRIM(m_alpha_short), ''), m_alpha_long)
+                SEPARATOR ', '
+            )
 
         FROM tbl_network_log
         WHERE {whereClause} 
@@ -3068,19 +3131,48 @@ private (string Clause, Dictionary<string, object> Params) BuildSqlWhere(
     }
     
     var clauses = new List<string>();
-    var parts = new List<string>();
     if (idParams.Any()) clauses.Add($"session_id IN ({string.Join(",", idParams)})");
     else clauses.Add("1 = 0"); 
 
     // Move Wildcard search to the end so it runs on smaller dataset
     if(!string.IsNullOrEmpty(provider)) {
-        clauses.Add("m_alpha_long LIKE @prov");
+        clauses.Add("COALESCE(NULLIF(TRIM(m_alpha_short), ''), m_alpha_long) LIKE @prov");
         p.Add("@prov", $"%{provider}%");
     }
-    parts.Add("(rsrp BETWEEN -140 AND -44)");
-    parts.Add("(rsrq BETWEEN -34 AND -3)");
-    parts.Add("(sinr BETWEEN -20 AND 40)");
-    parts.Add("(mos BETWEEN 1 AND 5)");
+
+    const string wifiPredicate = @"(
+        primary_cell_info_1 LIKE 'SSID:%'
+        OR primary_cell_info_1 LIKE '%BSSID:%'
+        OR EXISTS (
+            SELECT 1
+            FROM tbl_session s
+            WHERE s.id = session_id
+              AND LOWER(COALESCE(s.type, '')) = 'wifi'
+        )
+    )";
+    const string registeredCellPredicate = "primary_cell_info_1 LIKE '%mRegistered=YES%'";
+
+    if (!string.IsNullOrWhiteSpace(filters?.NetworkType) &&
+        !filters.NetworkType.Equals("All", StringComparison.OrdinalIgnoreCase))
+    {
+        var networkType = filters.NetworkType.Trim();
+        if (networkType.Equals("wifi", StringComparison.OrdinalIgnoreCase) ||
+            networkType.Equals("wi-fi", StringComparison.OrdinalIgnoreCase))
+        {
+            clauses.Add(wifiPredicate);
+        }
+        else
+        {
+            clauses.Add("network IS NOT NULL AND network LIKE @networkType");
+            p.Add("@networkType", $"%{networkType}%");
+            clauses.Add(registeredCellPredicate);
+        }
+    }
+    else
+    {
+        clauses.Add($"({registeredCellPredicate} OR {wifiPredicate})");
+    }
+
     if(filters.StartDate.HasValue) {
         clauses.Add("timestamp >= @from");
         p.Add("@from", filters.StartDate);
@@ -3089,9 +3181,6 @@ private (string Clause, Dictionary<string, object> Params) BuildSqlWhere(
         clauses.Add("timestamp < @to");
         p.Add("@to", filters.EndDate.Value.AddDays(1));
     }
-    
-    clauses.Add("primary_cell_info_1 LIKE '%mRegistered=YES%'");
-
     return (string.Join(" AND ", clauses), p);
 }
 
@@ -3226,7 +3315,14 @@ private string BuildNetworkLogCacheKey(
         : "no_project";
     string versionKey = NormalizeCacheKeyPart(dataVersion);
 
-    return $"networklog:v3:{sortedSessionIds}:{providerKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
+    return $"networklog:v8:{sortedSessionIds}:{providerKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
+}
+
+private static string CleanProviderDisplayName(string value)
+{
+    return string.IsNullOrWhiteSpace(value)
+        ? ""
+        : value.Trim().Trim('"', '\'');
 }
 
 private void AddParameter(DbCommand cmd, string name, object value)
@@ -3289,6 +3385,7 @@ public class NetworkLogCacheRow
     public string indoor_outdoor { get; set; } = "";
     public string nodeb_id { get; set; } = "";
     public string cell_id { get; set; } = "";
+    public string connection_type { get; set; } = "network";
 }
 
 // Delete project and unlink the polygon 
