@@ -2874,7 +2874,7 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyEF(
         })
         .ToListAsync();
 
-    rows.ForEach(row => row.m_alpha_long = CleanProviderDisplayName(row.m_alpha_long));
+    NormalizeNetworkLogRows(rows);
     return rows;
 }
 
@@ -2956,6 +2956,7 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
         });
     }
 
+    NormalizeNetworkLogRows(rows);
     return rows;
 }
 // ---------------------------------------------------------
@@ -3414,6 +3415,64 @@ private static string CleanProviderDisplayName(string value)
         : value.Trim().Trim('"', '\'');
 }
 
+private static void NormalizeNetworkLogRows(List<NetworkLogCacheRow> rows)
+{
+    foreach (var row in rows)
+    {
+        row.m_alpha_long = CleanProviderDisplayName(row.m_alpha_long);
+        row.provider = NormalizeNetworkLogProvider(row);
+        row.band = NormalizeNetworkLogBand(row.band);
+        row.technology = NormalizeNetworkLogTechnology(row.network, row.band);
+        row.networkType = row.technology;
+        row.lng = row.lon;
+        row.longitude = row.lon;
+        row.latitude = row.lat;
+        row.is_wifi = string.Equals(row.connection_type, "wifi", StringComparison.OrdinalIgnoreCase);
+        row.log_type = row.is_wifi ? "wifi" : "network";
+    }
+}
+
+private static string NormalizeNetworkLogProvider(NetworkLogCacheRow row)
+{
+    var provider = CleanProviderDisplayName(row.m_alpha_long);
+    if (row.connection_type.Equals("wifi", StringComparison.OrdinalIgnoreCase))
+        return string.IsNullOrWhiteSpace(provider) ? "Unknown" : provider;
+
+    var lower = provider.Trim().ToLowerInvariant();
+    if (string.IsNullOrWhiteSpace(lower) || lower is "unknown" or "null" or "n/a" or "na")
+        return "Unknown";
+    if (lower.Contains("jio")) return "Jio";
+    if (lower.Contains("airtel") || lower.Contains("bharti")) return "Airtel";
+    if (lower.Contains("vodafone") || lower.Contains("idea") || lower == "vi" || lower.Contains("vi india")) return "Vi India";
+    if (lower.Contains("bsnl")) return "BSNL";
+    return CultureInfo.CurrentCulture.TextInfo.ToTitleCase(lower);
+}
+
+private static string NormalizeNetworkLogBand(string? band)
+{
+    var value = CleanProviderDisplayName(band ?? "");
+    if (string.IsNullOrWhiteSpace(value) || value.Equals("-1", StringComparison.OrdinalIgnoreCase))
+        return "";
+    return value;
+}
+
+private static string NormalizeNetworkLogTechnology(string? network, string? band)
+{
+    var networkText = (network ?? "").Trim();
+    var combined = $"{networkText} {band ?? ""}".ToUpperInvariant();
+    if (combined.Contains("WIFI") || combined.Contains("WI-FI")) return "WiFi";
+    if (combined.Contains("5G") || Regex.IsMatch(combined, @"(^|[^A-Z0-9])NR([^A-Z0-9]|$)") || Regex.IsMatch(combined, @"(^|[^A-Z0-9])N[0-9]{1,3}([^A-Z0-9]|$)"))
+    {
+        if (combined.Contains("NSA") || combined.Contains("ENDC") || combined.Contains("EN-DC") || combined.Contains("LTE ANCHOR") || combined.Contains("LTE-ANCHOR") || combined.Contains("LTE_ANCHOR"))
+            return "5G NSA";
+        return "5G";
+    }
+    if (combined.Contains("4G") || combined.Contains("LTE")) return "4G";
+    if (combined.Contains("3G") || combined.Contains("WCDMA") || combined.Contains("UMTS") || combined.Contains("HSPA")) return "3G";
+    if (combined.Contains("2G") || combined.Contains("GSM") || combined.Contains("EDGE") || combined.Contains("GPRS")) return "2G";
+    return string.IsNullOrWhiteSpace(networkText) ? "Unknown" : networkText;
+}
+
 private void AddParameter(DbCommand cmd, string name, object value)
 {
     var param = cmd.CreateParameter();
@@ -3450,13 +3509,19 @@ public class NetworkLogCacheRow
     public DateTime? timestamp { get; set; }
     public float? lat { get; set; }
     public float? lon { get; set; }
+    public float? lng { get; set; }
+    public float? latitude { get; set; }
+    public float? longitude { get; set; }
     public int? battery { get; set; }
     public float? Speed { get; set; }
     public int? level { get; set; }
     public string apps { get; set; } = "";
     public int? num_cells { get; set; }
     public string network { get; set; } = "";
+    public string technology { get; set; } = "";
+    public string networkType { get; set; } = "";
     public string m_alpha_long { get; set; } = "";
+    public string provider { get; set; } = "";
     public string pci { get; set; } = "";
     public float? rssi { get; set; }
     public float? rsrp { get; set; }
@@ -3475,6 +3540,8 @@ public class NetworkLogCacheRow
     public string nodeb_id { get; set; } = "";
     public string cell_id { get; set; } = "";
     public string connection_type { get; set; } = "network";
+    public string log_type { get; set; } = "network";
+    public bool is_wifi { get; set; }
 }
 
 // Delete project and unlink the polygon 
