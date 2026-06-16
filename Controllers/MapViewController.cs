@@ -2725,6 +2725,10 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyEF(
     IQueryable<tbl_network_log> query = db.tbl_network_log.AsNoTracking()
         .Where(log => sessionIds.Contains((long)log.session_id));
 
+    query = query.Where(log =>
+        (log.m_alpha_short != null && log.m_alpha_short.Trim() != "") ||
+        (log.m_alpha_long != null && log.m_alpha_long.Trim() != ""));
+
     if (!string.IsNullOrEmpty(provider))
         query = query.Where(log =>
             ((log.m_alpha_short != null && log.m_alpha_short != "" ? log.m_alpha_short : log.m_alpha_long) ?? "")
@@ -3206,6 +3210,7 @@ private (string Clause, Dictionary<string, object> Params) BuildSqlWhere(
     var clauses = new List<string>();
     if (idParams.Any()) clauses.Add($"session_id IN ({string.Join(",", idParams)})");
     else clauses.Add("1 = 0"); 
+    clauses.Add("COALESCE(NULLIF(TRIM(m_alpha_short), ''), NULLIF(TRIM(m_alpha_long), '')) IS NOT NULL");
 
     // Move Wildcard search to the end so it runs on smaller dataset
     if(!string.IsNullOrEmpty(provider)) {
@@ -4951,7 +4956,7 @@ public async Task<JsonResult> GetProviderWiseVolume([FromQuery] MapFilter filter
             await conn.OpenAsync();
 
         var cacheKey = BuildMapViewCacheKey(
-            "provider-wise-volume-v11",
+            "provider-wise-volume-v12",
             sessionIdsParam,
             filters?.StartDate,
             filters?.EndDate,
