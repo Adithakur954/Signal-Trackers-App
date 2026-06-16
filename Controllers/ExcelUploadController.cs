@@ -60,7 +60,6 @@ namespace SignalTracker.Controllers
         // GET: /ExcelUpload/DownloadExcel
         [HttpGet("DownloadExcel")]
         [AllowAnonymous]
-        [PublicApiKey]
         public IActionResult DownloadExcel(int fileType, string? fileName)
         {
             var root = _env.ContentRootPath;

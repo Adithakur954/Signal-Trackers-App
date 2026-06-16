@@ -3878,6 +3878,7 @@ public async Task<IActionResult> GetCombinedProviderNetworkTime(
 
 
 // cdf value calcuation s 
+[AllowAnonymous]
 [HttpGet("kpi-distribution")]
 public async Task<IActionResult> GetKpiDistribution(
     [FromQuery] string sessionIds,
