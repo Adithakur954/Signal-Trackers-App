@@ -38,6 +38,7 @@ namespace SignalTracker.Controllers
         private readonly UserScopeService _userScope;
         private const int MapViewCacheTtlSeconds = 300;
         private static volatile bool NetworkLogUpdatedAtColumnEnsured;
+        private static volatile bool ObsoleteNetworkLogCachesInvalidated;
         private static readonly string[] MapViewCacheInvalidationPatterns =
         {
             "mapview:*",
@@ -45,6 +46,8 @@ namespace SignalTracker.Controllers
             "availablepolygons:*",
             "networklog:v2:*",
             "networklog:v3:*",
+            "networklog:v8:*",
+            "networklog:v9:*",
             "latlon:dist:*",
             "n78_simple_kpi:*",
             "n78_neighbours:*",
@@ -160,6 +163,22 @@ namespace SignalTracker.Controllers
             catch
             {
                 // Best effort only.
+            }
+        }
+
+        private async Task InvalidateObsoleteNetworkLogCachesAsync()
+        {
+            if (ObsoleteNetworkLogCachesInvalidated || _redis?.IsConnected != true)
+                return;
+
+            try
+            {
+                await _redis.DeleteByPatternAsync("networklog:v8:*");
+                ObsoleteNetworkLogCachesInvalidated = true;
+            }
+            catch
+            {
+                // Best effort only. The v9 key still prevents stale reads.
             }
         }
 
@@ -2539,6 +2558,7 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
         var pageOffset = (page - 1) * limit;
         string connString = db.Database.GetConnectionString();
         string providerNormalized = null;
+        await InvalidateObsoleteNetworkLogCachesAsync();
         await EnsureNetworkLogUpdatedAtColumnAsync(connString);
         string dataVersion = await GetNetworkLogDataVersionAsync(
             connString,
@@ -2721,6 +2741,31 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyEF(
         log.rsrq >= -34 && log.rsrq <= -3 &&
         log.sinr >= -20 && log.sinr <= 40 &&
         log.mos >= 1 && log.mos <= 5);
+    var fiveGCellPredicate = (System.Linq.Expressions.Expression<Func<tbl_network_log, bool>>)(log =>
+        (
+            (log.network ?? "") + " " +
+            (log.band ?? "") + " " +
+            (log.primary_cell_info_1 ?? "") + " " +
+            (log.all_neigbor_cell_info ?? "")
+        ).ToUpper().Contains("5G") ||
+        (
+            (log.network ?? "") + " " +
+            (log.band ?? "") + " " +
+            (log.primary_cell_info_1 ?? "") + " " +
+            (log.all_neigbor_cell_info ?? "")
+        ).ToUpper().Contains("NRARFCN") ||
+        (
+            (log.network ?? "") + " " +
+            (log.band ?? "") + " " +
+            (log.primary_cell_info_1 ?? "") + " " +
+            (log.all_neigbor_cell_info ?? "")
+        ).ToUpper().Contains("MNR") ||
+        (
+            (log.network ?? "") + " " +
+            (log.band ?? "") + " " +
+            (log.primary_cell_info_1 ?? "") + " " +
+            (log.all_neigbor_cell_info ?? "")
+        ).ToUpper().Contains("NCI"));
 
     // network type (4G/5G/etc) filtering
     if (!string.IsNullOrWhiteSpace(filters.NetworkType) &&
@@ -2734,9 +2779,18 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyEF(
         }
         else
         {
-            query = query
-                .Where(registeredCellPredicate)
-                .Where(log => log.network != null && EF.Functions.Like(log.network, $"%{nt}%"));
+            if (nt.Equals("5g", StringComparison.OrdinalIgnoreCase) ||
+                nt.Equals("5g nsa", StringComparison.OrdinalIgnoreCase) ||
+                nt.Equals("nr", StringComparison.OrdinalIgnoreCase))
+            {
+                query = query.Where(fiveGCellPredicate);
+            }
+            else
+            {
+                query = query
+                    .Where(registeredCellPredicate)
+                    .Where(log => log.network != null && EF.Functions.Like(log.network, $"%{nt}%"));
+            }
         }
     }
     else
@@ -2753,6 +2807,24 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyEF(
             (
                 log.primary_cell_info_1 != null &&
                 (log.primary_cell_info_1.StartsWith("SSID:") || log.primary_cell_info_1.Contains("BSSID:"))
+            ) ||
+            (
+                (((log.network ?? "") + " " +
+                  (log.band ?? "") + " " +
+                  (log.primary_cell_info_1 ?? "") + " " +
+                  (log.all_neigbor_cell_info ?? "")).ToUpper().Contains("5G")) ||
+                (((log.network ?? "") + " " +
+                  (log.band ?? "") + " " +
+                  (log.primary_cell_info_1 ?? "") + " " +
+                  (log.all_neigbor_cell_info ?? "")).ToUpper().Contains("NRARFCN")) ||
+                (((log.network ?? "") + " " +
+                  (log.band ?? "") + " " +
+                  (log.primary_cell_info_1 ?? "") + " " +
+                  (log.all_neigbor_cell_info ?? "")).ToUpper().Contains("MNR")) ||
+                (((log.network ?? "") + " " +
+                  (log.band ?? "") + " " +
+                  (log.primary_cell_info_1 ?? "") + " " +
+                  (log.all_neigbor_cell_info ?? "")).ToUpper().Contains("NCI"))
             ));
     }
 
@@ -3151,6 +3223,14 @@ private (string Clause, Dictionary<string, object> Params) BuildSqlWhere(
         )
     )";
     const string registeredCellPredicate = "primary_cell_info_1 LIKE '%mRegistered=YES%'";
+    const string fiveGCellPredicate = @"(
+        UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''), COALESCE(primary_cell_info_1, ''), COALESCE(all_neigbor_cell_info, ''))) LIKE '%5G%'
+        OR UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''), COALESCE(primary_cell_info_1, ''), COALESCE(all_neigbor_cell_info, ''))) LIKE '%NRARFCN%'
+        OR UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''), COALESCE(primary_cell_info_1, ''), COALESCE(all_neigbor_cell_info, ''))) LIKE '%MNR%'
+        OR UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''), COALESCE(primary_cell_info_1, ''), COALESCE(all_neigbor_cell_info, ''))) LIKE '%NCI%'
+        OR UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''), COALESCE(primary_cell_info_1, ''), COALESCE(all_neigbor_cell_info, ''))) REGEXP '(^|[^A-Z0-9])NR([^A-Z0-9]|$)'
+        OR UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''), COALESCE(primary_cell_info_1, ''), COALESCE(all_neigbor_cell_info, ''))) REGEXP '(^|[^A-Z0-9])N[0-9]{1,3}([^A-Z0-9]|$)'
+    )";
 
     if (!string.IsNullOrWhiteSpace(filters?.NetworkType) &&
         !filters.NetworkType.Equals("All", StringComparison.OrdinalIgnoreCase))
@@ -3163,14 +3243,23 @@ private (string Clause, Dictionary<string, object> Params) BuildSqlWhere(
         }
         else
         {
-            clauses.Add("network IS NOT NULL AND network LIKE @networkType");
-            p.Add("@networkType", $"%{networkType}%");
-            clauses.Add(registeredCellPredicate);
+            if (networkType.Equals("5g", StringComparison.OrdinalIgnoreCase) ||
+                networkType.Equals("5g nsa", StringComparison.OrdinalIgnoreCase) ||
+                networkType.Equals("nr", StringComparison.OrdinalIgnoreCase))
+            {
+                clauses.Add(fiveGCellPredicate);
+            }
+            else
+            {
+                clauses.Add("network IS NOT NULL AND network LIKE @networkType");
+                p.Add("@networkType", $"%{networkType}%");
+                clauses.Add(registeredCellPredicate);
+            }
         }
     }
     else
     {
-        clauses.Add($"({registeredCellPredicate} OR {wifiPredicate})");
+        clauses.Add($"({registeredCellPredicate} OR {wifiPredicate} OR {fiveGCellPredicate})");
     }
 
     if(filters.StartDate.HasValue) {
@@ -3315,7 +3404,7 @@ private string BuildNetworkLogCacheKey(
         : "no_project";
     string versionKey = NormalizeCacheKeyPart(dataVersion);
 
-    return $"networklog:v8:{sortedSessionIds}:{providerKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
+    return $"networklog:v9:{sortedSessionIds}:{providerKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
 }
 
 private static string CleanProviderDisplayName(string value)
