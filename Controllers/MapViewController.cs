@@ -2130,6 +2130,12 @@ public class AvailablePolygonsResponse
             public List<int>? SessionIds { get; set; }
         }
 
+        public class UpdateProjectSiteSizeModel
+        {
+            public int ProjectId { get; set; }
+            public decimal SiteSize { get; set; }
+        }
+
         private async Task<(int? CompanyId, string? Error)> ResolveProjectCompanyIdAsync(CreateProjectModel? model)
         {
             var isSuperAdmin = _userScope.IsSuperAdmin(User);
@@ -2234,6 +2240,7 @@ public async Task<JsonResult> CreateProjectWithPolygons([FromBody] CreateProject
 
                 newProjectId = newProj.id; 
                 await TryUpdateProjectLogGridAsync(newProjectId, model.LogGrid ?? model.log_grid);
+                await TryUpdateProjectSiteSizeAsync(newProjectId, 1m);
 
                 if (model.PolygonIds != null && model.PolygonIds.Any())
                 {
@@ -3750,6 +3757,102 @@ public async Task<IActionResult> UpdateProjectSessions([FromBody] UpdateProjectS
         {
             Status = 0,
             Message = "Error updating project sessions.",
+            Details = SafeException.Get(ex)
+        });
+    }
+}
+
+[HttpPut, Route("UpdateProjectSiteSize")]
+public async Task<IActionResult> UpdateProjectSiteSize([FromBody] UpdateProjectSiteSizeModel model)
+{
+    if (model == null || model.ProjectId <= 0)
+    {
+        return BadRequest(new { Status = 0, Message = "ProjectId is required." });
+    }
+
+    if (model.SiteSize <= 0)
+    {
+        return BadRequest(new { Status = 0, Message = "SiteSize must be greater than 0." });
+    }
+
+    try
+    {
+        int targetCompanyId = _userScope.GetTargetCompanyId(User, null);
+        var conn = db.Database.GetDbConnection();
+        var shouldClose = false;
+        try
+        {
+            if (conn.State != ConnectionState.Open)
+            {
+                await conn.OpenAsync();
+                shouldClose = true;
+            }
+
+            var projectColumns = await GetTableColumnSetAsync(conn, "tbl_project");
+            if (!projectColumns.Contains("sitesize"))
+            {
+                return BadRequest(new
+                {
+                    Status = 0,
+                    Message = "tbl_project.sitesize column is missing. Please run the sitesize SQL migration first."
+                });
+            }
+
+            await using var selectCmd = conn.CreateCommand();
+            selectCmd.CommandText = "SELECT id, project_name, company_id FROM tbl_project WHERE id = @projectId LIMIT 1;";
+            AddParam(selectCmd, "@projectId", model.ProjectId);
+
+            string? projectName = null;
+            int? projectCompanyId = null;
+            await using (var reader = await selectCmd.ExecuteReaderAsync())
+            {
+                if (!await reader.ReadAsync())
+                {
+                    return NotFound(new { Status = 0, Message = "Project not found." });
+                }
+
+                projectName = reader["project_name"] == DBNull.Value ? null : Convert.ToString(reader["project_name"]);
+                projectCompanyId = reader["company_id"] == DBNull.Value ? null : Convert.ToInt32(reader["company_id"]);
+            }
+
+            if (!_userScope.IsSuperAdmin(User) && projectCompanyId != targetCompanyId)
+            {
+                return Unauthorized(new { Status = 0, Message = "Unauthorized to update this project." });
+            }
+
+            await using var updateCmd = conn.CreateCommand();
+            updateCmd.CommandText = "UPDATE tbl_project SET sitesize = @siteSize WHERE id = @projectId;";
+            AddParam(updateCmd, "@siteSize", model.SiteSize);
+            AddParam(updateCmd, "@projectId", model.ProjectId);
+            await updateCmd.ExecuteNonQueryAsync();
+
+            await InvalidateProjectListCachesAsync();
+            await InvalidateMapViewCachesAsync();
+
+            return Ok(new
+            {
+                Status = 1,
+                Message = "Project site size updated successfully.",
+                Data = new
+                {
+                    id = model.ProjectId,
+                    project_name = projectName,
+                    sitesize = model.SiteSize,
+                }
+            });
+        }
+        finally
+        {
+            if (shouldClose && conn.State == ConnectionState.Open)
+                await conn.CloseAsync();
+        }
+    }
+    catch (Exception ex)
+    {
+        return StatusCode(500, new
+        {
+            Status = 0,
+            Message = "Error updating project site size.",
             Details = SafeException.Get(ex)
         });
     }
@@ -5976,6 +6079,45 @@ public async Task<IActionResult> GetLogsByDateRange(
             catch
             {
                 // Older deployments may not have log_grid; project creation should still succeed.
+            }
+            finally
+            {
+                if (shouldClose && conn.State == ConnectionState.Open)
+                    await conn.CloseAsync();
+            }
+        }
+
+        private async Task TryUpdateProjectSiteSizeAsync(int projectId, decimal siteSize)
+        {
+            if (projectId <= 0 || siteSize <= 0)
+                return;
+
+            var conn = db.Database.GetDbConnection();
+            var shouldClose = false;
+            try
+            {
+                if (conn.State != ConnectionState.Open)
+                {
+                    await conn.OpenAsync();
+                    shouldClose = true;
+                }
+
+                var projectColumns = await GetTableColumnSetAsync(conn, "tbl_project");
+                if (!projectColumns.Contains("sitesize"))
+                    return;
+
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = "UPDATE tbl_project SET sitesize = @siteSize WHERE id = @projectId;";
+                if (db.Database.CurrentTransaction != null)
+                    cmd.Transaction = db.Database.CurrentTransaction.GetDbTransaction();
+
+                AddParam(cmd, "@siteSize", siteSize);
+                AddParam(cmd, "@projectId", projectId);
+                await cmd.ExecuteNonQueryAsync();
+            }
+            catch
+            {
+                // Older deployments may not have sitesize yet; project creation should still succeed.
             }
             finally
             {
@@ -9864,6 +10006,7 @@ public async Task<IActionResult> CreateSimpleProject([FromBody] CreateProjectMod
         db.tbl_project.Add(newProject);
         await db.SaveChangesAsync();
         await TryUpdateProjectLogGridAsync(newProject.id, model.LogGrid ?? model.log_grid);
+        await TryUpdateProjectSiteSizeAsync(newProject.id, 1m);
         await InvalidateProjectListCachesAsync();
 
         response.Status = 1;
@@ -10761,6 +10904,9 @@ private async Task<List<object>> GetProjectsFromRawSqlAsync(
     var logGridSelect = projectColumns.Contains("log_grid")
         ? "p.log_grid"
         : "NULL AS log_grid";
+    var siteSizeSelect = projectColumns.Contains("sitesize")
+        ? "p.sitesize"
+        : "1.00 AS sitesize";
     var createdByUserFilter = projectColumns.Contains("created_by_user_id")
         ? "OR (@uid > 0 AND p.created_by_user_id = @uid)"
         : string.Empty;
@@ -10780,6 +10926,7 @@ private async Task<List<object>> GetProjectsFromRawSqlAsync(
             p.apps,
             p.grid_size,
             {logGridSelect},
+            {siteSizeSelect},
             p.created_on,
             p.Download_path,
             ST_AsText(p.polygon) AS project_polygon_wkt,
@@ -10838,6 +10985,7 @@ private async Task<List<object>> GetProjectsFromRawSqlAsync(
             apps = ReadDb("apps"),
             grid_size = ReadDb("grid_size"),
             log_grid = ReadDb("log_grid"),
+            sitesize = ReadDb("sitesize"),
             created_on = ReadDb("created_on"),
             Download_path = ReadDb("Download_path"),
             project_polygon_wkt = ReadDb("project_polygon_wkt"),
@@ -10866,6 +11014,9 @@ private async Task<List<object>> GetProjectsFallbackAsync(
     var logGridSelect = projectColumns.Contains("log_grid")
         ? "p.log_grid"
         : "NULL AS log_grid";
+    var siteSizeSelect = projectColumns.Contains("sitesize")
+        ? "p.sitesize"
+        : "1.00 AS sitesize";
     var createdByUserFilter = projectColumns.Contains("created_by_user_id")
         ? "OR (@uid > 0 AND p.created_by_user_id = @uid)"
         : string.Empty;
@@ -10885,6 +11036,7 @@ private async Task<List<object>> GetProjectsFallbackAsync(
             p.apps,
             p.grid_size,
             {logGridSelect},
+            {siteSizeSelect},
             p.created_on,
             p.Download_path
         FROM tbl_project p
@@ -10923,6 +11075,7 @@ private async Task<List<object>> GetProjectsFallbackAsync(
             apps = ReadDb("apps"),
             grid_size = ReadDb("grid_size"),
             log_grid = ReadDb("log_grid"),
+            sitesize = ReadDb("sitesize"),
             created_on = ReadDb("created_on"),
             Download_path = ReadDb("Download_path"),
             project_polygon_wkt = (object?)null,
