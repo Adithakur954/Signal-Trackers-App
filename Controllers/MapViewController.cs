@@ -3466,14 +3466,45 @@ private static string NormalizeNetworkLogTechnology(string? network, string? ban
     var networkText = (network ?? "").Trim();
     var combined = $"{networkText} {band ?? ""}".ToUpperInvariant();
     if (combined.Contains("WIFI") || combined.Contains("WI-FI")) return "WiFi";
-    if (combined.Contains("5G") || Regex.IsMatch(combined, @"(^|[^A-Z0-9])NR([^A-Z0-9]|$)") || Regex.IsMatch(combined, @"(^|[^A-Z0-9])N[0-9]{1,3}([^A-Z0-9]|$)"))
+    if (
+        combined.Contains("5G")
+        || combined.Contains("NR NSA")
+        || combined.Contains("NR SA")
+        || combined.Contains("NR-CA")
+        || combined.Contains("NR-DC")
+        || combined.Contains("VONR")
+        || combined.Contains("LTE ANCHOR")
+        || combined.Contains("LTE-ANCHOR")
+        || combined.Contains("LTE_ANCHOR")
+        || combined.Contains("NSA")
+        || combined.Contains("ENDC")
+        || combined.Contains("EN-DC")
+        || Regex.IsMatch(combined, @"(^|[^A-Z0-9])NR([^A-Z0-9]|$)")
+        || Regex.IsMatch(combined, @"(^|[^A-Z0-9])N[0-9]{1,3}([^A-Z0-9]|$)")
+    )
     {
-        if (combined.Contains("NSA") || combined.Contains("ENDC") || combined.Contains("EN-DC") || combined.Contains("LTE ANCHOR") || combined.Contains("LTE-ANCHOR") || combined.Contains("LTE_ANCHOR"))
-            return "5G NSA";
         return "5G";
     }
-    if (combined.Contains("4G") || combined.Contains("LTE")) return "4G";
-    if (combined.Contains("3G") || combined.Contains("WCDMA") || combined.Contains("UMTS") || combined.Contains("HSPA")) return "3G";
+    if (
+        combined.Contains("4G")
+        || combined.Contains("LTE")
+        || combined.Contains("LTE-A")
+        || combined.Contains("LTE A")
+        || combined.Contains("LTE-A PRO")
+        || combined.Contains("LTE A PRO")
+        || combined.Contains("LTE CA")
+        || combined.Contains("VOLTE")
+        || combined.Contains("NB-IOT")
+        || combined.Contains("LTE-M")
+    ) return "4G";
+    if (
+        combined.Contains("3G")
+        || combined.Contains("WCDMA")
+        || combined.Contains("UMTS")
+        || combined.Contains("HSPA")
+        || combined.Contains("HSPA+")
+        || combined.Contains("DC-HSPA+")
+    ) return "3G";
     if (combined.Contains("2G") || combined.Contains("GSM") || combined.Contains("EDGE") || combined.Contains("GPRS")) return "2G";
     return string.IsNullOrWhiteSpace(networkText) ? "Unknown" : networkText;
 }
@@ -4957,7 +4988,7 @@ public async Task<JsonResult> GetProviderWiseVolume([FromQuery] MapFilter filter
             await conn.OpenAsync();
 
         var cacheKey = BuildMapViewCacheKey(
-            "provider-wise-volume-v12",
+            "provider-wise-volume-v15",
             sessionIdsParam,
             filters?.StartDate,
             filters?.EndDate,
@@ -5036,39 +5067,39 @@ base_logs AS (
         COALESCE(NULLIF(LOWER(TRIM(l.m_alpha_long)), ''), sp.provider) AS provider,
         CASE
             WHEN (
-                    UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) LIKE '%5G%'
-                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) LIKE '%NRARFCN%'
-                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) LIKE '%MNR%'
-                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) LIKE '%NCI%'
-                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) REGEXP '(^|[^A-Z0-9])NR([^A-Z0-9]|$)'
-                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) REGEXP '(^|[^A-Z0-9])N[0-9]{{1,3}}([^A-Z0-9]|$)'
-                )
-              AND (
-                    UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%4G%'
-                 OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%LTE%'
-                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) LIKE '%LTE ANCHOR%'
-                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) LIKE '%LTE-ANCHOR%'
-                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) LIKE '%LTE_ANCHOR%'
-                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) LIKE '%ENDC%'
-                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) LIKE '%EN-DC%'
-                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) LIKE '%NSA%'
-                ) THEN '5G NSA'
-            WHEN (
-                    UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) LIKE '%5G%'
-                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) LIKE '%NRARFCN%'
-                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) LIKE '%MNR%'
-                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) LIKE '%NCI%'
-                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) REGEXP '(^|[^A-Z0-9])NR([^A-Z0-9]|$)'
-                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''), COALESCE(l.primary_cell_info_1, ''), COALESCE(l.all_neigbor_cell_info, ''))) REGEXP '(^|[^A-Z0-9])N[0-9]{{1,3}}([^A-Z0-9]|$)'
+                    UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''))) LIKE '%5G%'
+                 OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%NR NSA%'
+                 OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%NR SA%'
+                 OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%NR-CA%'
+                 OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%NR-DC%'
+                 OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%VONR%'
+                 OR UPPER(COALESCE(l.network, '')) LIKE '%LTE ANCHOR%'
+                 OR UPPER(COALESCE(l.network, '')) LIKE '%LTE-ANCHOR%'
+                 OR UPPER(COALESCE(l.network, '')) LIKE '%LTE_ANCHOR%'
+                 OR UPPER(COALESCE(l.network, '')) LIKE '%ENDC%'
+                 OR UPPER(COALESCE(l.network, '')) LIKE '%EN-DC%'
+                 OR UPPER(COALESCE(l.network, '')) LIKE '%NSA%'
+                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''))) LIKE '%NRARFCN%'
+                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''))) LIKE '%MNR%'
+                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''))) LIKE '%NCI%'
+                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''))) REGEXP '(^|[^A-Z0-9])NR([^A-Z0-9]|$)'
+                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''))) REGEXP '(^|[^A-Z0-9])N[0-9]{{1,3}}([^A-Z0-9]|$)'
                  OR UPPER(TRIM(COALESCE(l.network, ''))) = 'SA'
                  OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '% SA%'
-                ) THEN '5G SA'
+                ) THEN '5G'
             WHEN UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%4G%'
-              OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%LTE%' THEN '4G'
+              OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%LTE%'
+              OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%LTE-A%'
+              OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%LTE A%'
+              OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%LTE CA%'
+              OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%VOLTE%'
+              OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%NB-IOT%'
+              OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%LTE-M%' THEN '4G'
             WHEN UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%3G%'
               OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%WCDMA%'
               OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%UMTS%'
-              OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%HSPA%' THEN '3G'
+              OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%HSPA%'
+              OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%DC-HSPA+%' THEN '3G'
             WHEN UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%2G%'
               OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%GSM%'
               OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%EDGE%'
@@ -5109,10 +5140,18 @@ ordered_logs AS (
         total_tx_kb,
         dl_tpt_mbps,
         ul_tpt_mbps,
+        LAG(provider) OVER (
+            PARTITION BY session_id
+            ORDER BY timestamp
+        ) AS prev_provider,
+        LAG(tech) OVER (
+            PARTITION BY session_id
+            ORDER BY timestamp
+        ) AS prev_tech,
         UNIX_TIMESTAMP(timestamp)
         - UNIX_TIMESTAMP(
             LAG(timestamp) OVER (
-                PARTITION BY session_id, provider, tech
+                PARTITION BY session_id
                 ORDER BY timestamp
             )
         ) AS gap_sec
@@ -5122,7 +5161,44 @@ filtered_logs AS (
     SELECT *
     FROM ordered_logs
     WHERE tech <> 'Unknown'
-      AND (gap_sec IS NULL OR gap_sec <= 120)
+),
+grouped_logs AS (
+    SELECT
+        filtered_logs.*,
+        SUM(
+            CASE
+                WHEN prev_tech IS NULL THEN 1
+                WHEN prev_provider <> provider THEN 1
+                WHEN prev_tech <> tech THEN 1
+                WHEN gap_sec IS NOT NULL AND gap_sec > 120 THEN 1
+                ELSE 0
+            END
+        ) OVER (
+            PARTITION BY session_id
+            ORDER BY timestamp
+        ) AS grp
+    FROM filtered_logs
+),
+duration_intervals AS (
+    SELECT
+        session_id,
+        provider,
+        tech,
+        grp,
+        MIN(timestamp) AS start_time,
+        MAX(timestamp) AS end_time,
+        TIMESTAMPDIFF(SECOND, MIN(timestamp), MAX(timestamp)) AS duration_sec
+    FROM grouped_logs
+    GROUP BY session_id, provider, tech, grp
+),
+duration_summary AS (
+    SELECT
+        session_id,
+        provider,
+        tech,
+        SUM(duration_sec) AS duration_sec
+    FROM duration_intervals
+    GROUP BY session_id, provider, tech
 ),
 ranked_logs AS (
     SELECT
@@ -5145,49 +5221,53 @@ ranked_logs AS (
 )
 
 SELECT
-    session_id,
-    provider,
-    tech,
+    rl.session_id,
+    rl.provider,
+    rl.tech,
     COUNT(*) AS sample_count,
 
 	    -- Volume in GB
-	    ROUND(GREATEST(MAX(total_rx_kb) - MIN(total_rx_kb), 0) / 1024 / 1024, 2) AS dl_gb,
-	    ROUND(GREATEST(MAX(total_tx_kb) - MIN(total_tx_kb), 0) / 1024 / 1024, 2) AS ul_gb,
+	    ROUND(GREATEST(MAX(rl.total_rx_kb) - MIN(rl.total_rx_kb), 0) / 1024 / 1024, 2) AS dl_gb,
+	    ROUND(GREATEST(MAX(rl.total_tx_kb) - MIN(rl.total_tx_kb), 0) / 1024 / 1024, 2) AS ul_gb,
 
     -- Duration (INT64)
-    UNIX_TIMESTAMP(MAX(timestamp)) - UNIX_TIMESTAMP(MIN(timestamp)) AS duration_sec,
+    COALESCE(MAX(ds.duration_sec), 0) AS duration_sec,
 
     -- Avg throughput comes from logged dl_tpt / ul_tpt samples, grouped by technology.
-    ROUND(MIN(NULLIF(dl_tpt_mbps, 0)), 3) AS min_dl_mbps,
-    ROUND(MAX(NULLIF(dl_tpt_mbps, 0)), 3) AS max_dl_mbps,
-    ROUND(AVG(NULLIF(dl_tpt_mbps, 0)), 3) AS avg_dl_mbps,
-    ROUND(STDDEV_SAMP(NULLIF(dl_tpt_mbps, 0)), 3) AS stddev_dl_mbps,
+    ROUND(MIN(NULLIF(rl.dl_tpt_mbps, 0)), 3) AS min_dl_mbps,
+    ROUND(MAX(NULLIF(rl.dl_tpt_mbps, 0)), 3) AS max_dl_mbps,
+    ROUND(AVG(NULLIF(rl.dl_tpt_mbps, 0)), 3) AS avg_dl_mbps,
+    ROUND(STDDEV_SAMP(NULLIF(rl.dl_tpt_mbps, 0)), 3) AS stddev_dl_mbps,
     ROUND(AVG(
         CASE
-            WHEN dl_cnt > 0
-             AND dl_rn IN (FLOOR((dl_cnt + 1) / 2), FLOOR((dl_cnt + 2) / 2))
-            THEN NULLIF(dl_tpt_mbps, 0)
+            WHEN rl.dl_cnt > 0
+             AND rl.dl_rn IN (FLOOR((rl.dl_cnt + 1) / 2), FLOOR((rl.dl_cnt + 2) / 2))
+            THEN NULLIF(rl.dl_tpt_mbps, 0)
             ELSE NULL
         END
     ), 3) AS median_dl_mbps,
-    COUNT(DISTINCT NULLIF(dl_tpt_mbps, 0)) AS distinct_dl_count,
+    COUNT(DISTINCT NULLIF(rl.dl_tpt_mbps, 0)) AS distinct_dl_count,
 
-    ROUND(MIN(NULLIF(ul_tpt_mbps, 0)), 3) AS min_ul_mbps,
-    ROUND(MAX(NULLIF(ul_tpt_mbps, 0)), 3) AS max_ul_mbps,
-    ROUND(AVG(NULLIF(ul_tpt_mbps, 0)), 3) AS avg_ul_mbps,
-    ROUND(STDDEV_SAMP(NULLIF(ul_tpt_mbps, 0)), 3) AS stddev_ul_mbps,
+    ROUND(MIN(NULLIF(rl.ul_tpt_mbps, 0)), 3) AS min_ul_mbps,
+    ROUND(MAX(NULLIF(rl.ul_tpt_mbps, 0)), 3) AS max_ul_mbps,
+    ROUND(AVG(NULLIF(rl.ul_tpt_mbps, 0)), 3) AS avg_ul_mbps,
+    ROUND(STDDEV_SAMP(NULLIF(rl.ul_tpt_mbps, 0)), 3) AS stddev_ul_mbps,
     ROUND(AVG(
         CASE
-            WHEN ul_cnt > 0
-             AND ul_rn IN (FLOOR((ul_cnt + 1) / 2), FLOOR((ul_cnt + 2) / 2))
-            THEN NULLIF(ul_tpt_mbps, 0)
+            WHEN rl.ul_cnt > 0
+             AND rl.ul_rn IN (FLOOR((rl.ul_cnt + 1) / 2), FLOOR((rl.ul_cnt + 2) / 2))
+            THEN NULLIF(rl.ul_tpt_mbps, 0)
             ELSE NULL
         END
     ), 3) AS median_ul_mbps,
-    COUNT(DISTINCT NULLIF(ul_tpt_mbps, 0)) AS distinct_ul_count
+    COUNT(DISTINCT NULLIF(rl.ul_tpt_mbps, 0)) AS distinct_ul_count
 
-FROM ranked_logs
-GROUP BY session_id, provider, tech;
+FROM ranked_logs rl
+LEFT JOIN duration_summary ds
+    ON ds.session_id = rl.session_id
+   AND ds.provider = rl.provider
+   AND ds.tech = rl.tech
+GROUP BY rl.session_id, rl.provider, rl.tech;
 ";
 
         var summary = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
@@ -7309,6 +7389,11 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             ["site_id"] = "site",
             ["siteId"] = "site",
             ["site_name"] = "site_name",
+            ["node_id"] = "node_id",
+            ["nodeId"] = "node_id",
+            ["node_b_id"] = "node_id",
+            ["nodeb_id"] = "node_id",
+            ["nodebId"] = "node_id",
             ["sector"] = "sector",
             ["sector_id"] = "sector",
             ["sectorId"] = "sector",
@@ -8964,7 +9049,16 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                         if (key.Equals("sector_selector", StringComparison.OrdinalIgnoreCase)) continue;
 
                         string? dbColumn = null;
-                        if (SitePredictionColumnMap.TryGetValue(key, out var mappedColumn))
+                        if (key.Equals("node_id", StringComparison.OrdinalIgnoreCase) ||
+                            key.Equals("nodeId", StringComparison.OrdinalIgnoreCase) ||
+                            key.Equals("node_b_id", StringComparison.OrdinalIgnoreCase) ||
+                            key.Equals("nodeb_id", StringComparison.OrdinalIgnoreCase) ||
+                            key.Equals("nodebId", StringComparison.OrdinalIgnoreCase))
+                        {
+                            dbColumn = new[] { "node_id", "nodeb_id", "node_b_id" }
+                                .FirstOrDefault(candidate => optimizedColumns.Contains(candidate));
+                        }
+                        else if (SitePredictionColumnMap.TryGetValue(key, out var mappedColumn))
                         {
                             dbColumn = mappedColumn;
                         }
@@ -10043,15 +10137,28 @@ public async Task<IActionResult> AddSitePrediction([FromBody] AddSitePredictionM
         if (conn.State != System.Data.ConnectionState.Open)
             await conn.OpenAsync();
 
+        var nodeId = string.IsNullOrWhiteSpace(model.NodeId)
+            ? string.IsNullOrWhiteSpace(model.NodeIdSnake)
+                ? model.NodeBId
+                : model.NodeIdSnake
+            : model.NodeId;
+        nodeId = string.IsNullOrWhiteSpace(nodeId) ? null : nodeId.Trim();
+        var nodeColumn = nodeId == null
+            ? null
+            : await GetFirstExistingColumnAsync(conn, "site_prediction", "node_id", "nodeb_id", "node_b_id");
+
+        var nodeInsertColumn = string.IsNullOrWhiteSpace(nodeColumn) ? string.Empty : $", `{nodeColumn}`";
+        var nodeInsertValue = string.IsNullOrWhiteSpace(nodeColumn) ? string.Empty : ", @nodeId";
+
         // 1. ADDED missing columns: cluster, earfcn
-        string sql = @"
+        string sql = $@"
         INSERT INTO site_prediction (
             tbl_project_id, site, cluster, sector, cell_id,
             latitude, longitude, pci, azimuth, band, earfcn,
-            Technology, height, m_tilt, e_tilt
+            Technology, height, m_tilt, e_tilt{nodeInsertColumn}
         ) VALUES (
             @pid, @site, @cluster, @sec, @cid, @lat, @lon,
-            @pci, @azi, @band, @earfcn, @tech, @h, @mt, @et
+            @pci, @azi, @band, @earfcn, @tech, @h, @mt, @et{nodeInsertValue}
         );";
 
         foreach (var tech in model.Technologies)
@@ -10096,6 +10203,10 @@ public async Task<IActionResult> AddSitePrediction([FromBody] AddSitePredictionM
                     AddParam(cmd, "@h", height ?? (object)DBNull.Value);
                     AddParam(cmd, "@mt", mTilt ?? (object)DBNull.Value);
                     AddParam(cmd, "@et", eTilt ?? (object)DBNull.Value);
+                    if (!string.IsNullOrWhiteSpace(nodeColumn))
+                    {
+                        AddParam(cmd, "@nodeId", nodeId);
+                    }
 
                     await cmd.ExecuteNonQueryAsync();
                 }

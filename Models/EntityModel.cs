@@ -97,6 +97,15 @@ public class AddSitePredictionModel
     [JsonPropertyName("site")]
     public string? Site { get; set; }
 
+    [JsonPropertyName("nodeId")]
+    public string? NodeId { get; set; }
+
+    [JsonPropertyName("node_id")]
+    public string? NodeIdSnake { get; set; }
+
+    [JsonPropertyName("nodeb_id")]
+    public string? NodeBId { get; set; }
+
     [JsonPropertyName("cluster")]
     public string? Cluster { get; set; }
 
@@ -1297,5 +1306,4 @@ public class LogFilterModel
 
     
 }
-
 
