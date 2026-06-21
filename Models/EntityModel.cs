@@ -109,6 +109,18 @@ public class AddSitePredictionModel
     [JsonPropertyName("cluster")]
     public string? Cluster { get; set; }
 
+    [JsonPropertyName("provider")]
+    public string? Provider { get; set; }
+
+    [JsonPropertyName("operator")]
+    public string? Operator { get; set; }
+
+    [JsonPropertyName("operatorName")]
+    public string? OperatorName { get; set; }
+
+    [JsonPropertyName("operator_name")]
+    public string? OperatorNameSnake { get; set; }
+
     [JsonPropertyName("bands")]
     public List<string> Bands { get; set; } = new();
 

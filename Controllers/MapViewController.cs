@@ -2019,6 +2019,147 @@ public class AvailablePolygonsResponse
             return candidateColumns.FirstOrDefault(existingColumns.Contains);
         }
 
+        private sealed class ExistingColumnInfo
+        {
+            public string Name { get; init; } = string.Empty;
+            public string DataType { get; init; } = string.Empty;
+            public string ColumnType { get; init; } = string.Empty;
+        }
+
+        private static async Task<ExistingColumnInfo?> GetFirstExistingColumnInfoAsync(DbConnection conn, string tableName, params string[] candidateColumns)
+        {
+            if (candidateColumns.Length == 0)
+            {
+                return null;
+            }
+
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = $@"
+                SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = @tableName
+                  AND COLUMN_NAME IN ({string.Join(", ", candidateColumns.Select((_, i) => $"@column{i}"))});";
+
+            AddParam(cmd, "@tableName", tableName);
+            for (var i = 0; i < candidateColumns.Length; i++)
+            {
+                AddParam(cmd, $"@column{i}", candidateColumns[i]);
+            }
+
+            var existingColumns = new Dictionary<string, ExistingColumnInfo>(StringComparer.OrdinalIgnoreCase);
+            await using var reader = await cmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                if (reader.IsDBNull(0))
+                {
+                    continue;
+                }
+
+                var columnName = reader.GetString(0);
+                existingColumns[columnName] = new ExistingColumnInfo
+                {
+                    Name = columnName,
+                    DataType = reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
+                    ColumnType = reader.IsDBNull(2) ? string.Empty : reader.GetString(2),
+                };
+            }
+
+            foreach (var candidate in candidateColumns)
+            {
+                if (existingColumns.TryGetValue(candidate, out var match))
+                {
+                    return match;
+                }
+            }
+
+            return null;
+        }
+
+        private static bool IsTextColumnType(string? dataType)
+        {
+            var normalized = string.IsNullOrWhiteSpace(dataType) ? string.Empty : dataType.Trim().ToLowerInvariant();
+            return normalized is "char" or "varchar" or "text" or "tinytext" or "mediumtext" or "longtext";
+        }
+
+        private static bool IsNumericColumnType(string? dataType)
+        {
+            var normalized = string.IsNullOrWhiteSpace(dataType) ? string.Empty : dataType.Trim().ToLowerInvariant();
+            return normalized is
+                "tinyint" or
+                "smallint" or
+                "mediumint" or
+                "int" or
+                "integer" or
+                "bigint" or
+                "decimal" or
+                "numeric" or
+                "float" or
+                "double" or
+                "real";
+        }
+
+        private async Task EnsureSitePredictionTextColumnAsync(
+            DbConnection conn,
+            string tableName,
+            string columnName,
+            string varcharDefinition = "VARCHAR(255) NULL")
+        {
+            await using var inspectCmd = conn.CreateCommand();
+            inspectCmd.CommandText = @"
+                SELECT DATA_TYPE
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = @tableName
+                  AND COLUMN_NAME = @columnName
+                LIMIT 1;";
+            AddParam(inspectCmd, "@tableName", tableName);
+            AddParam(inspectCmd, "@columnName", columnName);
+
+            var dataTypeObj = await inspectCmd.ExecuteScalarAsync();
+            var dataType = dataTypeObj == null || dataTypeObj == DBNull.Value
+                ? null
+                : Convert.ToString(dataTypeObj)?.Trim();
+
+            if (string.IsNullOrWhiteSpace(dataType) || IsTextColumnType(dataType))
+            {
+                return;
+            }
+
+            await using var alterCmd = conn.CreateCommand();
+            alterCmd.CommandText = $@"ALTER TABLE `{tableName}` MODIFY COLUMN `{columnName}` {varcharDefinition};";
+            await alterCmd.ExecuteNonQueryAsync();
+        }
+
+        private async Task EnsureSitePredictionNameColumnsAsync(DbConnection conn)
+        {
+            await EnsureSitePredictionTextColumnAsync(conn, "site_prediction", "site_name");
+            await EnsureSitePredictionTextColumnAsync(conn, "site_prediction_optimized", "site_name");
+        }
+
+        private static bool TryParseNodeIdForNumericColumn(string? raw, out double parsedValue)
+        {
+            parsedValue = 0;
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                return false;
+            }
+
+            var trimmed = raw.Trim();
+            if (double.TryParse(trimmed, NumberStyles.Any, CultureInfo.InvariantCulture, out parsedValue))
+            {
+                return true;
+            }
+
+            var match = Regex.Match(trimmed, @"^[A-Za-z_\-\s]*?(\d+(?:\.\d+)?)$");
+            if (!match.Success)
+            {
+                return false;
+            }
+
+            return double.TryParse(match.Groups[1].Value, NumberStyles.Any, CultureInfo.InvariantCulture, out parsedValue);
+        }
+
         private static double? TryParseNullableDouble(string? raw)
         {
             if (string.IsNullOrWhiteSpace(raw))
@@ -7558,20 +7699,53 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             ["m_tilt"] = "m_tilt",
             ["e_tilt"] = "e_tilt",
             ["maximum_transmission_power_of_resource"] = "tx_power",
+            ["maximumTransmissionPowerOfResource"] = "tx_power",
+            ["tx_power"] = "tx_power",
+            ["txPower"] = "tx_power",
             ["real_transmit_power_of_resource"] = "real_transmit_power_of_resource",
+            ["realTransmitPowerOfResource"] = "real_transmit_power_of_resource",
             ["reference_signal_power"] = "reference_signal_power",
+            ["referenceSignalPower"] = "reference_signal_power",
+            ["rs_power"] = "reference_signal_power",
+            ["rsPower"] = "reference_signal_power",
             ["cellsize"] = "cellsize",
+            ["cell_size"] = "cellsize",
+            ["cellSize"] = "cellsize",
             ["frequency"] = "frequency",
             ["band"] = "band",
             ["uplink_center_frequency"] = "uplink_center_frequency",
+            ["uplinkCenterFrequency"] = "uplink_center_frequency",
+            ["uplink_frequency"] = "uplink_center_frequency",
+            ["uplinkFrequency"] = "uplink_center_frequency",
             ["downlink_frequency"] = "downlink_frequency",
+            ["downlinkFrequency"] = "downlink_frequency",
+            ["download_frequency"] = "downlink_frequency",
+            ["downloadFrequency"] = "downlink_frequency",
             ["earfcn"] = "earfcn",
             ["cluster"] = "cluster",
+            ["provider"] = "cluster",
+            ["operator_name"] = "cluster",
+            ["operatorName"] = "cluster",
             ["network"] = "cluster",
             ["operator"] = "cluster",
             ["Technology"] = "Technology",
             ["technology"] = "Technology"
         };
+
+        private static string? ResolveSitePredictionProviderInput(
+            string? provider,
+            string? operatorName,
+            string? operatorNameSnake,
+            string? operatorAlias,
+            string? cluster)
+        {
+            foreach (var candidate in new[] { provider, operatorName, operatorNameSnake, operatorAlias, cluster })
+            {
+                if (!string.IsNullOrWhiteSpace(candidate))
+                    return candidate.Trim();
+            }
+            return null;
+        }
 
         private static string BuildSitePredictionFilterClause(
             int? site,
@@ -8269,12 +8443,16 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             return string.IsNullOrWhiteSpace(raw) ? DBNull.Value : raw.Trim();
         }
 
+        private static object NormalizeSitePredictionBandValue(Newtonsoft.Json.Linq.JToken val) =>
+            NormalizeSitePredictionValue(val);
+
         [HttpGet, Route("GetUpdatedSitePrediction")]
         public Task<IActionResult> GetUpdatedSitePrediction(
             [FromQuery] long projectId,
             [FromQuery] int? site = null,
             [FromQuery] string? cell_id = null,
             [FromQuery] string? cluster = null,
+            [FromQuery] string? provider = null,
             [FromQuery] string? technology = null,
             [FromQuery] int? band = null,
             [FromQuery] int? pci = null,
@@ -8282,7 +8460,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             [FromQuery] int offset = 0,
             [FromQuery] int? scenario = null)
         {
-            return GetSitePrediction(projectId, site, cell_id, cluster, technology, band, pci, limit, offset, "combined", 0, scenario);
+            return GetSitePrediction(projectId, site, cell_id, cluster, provider, technology, band, pci, limit, offset, "combined", 0, scenario);
         }
 
         [HttpGet, Route("GetSitePrediction")]
@@ -8291,6 +8469,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             [FromQuery] int? site = null,
             [FromQuery] string? cell_id = null,
             [FromQuery] string? cluster = null,
+            [FromQuery] string? provider = null,
             [FromQuery] string? technology = null,
             [FromQuery] int? band = null,
             [FromQuery] int? pci = null,
@@ -8304,6 +8483,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             if (projectId <= 0)
                 return BadRequest(new { Status = 0, Message = "projectId is required" });
 
+            var effectiveProviderFilter = string.IsNullOrWhiteSpace(provider) ? cluster : provider;
             var requestedVersion = (version ?? "combined").Trim().ToLowerInvariant();
             if (requestedVersion == "updated")
             {
@@ -8323,6 +8503,21 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             {
                 await EnsureSitePredictionOptimizedTableAsync(conn);
             }
+
+            var sourceColumns = await GetTableColumnSetAsync(conn, "site_prediction");
+            var optimizedColumns = requestedVersion == "combined"
+                ? await GetTableColumnSetAsync(conn, "site_prediction_optimized")
+                : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var sourceNodeColumn = new[] { "node_id", "nodeb_id", "node_b_id" }
+                .FirstOrDefault(candidate => sourceColumns.Contains(candidate));
+            var optimizedNodeColumn = new[] { "node_id", "nodeb_id", "node_b_id" }
+                .FirstOrDefault(candidate => optimizedColumns.Contains(candidate));
+            var combinedNodeExpr = !string.IsNullOrWhiteSpace(sourceNodeColumn) || !string.IsNullOrWhiteSpace(optimizedNodeColumn)
+                ? $"CONVERT(COALESCE({(string.IsNullOrWhiteSpace(optimizedNodeColumn) ? "NULL" : $"spo.{optimizedNodeColumn}")}, {(string.IsNullOrWhiteSpace(sourceNodeColumn) ? "NULL" : $"sp.{sourceNodeColumn}")}) USING utf8mb4) COLLATE utf8mb4_unicode_ci"
+                : "NULL";
+            var sourceNodeExpr = !string.IsNullOrWhiteSpace(sourceNodeColumn)
+                ? $"CONVERT(sp.{sourceNodeColumn} USING utf8mb4) COLLATE utf8mb4_unicode_ci"
+                : "NULL";
 
             if (scenario.HasValue && scenario.Value > 6)
             {
@@ -8352,7 +8547,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 ? BuildSitePredictionDualFilterClause(
                     site,
                     cell_id,
-                    cluster,
+                    effectiveProviderFilter,
                     technology,
                     band,
                     pci,
@@ -8373,7 +8568,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 : BuildSitePredictionFilterClause(
                     site,
                     cell_id,
-                    cluster,
+                    effectiveProviderFilter,
                     technology,
                     band,
                     pci,
@@ -8384,11 +8579,6 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                     "sp.Technology",
                     "sp.band",
                     "sp.pci");
-
-            var sourceColumns = await GetTableColumnSetAsync(conn, "site_prediction");
-            var optimizedColumns = requestedVersion == "combined"
-                ? await GetTableColumnSetAsync(conn, "site_prediction_optimized")
-                : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             int? activeScenario = null;
             var hasScenarioData = false;
@@ -8483,16 +8673,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
 
             cmd.CommandText = requestedVersion == "combined"
                 ? $@"
-                WITH optimized_sites AS (
-                    SELECT DISTINCT
-                        CONVERT(spo.site USING utf8mb4) COLLATE utf8mb4_unicode_ci AS site
-                    FROM site_prediction_optimized spo
-                    WHERE spo.tbl_project_id = @pid
-                      {scenarioFilterClause}
-                      AND spo.site IS NOT NULL
-                      AND TRIM(CONVERT(spo.site USING utf8mb4)) <> ''
-                ),
-                optimized_rows AS (
+                WITH optimized_rows AS (
                     SELECT
                         original_id,
                         optimized_id,
@@ -8505,6 +8686,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                         scenario,
                         site,
                         site_name,
+                        node_id,
                         sector,
                         cell_id,
                         sec_id,
@@ -8546,6 +8728,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                         {scenarioSelectExpr}
                         CONVERT(COALESCE(spo.site, sp.site) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS site,
                         CONVERT(COALESCE(spo.site_name, sp.site_name) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS site_name,
+                        {combinedNodeExpr} AS node_id,
                         CONVERT(COALESCE(spo.sector, sp.sector) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS sector,
                         CONVERT(COALESCE(spo.cell_id, sp.cell_id) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS cell_id,
                         CONVERT(COALESCE(spo.sec_id, sp.sec_id) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS sec_id,
@@ -8589,6 +8772,27 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                     {scenarioFilterClause}
                     {filterClause}
                     {polygonFilterCombined}
+                      AND NOT (
+                          (
+                              spo.sector IS NULL
+                              OR TRIM(CONVERT(spo.sector USING utf8mb4)) = ''
+                          )
+                          AND COALESCE(spo.cell_id, sp.cell_id) IS NOT NULL
+                          AND EXISTS (
+                              SELECT 1
+                              FROM site_prediction_optimized spo2
+                              LEFT JOIN site_prediction sp2 ON sp2.id = spo2.site_prediction_id
+                              WHERE COALESCE(spo2.tbl_project_id, sp2.tbl_project_id) = COALESCE(spo.tbl_project_id, sp.tbl_project_id)
+                                AND spo2.scenario = spo.scenario
+                                AND CONVERT(COALESCE(spo2.site, sp2.site, '') USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+                                    CONVERT(COALESCE(spo.site, sp.site, '') USING utf8mb4) COLLATE utf8mb4_unicode_ci
+                                AND CONVERT(COALESCE(spo2.cell_id, sp2.cell_id, '') USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+                                    CONVERT(COALESCE(spo.cell_id, sp.cell_id, '') USING utf8mb4) COLLATE utf8mb4_unicode_ci
+                                AND spo2.id <> spo.id
+                                AND spo2.sector IS NOT NULL
+                                AND TRIM(CONVERT(spo2.sector USING utf8mb4)) <> ''
+                          )
+                      )
                     ) ranked_optimized
                     WHERE rn = 1
                 ),
@@ -8605,6 +8809,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                         NULL AS scenario,
                         CONVERT(sp.site USING utf8mb4) COLLATE utf8mb4_unicode_ci AS site,
                         CONVERT(sp.site_name USING utf8mb4) COLLATE utf8mb4_unicode_ci AS site_name,
+                        {sourceNodeExpr} AS node_id,
                         CONVERT(sp.sector USING utf8mb4) COLLATE utf8mb4_unicode_ci AS sector,
                         CONVERT(sp.cell_id USING utf8mb4) COLLATE utf8mb4_unicode_ci AS cell_id,
                         CONVERT(sp.sec_id USING utf8mb4) COLLATE utf8mb4_unicode_ci AS sec_id,
@@ -8641,8 +8846,12 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                     {polygonFilterOriginal}
                       AND NOT EXISTS (
                           SELECT 1
-                          FROM optimized_sites os
-                          WHERE os.site = CONVERT(sp.site USING utf8mb4) COLLATE utf8mb4_unicode_ci
+                          FROM optimized_rows `orw`
+                          WHERE
+                              CONVERT(COALESCE(`orw`.site, '') USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+                                  CONVERT(COALESCE(sp.site, '') USING utf8mb4) COLLATE utf8mb4_unicode_ci
+                              AND CONVERT(COALESCE(`orw`.sector, '') USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+                                  CONVERT(COALESCE(sp.sector, '') USING utf8mb4) COLLATE utf8mb4_unicode_ci
                       )
                 )
                 SELECT
@@ -8666,6 +8875,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                     NULL AS scenario,
                     sp.site,
                     sp.site_name,
+                    {sourceNodeExpr} AS node_id,
                     sp.sector,
                     sp.cell_id,
                     sp.sec_id,
@@ -8706,7 +8916,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             {
                 Add(cmd, "@scenario", activeScenario.Value);
             }
-            AddSitePredictionFilterParameters(cmd, site, cell_id, cluster, technology, band, pci);
+            AddSitePredictionFilterParameters(cmd, site, cell_id, effectiveProviderFilter, technology, band, pci);
             AddPolygonIdsParameters(cmd, polygonIds);
 
             var list = new List<Dictionary<string, object?>>();
@@ -8796,6 +9006,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 projectId = ReadInt(row, "tbl_project_id"),
                 site = ReadString(row, "site"),
                 siteName = ReadString(row, "site_name"),
+                nodeId = ReadString(row, "node_id", "nodeb_id", "node_b_id"),
                 sector = ReadString(row, "sector"),
                 secId = ReadString(row, "sec_id"),
                 cellId = ReadString(row, "cell_id"),
@@ -8811,8 +9022,13 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 pci = ReadInt(row, "pci"),
                 tac = ReadString(row, "tac"),
                 technology = ReadString(row, "Technology", "technology"),
-                cluster = ReadString(row, "cluster"),
                 provider = ReadString(row, "provider", "operator_name", "project_provider", "cluster"),
+                operatorName = ReadString(row, "operator_name", "provider", "project_provider", "cluster"),
+                cellsize = ReadString(row, "cellsize", "cell_size", "cellSize"),
+                frequency = ReadString(row, "frequency"),
+                uplink_center_frequency = ReadString(row, "uplink_center_frequency", "uplink_frequency", "uplinkCenterFrequency", "uplinkFrequency"),
+                downlink_frequency = ReadString(row, "downlink_frequency", "download_frequency", "downlinkFrequency", "downloadFrequency"),
+                real_transmit_power_of_resource = ReadDouble(row, "real_transmit_power_of_resource", "realTransmitPowerOfResource"),
                 txPower = ReadDouble(row, "maximum_transmission_power_of_resource", "tx_power"),
                 rsPower = ReadDouble(row, "reference_signal_power")
             };
@@ -9026,6 +9242,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 if (conn.State != System.Data.ConnectionState.Open)
                     await conn.OpenAsync();
 
+                await EnsureSitePredictionNameColumnsAsync(conn);
                 await EnsureSitePredictionOptimizedTableAsync(conn);
                 var sourceColumns = await GetTableColumnSetAsync(conn, "site_prediction");
                 var optimizedColumns = await GetTableColumnSetAsync(conn, "site_prediction_optimized");
@@ -9218,7 +9435,9 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                             if (!seenDbColumns.Add(dbColumn)) continue;
                             string paramName = "@" + key + "_" + lookupId;
                             updates.Add($"spo.`{dbColumn}` = {paramName}");
-                            parameters[paramName] = NormalizeSitePredictionValue(prop.Value);
+                            parameters[paramName] = dbColumn.Equals("band", StringComparison.OrdinalIgnoreCase)
+                                ? NormalizeSitePredictionBandValue(prop.Value)
+                                : NormalizeSitePredictionValue(prop.Value);
                         }
                     }
 
@@ -9479,6 +9698,9 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 {
                     Status = 1,
                     Message = $"Successfully updated {totalUpdated} prediction(s)",
+                    SavedTable = "site_prediction_optimized",
+                    BaseTable = "site_prediction",
+                    BaseTableUpdated = false,
                     Scenario = scenario,
                     ScenarioName = $"Scenario {scenario}",
                     RowsAffected = totalUpdated,
@@ -10286,9 +10508,37 @@ public async Task<IActionResult> AddSitePrediction([FromBody] AddSitePredictionM
                 : model.NodeIdSnake
             : model.NodeId;
         nodeId = string.IsNullOrWhiteSpace(nodeId) ? null : nodeId.Trim();
-        var nodeColumn = nodeId == null
+        var providerValue = ResolveSitePredictionProviderInput(
+            model.Provider,
+            model.OperatorName,
+            model.OperatorNameSnake,
+            model.Operator,
+            model.Cluster);
+        var nodeColumnInfo = nodeId == null
             ? null
-            : await GetFirstExistingColumnAsync(conn, "site_prediction", "node_id", "nodeb_id", "node_b_id");
+            : await GetFirstExistingColumnInfoAsync(conn, "site_prediction", "node_id", "nodeb_id", "node_b_id");
+
+        object? nodeInsertParamValue = null;
+        string? nodeColumn = null;
+        if (nodeColumnInfo != null)
+        {
+            if (IsTextColumnType(nodeColumnInfo.DataType))
+            {
+                nodeColumn = nodeColumnInfo.Name;
+                nodeInsertParamValue = nodeId;
+            }
+            else if (IsNumericColumnType(nodeColumnInfo.DataType))
+            {
+                if (!TryParseNodeIdForNumericColumn(nodeId, out var parsedNodeId))
+                {
+                    return BadRequest(
+                        $"Node B ID '{nodeId}' must be numeric because site_prediction.{nodeColumnInfo.Name} is stored as {nodeColumnInfo.ColumnType}.");
+                }
+
+                nodeColumn = nodeColumnInfo.Name;
+                nodeInsertParamValue = parsedNodeId;
+            }
+        }
 
         var nodeInsertColumn = string.IsNullOrWhiteSpace(nodeColumn) ? string.Empty : $", `{nodeColumn}`";
         var nodeInsertValue = string.IsNullOrWhiteSpace(nodeColumn) ? string.Empty : ", @nodeId";
@@ -10331,7 +10581,7 @@ public async Task<IActionResult> AddSitePrediction([FromBody] AddSitePredictionM
 
                     AddParam(cmd, "@pid", model.ProjectId);
                     AddParam(cmd, "@site", model.Site);
-                    AddParam(cmd, "@cluster", string.IsNullOrWhiteSpace(model.Cluster) ? DBNull.Value : model.Cluster);
+                    AddParam(cmd, "@cluster", string.IsNullOrWhiteSpace(providerValue) ? DBNull.Value : providerValue);
                     AddParam(cmd, "@sec", sector);
                     AddParam(cmd, "@cid", pciValue);
                     AddParam(cmd, "@lat", model.Latitude);
@@ -10346,9 +10596,9 @@ public async Task<IActionResult> AddSitePrediction([FromBody] AddSitePredictionM
                     AddParam(cmd, "@h", height ?? (object)DBNull.Value);
                     AddParam(cmd, "@mt", mTilt ?? (object)DBNull.Value);
                     AddParam(cmd, "@et", eTilt ?? (object)DBNull.Value);
-                    if (!string.IsNullOrWhiteSpace(nodeColumn))
+                    if (!string.IsNullOrWhiteSpace(nodeColumn) && nodeInsertParamValue != null)
                     {
-                        AddParam(cmd, "@nodeId", nodeId);
+                        AddParam(cmd, "@nodeId", nodeInsertParamValue);
                     }
 
                     await cmd.ExecuteNonQueryAsync();
