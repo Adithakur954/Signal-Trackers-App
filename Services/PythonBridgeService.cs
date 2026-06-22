@@ -15,7 +15,7 @@ namespace SignalTracker.Services
     {
         private const int DefaultBatchSize = 2000;
         private const int BaselineResultInsertBatchSize = 20000;
-        private const int GeoFeatureInsertBatchSize = 500;
+        private const int GeoFeatureInsertBatchSize = 5000;
         private const int BridgeReadCacheTtlSeconds = 180;
 
         private readonly ApplicationDbContext _db;
@@ -196,16 +196,70 @@ namespace SignalTracker.Services
             return DateTime.TryParse(Convert.ToString(value), out var parsed) ? parsed : null;
         }
 
+        private static bool LooksLikeDroppedDbConnection(Exception exception)
+        {
+            for (var current = exception; current != null; current = current.InnerException)
+            {
+                var message = current.Message ?? string.Empty;
+                if (message.Contains("forcibly closed", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("Unable to read data from the transport connection", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("connection was closed", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("connection is closed", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private async Task<DbTransaction> BeginTransactionWithReconnectAsync(
+            DbConnection conn,
+            string operationName,
+            CancellationToken cancellationToken)
+        {
+            if (conn.State != ConnectionState.Open)
+            {
+                await conn.OpenAsync(cancellationToken);
+            }
+
+            try
+            {
+                return await conn.BeginTransactionAsync(cancellationToken);
+            }
+            catch (Exception ex) when (LooksLikeDroppedDbConnection(ex))
+            {
+                _logger.LogWarning(ex, "PythonBridge {OperationName} transaction start hit a dropped database connection; reopening once.", operationName);
+                try
+                {
+                    await conn.CloseAsync();
+                }
+                catch
+                {
+                    conn.Close();
+                }
+
+                await conn.OpenAsync(cancellationToken);
+                return await conn.BeginTransactionAsync(cancellationToken);
+            }
+        }
+
         private static async Task EnsureBaselineSmoothedColumnsAsync(
             System.Data.Common.DbConnection conn,
-            System.Data.Common.DbTransaction transaction,
+            System.Data.Common.DbTransaction? transaction,
             CancellationToken cancellationToken)
         {
             var requiredColumns = new Dictionary<string, string>
             {
                 ["pred_rsrp_smoothed"] = "DOUBLE NULL",
                 ["pred_rsrq_smoothed"] = "DOUBLE NULL",
-                ["pred_sinr_smoothed"] = "DOUBLE NULL"
+                ["pred_sinr_smoothed"] = "DOUBLE NULL",
+                ["legacy_nodeb_id_cell_id"] = "VARCHAR(255) NULL",
+                ["sector"] = "VARCHAR(100) NULL",
+                ["band"] = "VARCHAR(100) NULL",
+                ["rf_identity_key"] = "VARCHAR(255) NULL",
+                ["sector_identity_key"] = "VARCHAR(255) NULL",
+                ["site_sector_band_key"] = "VARCHAR(255) NULL"
             };
 
             await using var checkCommand = conn.CreateCommand();
@@ -655,8 +709,13 @@ namespace SignalTracker.Services
                         "lat",
                         "lon",
                         "nodeb_id_cell_id",
+                        "legacy_nodeb_id_cell_id",
                         "frontend_site_sector_key",
                         "sector",
+                        "band",
+                        "rf_identity_key",
+                        "sector_identity_key",
+                        "site_sector_band_key",
                         "site_id",
                         "node_b_id",
                         "nodeb_id",
@@ -827,7 +886,7 @@ namespace SignalTracker.Services
                     SELECT MAX(scenario)
                     FROM site_prediction_optimized
                     WHERE tbl_project_id = @pid
-                    {(hasOperatorFilter ? "AND cluster = @operator" : string.Empty)};";
+                    {(hasOperatorFilter ? "AND LOWER(TRIM(cluster)) = LOWER(TRIM(@operator))" : string.Empty)};";
                 PythonBridgeDbTool.AddParam(latestScenarioCommand, "@pid", projectId);
                 if (hasOperatorFilter)
                 {
@@ -862,7 +921,7 @@ namespace SignalTracker.Services
                 FROM site_prediction_optimized
                 WHERE tbl_project_id = @pid
                 AND scenario = @scenario
-                {(hasOperatorFilter ? "AND cluster = @operator" : string.Empty)}
+                {(hasOperatorFilter ? "AND LOWER(TRIM(cluster)) = LOWER(TRIM(@operator))" : string.Empty)}
                 {polygonFilter}
                 ORDER BY id
                 LIMIT @lim OFFSET @off;";
@@ -1061,7 +1120,10 @@ namespace SignalTracker.Services
             }
 
             await EnsureOptimisedResultsPublicScenarioIdColumnAsync(conn, transaction: null, cancellationToken);
-            await using var transaction = await conn.BeginTransactionAsync(cancellationToken);
+            await using var transaction = await BeginTransactionWithReconnectAsync(
+                conn,
+                nameof(SaveLtePredictionOptimisedResultsAsync),
+                cancellationToken);
             var inserted = 0;
             var publicScenarioId = rows.FirstOrDefault(row => row.public_scenario_id.HasValue)?.public_scenario_id;
             if (publicScenarioId.HasValue && publicScenarioId.Value > 0)
@@ -1141,7 +1203,11 @@ namespace SignalTracker.Services
                 await conn.OpenAsync(cancellationToken);
             }
 
-            await using var transaction = await conn.BeginTransactionAsync(cancellationToken);
+            await EnsureBaselineSmoothedColumnsAsync(conn, transaction: null, cancellationToken);
+            await using var transaction = await BeginTransactionWithReconnectAsync(
+                conn,
+                nameof(SaveLtePredictionBaselineResultsAsync),
+                cancellationToken);
             var inserted = 0;
 
             foreach (var batch in rows.Chunk(300))
@@ -1157,7 +1223,9 @@ namespace SignalTracker.Services
                      @pred_rsrp{i}, @pred_rsrq{i}, @pred_sinr{i},
                      @pred_rsrp_smoothed{i}, @pred_rsrq_smoothed{i}, @pred_sinr_smoothed{i},
                      @node_b_id{i}, @cell_id{i},
-                     @operator{i}, @created_at{i}, @site_id{i}, @nodeb_id_cell_id{i}, @technology{i})");
+                     @operator{i}, @created_at{i}, @site_id{i}, @nodeb_id_cell_id{i},
+                     @legacy_nodeb_id_cell_id{i}, @sector{i}, @band{i},
+                     @rf_identity_key{i}, @sector_identity_key{i}, @site_sector_band_key{i}, @technology{i})");
 
                     PythonBridgeDbTool.AddParam(command, $"@project_id{i}", RowValue(row, "project_id") ?? request.ProjectId);
                     PythonBridgeDbTool.AddParam(command, $"@job_id{i}", RowValue(row, "job_id") ?? request.JobId);
@@ -1177,6 +1245,12 @@ namespace SignalTracker.Services
                     PythonBridgeDbTool.AddParam(command, $"@created_at{i}", RowDate(row, "created_at") ?? DateTime.UtcNow);
                     PythonBridgeDbTool.AddParam(command, $"@site_id{i}", RowValue(row, "site_id"));
                     PythonBridgeDbTool.AddParam(command, $"@nodeb_id_cell_id{i}", RowValue(row, "nodeb_id_cell_id"));
+                    PythonBridgeDbTool.AddParam(command, $"@legacy_nodeb_id_cell_id{i}", RowValue(row, "legacy_nodeb_id_cell_id"));
+                    PythonBridgeDbTool.AddParam(command, $"@sector{i}", RowValue(row, "sector"));
+                    PythonBridgeDbTool.AddParam(command, $"@band{i}", RowValue(row, "band"));
+                    PythonBridgeDbTool.AddParam(command, $"@rf_identity_key{i}", RowValue(row, "rf_identity_key"));
+                    PythonBridgeDbTool.AddParam(command, $"@sector_identity_key{i}", RowValue(row, "sector_identity_key"));
+                    PythonBridgeDbTool.AddParam(command, $"@site_sector_band_key{i}", RowValue(row, "site_sector_band_key"));
                     PythonBridgeDbTool.AddParam(command, $"@technology{i}", RowValue(row, "Technology") ?? RowValue(row, "technology") ?? "4G");
                 }
 
@@ -1186,7 +1260,9 @@ namespace SignalTracker.Services
                      pred_rsrp, pred_rsrq, pred_sinr,
                      pred_rsrp_smoothed, pred_rsrq_smoothed, pred_sinr_smoothed,
                      node_b_id, cell_id,
-                     `operator`, created_at, site_id, nodeb_id_cell_id, Technology)
+                     `operator`, created_at, site_id, nodeb_id_cell_id,
+                     legacy_nodeb_id_cell_id, sector, band,
+                     rf_identity_key, sector_identity_key, site_sector_band_key, Technology)
                     VALUES
                     {string.Join(",", valuesSql)}
                     ON DUPLICATE KEY UPDATE
@@ -1207,6 +1283,12 @@ namespace SignalTracker.Services
                      created_at = VALUES(created_at),
                      site_id = VALUES(site_id),
                      nodeb_id_cell_id = VALUES(nodeb_id_cell_id),
+                     legacy_nodeb_id_cell_id = VALUES(legacy_nodeb_id_cell_id),
+                     sector = VALUES(sector),
+                     band = VALUES(band),
+                     rf_identity_key = VALUES(rf_identity_key),
+                     sector_identity_key = VALUES(sector_identity_key),
+                     site_sector_band_key = VALUES(site_sector_band_key),
                      Technology = VALUES(Technology);";
 
                 await command.ExecuteNonQueryAsync(cancellationToken);
@@ -1234,10 +1316,19 @@ namespace SignalTracker.Services
                 await conn.OpenAsync(cancellationToken);
             }
 
-            await using var transaction = await conn.BeginTransactionAsync(cancellationToken);
+            await using var transaction = await BeginTransactionWithReconnectAsync(
+                conn,
+                nameof(SaveLtePredictionGeoFeaturesAsync),
+                cancellationToken);
             var inserted = 0;
+            var totalStopwatch = Stopwatch.StartNew();
+            var deleteStopwatch = new Stopwatch();
+            var insertStopwatch = new Stopwatch();
+            var batchIndex = 0;
+            var batchCount = (int)Math.Ceiling(rows.Count / (double)GeoFeatureInsertBatchSize);
             if (request.ReplaceExisting)
             {
+                deleteStopwatch.Start();
                 var normalizedScopes = rows
                     .Select(row => new
                     {
@@ -1260,10 +1351,12 @@ namespace SignalTracker.Services
                     PythonBridgeDbTool.AddParam(deleteCommand, "@region", scope.Region);
                     await deleteCommand.ExecuteNonQueryAsync(cancellationToken);
                 }
+                deleteStopwatch.Stop();
             }
 
             foreach (var batch in rows.Chunk(GeoFeatureInsertBatchSize))
             {
+                batchIndex++;
                 await using var insertCommand = conn.CreateCommand();
                 insertCommand.Transaction = transaction;
                 var valuesSql = new List<string>();
@@ -1334,11 +1427,38 @@ namespace SignalTracker.Services
                     VALUES
                     {string.Join(",", valuesSql)};";
 
+                insertStopwatch.Start();
                 await insertCommand.ExecuteNonQueryAsync(cancellationToken);
+                insertStopwatch.Stop();
                 inserted += batch.Length;
+
+                if (batchIndex == 1 || batchIndex == batchCount || batchIndex % 10 == 0)
+                {
+                    _logger.LogInformation(
+                        "PythonBridge geo feature insert progress: batch={BatchIndex}/{BatchCount} inserted={Inserted}/{TotalRows} batchSize={BatchSize} insertMs={InsertMs}",
+                        batchIndex,
+                        batchCount,
+                        inserted,
+                        rows.Count,
+                        batch.Length,
+                        insertStopwatch.ElapsedMilliseconds);
+                }
             }
 
+            var commitStopwatch = Stopwatch.StartNew();
             await transaction.CommitAsync(cancellationToken);
+            commitStopwatch.Stop();
+            totalStopwatch.Stop();
+            _logger.LogInformation(
+                "PythonBridge geo feature save complete: rows={Rows} inserted={Inserted} deleteMs={DeleteMs} insertMs={InsertMs} commitMs={CommitMs} totalMs={TotalMs} requestBatchSize={RequestBatchSize} sqlBatchSize={SqlBatchSize}",
+                rows.Count,
+                inserted,
+                deleteStopwatch.ElapsedMilliseconds,
+                insertStopwatch.ElapsedMilliseconds,
+                commitStopwatch.ElapsedMilliseconds,
+                totalStopwatch.ElapsedMilliseconds,
+                rows.Count,
+                GeoFeatureInsertBatchSize);
             return inserted;
         }
 
@@ -2010,10 +2130,30 @@ namespace SignalTracker.Services
 
             await using var command = conn.CreateCommand();
             var inClause = PythonBridgeDbTool.BuildInClause(command, sessionIds, "sid");
+            var whereParts = new List<string> { $"session_id IN ({inClause})" };
+
+            if (!string.IsNullOrWhiteSpace(request.Provider))
+            {
+                whereParts.Add("COALESCE(NULLIF(TRIM(m_alpha_short), ''), NULLIF(TRIM(m_alpha_long), '')) LIKE @provider");
+                PythonBridgeDbTool.AddParam(command, "@provider", $"%{request.Provider.Trim()}%");
+            }
+
+            if (request.StartDate.HasValue)
+            {
+                whereParts.Add("timestamp >= @startDate");
+                PythonBridgeDbTool.AddParam(command, "@startDate", request.StartDate.Value);
+            }
+
+            if (request.EndDate.HasValue)
+            {
+                whereParts.Add("timestamp < @endDate");
+                PythonBridgeDbTool.AddParam(command, "@endDate", request.EndDate.Value.Date.AddDays(1));
+            }
+
             command.CommandText = $@"
                 SELECT *
                 FROM tbl_network_log
-                WHERE session_id IN ({inClause})
+                WHERE {string.Join(" AND ", whereParts)}
                 ORDER BY session_id, timestamp, id
                 LIMIT @lim OFFSET @off;";
             PythonBridgeDbTool.AddParam(command, "@lim", limit);
@@ -2021,6 +2161,17 @@ namespace SignalTracker.Services
 
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             var rows = await PythonBridgeDbTool.ReadRowsAsync(reader, cancellationToken);
+            _logger.LogInformation(
+                "[ReportBridge] GetReportNetworkLogs received rows={RowCount}, sessions={SessionCount}, projectId={ProjectId}, provider={Provider}, startDate={StartDate}, endDate={EndDate}, limit={Limit}, offset={Offset}",
+                rows.Count,
+                sessionIds.Count,
+                request.ProjectId,
+                request.Provider,
+                request.StartDate,
+                request.EndDate,
+                limit,
+                offset
+            );
             return (limit, offset, rows);
         }
 

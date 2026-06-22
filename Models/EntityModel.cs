@@ -127,6 +127,12 @@ public class AddSitePredictionModel
     [JsonPropertyName("sectors")]
     public List<int> Sectors { get; set; } = new();
 
+    [JsonPropertyName("cellIds")]
+    public List<int> CellIds { get; set; } = new();
+
+    [JsonPropertyName("cell_ids")]
+    public List<int> CellIdsSnake { get; set; } = new();
+
     [JsonPropertyName("azimuths")]
     public List<int> Azimuths { get; set; } = new();
 

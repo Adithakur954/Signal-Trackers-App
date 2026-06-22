@@ -10475,6 +10475,12 @@ public async Task<IActionResult> AddSitePrediction([FromBody] AddSitePredictionM
     if (model.Azimuths?.Count != sectorCount)
         return BadRequest($"Azimuths count ({model.Azimuths?.Count}) must match sectors count ({sectorCount}).");
 
+    var cellIds = model.CellIds != null && model.CellIds.Count > 0
+        ? model.CellIds
+        : model.CellIdsSnake;
+    if (cellIds != null && cellIds.Count > 0 && cellIds.Count != sectorCount)
+        return BadRequest($"cellIds count ({cellIds.Count}) must match sectors count ({sectorCount}).");
+
     if (model.Technologies == null || !model.Technologies.Any())
         return BadRequest("At least one Technology required.");
 
@@ -10575,6 +10581,7 @@ public async Task<IActionResult> AddSitePrediction([FromBody] AddSitePredictionM
                     string sector = model.Sectors[i].ToString(CultureInfo.InvariantCulture);
                     int azimuth = model.Azimuths[i];
                     int pciValue = tech.IdValues[i];
+                    int cellIdValue = cellIds != null && cellIds.Count > i ? cellIds[i] : pciValue;
                     
                     double? height = model.Heights != null && model.Heights.Count > i ? model.Heights[i] : (double?)null;
                     double? mTilt = model.MechanicalTilts != null && model.MechanicalTilts.Count > i ? model.MechanicalTilts[i] : (double?)null;
@@ -10584,7 +10591,7 @@ public async Task<IActionResult> AddSitePrediction([FromBody] AddSitePredictionM
                     AddParam(cmd, "@site", model.Site);
                     AddParam(cmd, "@cluster", string.IsNullOrWhiteSpace(providerValue) ? DBNull.Value : providerValue);
                     AddParam(cmd, "@sec", sector);
-                    AddParam(cmd, "@cid", pciValue);
+                    AddParam(cmd, "@cid", cellIdValue);
                     AddParam(cmd, "@lat", model.Latitude);
                     AddParam(cmd, "@lon", model.Longitude);
                     AddParam(cmd, "@pci", tech.Technology == "4G" ? pciValue : DBNull.Value);
