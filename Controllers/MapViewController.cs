@@ -4938,6 +4938,7 @@ ORDER BY timestamp;";
 
     // ================= 4. RAW ADO.NET READ â€” fetch raw rows from DB =================
     var data = new List<LTE5GNeighbourDto>();
+    const int N78NeighbourCommandTimeoutSeconds = 300;
 
     var conn = db.Database.GetDbConnection();
     bool shouldClose = false;
@@ -4951,7 +4952,7 @@ ORDER BY timestamp;";
 
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = sql;
-        cmd.CommandTimeout = 120;
+        cmd.CommandTimeout = N78NeighbourCommandTimeoutSeconds;
         if (!string.IsNullOrWhiteSpace(projectPolygonWkt))
         {
             AddParameter(cmd, "@projectPolygonWkt", projectPolygonWkt);
@@ -5024,7 +5025,7 @@ ORDER BY timestamp;";
 
             await using var fallbackCmd = conn.CreateCommand();
             fallbackCmd.CommandText = fallbackSql;
-            fallbackCmd.CommandTimeout = 120;
+            fallbackCmd.CommandTimeout = N78NeighbourCommandTimeoutSeconds;
 
             await using var reader = await fallbackCmd.ExecuteReaderAsync();
             while (await reader.ReadAsync())
