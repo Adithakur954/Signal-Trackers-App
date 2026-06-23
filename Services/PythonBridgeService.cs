@@ -42,6 +42,32 @@ namespace SignalTracker.Services
             _logger = logger;
         }
 
+        private string GetConnectionNameByRegion(string? region)
+        {
+            if (string.IsNullOrWhiteSpace(region))
+                return "MySqlConnection"; // Default to India DB
+
+            return region.Trim().Equals("taiwan", StringComparison.OrdinalIgnoreCase)
+                || region.Trim().Equals("tw", StringComparison.OrdinalIgnoreCase)
+                ? "MySqlConnection2"
+                : "MySqlConnection";
+        }
+
+        private ApplicationDbContext? CreateDbContext(string connectionName)
+        {
+            var connectionString = MySqlConnectionStringHelper.EnsureZeroDateTimeHandling(_configuration.GetConnectionString(connectionName));
+            if (string.IsNullOrWhiteSpace(connectionString)) return null;
+
+            var options = new DbContextOptionsBuilder<ApplicationDbContext>()
+                .UseMySql(connectionString, new MySqlServerVersion(new Version(8, 0, 29)), mysqlOptions =>
+                {
+                    mysqlOptions.EnableRetryOnFailure(3, TimeSpan.FromSeconds(5), null);
+                })
+                .Options;
+
+            return new ApplicationDbContext(options);
+        }
+
         private static string BuildCacheKey(string scope, params object?[] parts)
         {
             var normalized = parts
@@ -683,6 +709,7 @@ namespace SignalTracker.Services
             var cacheKey = BuildCacheKey(
                 "lte_baseline",
                 request.ProjectId,
+                request.Region ?? "default",
                 jobId ?? "latest-or-all",
                 operatorFilter ?? "all",
                 limit,
@@ -694,13 +721,30 @@ namespace SignalTracker.Services
                 offset,
                 async () =>
                 {
-                    var conn = _db.Database.GetDbConnection();
-                    if (conn.State != ConnectionState.Open)
+                    // Select correct database based on region parameter
+                    ApplicationDbContext contextToUse = _db;
+                    bool ownsContext = false;
+
+                    if (!string.IsNullOrWhiteSpace(request.Region))
                     {
-                        await conn.OpenAsync(cancellationToken);
+                        var connectionName = GetConnectionNameByRegion(request.Region);
+                        var regionDb = CreateDbContext(connectionName);
+                        if (regionDb != null)
+                        {
+                            contextToUse = regionDb;
+                            ownsContext = true;
+                        }
                     }
 
-                    await using var command = conn.CreateCommand();
+                    try
+                    {
+                        var conn = contextToUse.Database.GetDbConnection();
+                        if (conn.State != ConnectionState.Open)
+                        {
+                            await conn.OpenAsync(cancellationToken);
+                        }
+
+                        await using var command = conn.CreateCommand();
                     var requestedColumns = new[]
                     {
                         "project_id",
@@ -843,6 +887,14 @@ namespace SignalTracker.Services
 
                     await using var reader = await command.ExecuteReaderAsync(cancellationToken);
                     return await PythonBridgeDbTool.ReadRowsAsync(reader, cancellationToken);
+                    }
+                    finally
+                    {
+                        if (ownsContext && contextToUse != _db)
+                        {
+                            await contextToUse.DisposeAsync();
+                        }
+                    }
                 },
                 cancellationToken);
         }
@@ -1197,11 +1249,28 @@ namespace SignalTracker.Services
                 return 0;
             }
 
-            var conn = _db.Database.GetDbConnection();
-            if (conn.State != ConnectionState.Open)
+            // Select correct database based on region parameter
+            ApplicationDbContext contextToUse = _db;
+            bool ownsContext = false;
+
+            if (!string.IsNullOrWhiteSpace(request.Region))
             {
-                await conn.OpenAsync(cancellationToken);
+                var connectionName = GetConnectionNameByRegion(request.Region);
+                var regionDb = CreateDbContext(connectionName);
+                if (regionDb != null)
+                {
+                    contextToUse = regionDb;
+                    ownsContext = true;
+                }
             }
+
+            try
+            {
+                var conn = contextToUse.Database.GetDbConnection();
+                if (conn.State != ConnectionState.Open)
+                {
+                    await conn.OpenAsync(cancellationToken);
+                }
 
             await EnsureBaselineSmoothedColumnsAsync(conn, transaction: null, cancellationToken);
             await using var transaction = await BeginTransactionWithReconnectAsync(
@@ -1297,6 +1366,14 @@ namespace SignalTracker.Services
 
             await transaction.CommitAsync(cancellationToken);
             return inserted;
+            }
+            finally
+            {
+                if (ownsContext && contextToUse != _db)
+                {
+                    await contextToUse.DisposeAsync();
+                }
+            }
         }
 
         public async Task<int> SaveLtePredictionGeoFeaturesAsync(
@@ -1625,26 +1702,61 @@ namespace SignalTracker.Services
 
         public async Task<string?> GetLatestLteBaselineJobIdAsync(
             long projectId,
+            string? region,
+            string? @operator,
             CancellationToken cancellationToken = default
         )
         {
-            var conn = _db.Database.GetDbConnection();
-            if (conn.State != ConnectionState.Open)
+            // Select correct database based on region parameter
+            ApplicationDbContext contextToUse = _db;
+            bool ownsContext = false;
+
+            if (!string.IsNullOrWhiteSpace(region))
             {
-                await conn.OpenAsync(cancellationToken);
+                var connectionName = GetConnectionNameByRegion(region);
+                var regionDb = CreateDbContext(connectionName);
+                if (regionDb != null)
+                {
+                    contextToUse = regionDb;
+                    ownsContext = true;
+                }
             }
 
-            await using var command = conn.CreateCommand();
-            command.CommandText = @"
-                SELECT job_id
-                FROM lte_prediction_baseline_results
-                WHERE project_id = @pid
-                ORDER BY created_at DESC
-                LIMIT 1;";
-            PythonBridgeDbTool.AddParam(command, "@pid", projectId);
+            try
+            {
+                var conn = contextToUse.Database.GetDbConnection();
+                if (conn.State != ConnectionState.Open)
+                {
+                    await conn.OpenAsync(cancellationToken);
+                }
 
-            var value = await command.ExecuteScalarAsync(cancellationToken);
-            return value == null || value == DBNull.Value ? null : Convert.ToString(value);
+                await using var command = conn.CreateCommand();
+                var operatorFilter = @operator?.Trim();
+                var hasOperatorFilter = !string.IsNullOrWhiteSpace(operatorFilter)
+                    && !string.Equals(operatorFilter, "all", StringComparison.OrdinalIgnoreCase);
+                command.CommandText = $@"
+                    SELECT job_id
+                    FROM lte_prediction_baseline_results
+                    WHERE project_id = @pid
+                    {(hasOperatorFilter ? "AND LOWER(TRIM(`operator`)) = LOWER(TRIM(@operator))" : string.Empty)}
+                    ORDER BY created_at DESC
+                    LIMIT 1;";
+                PythonBridgeDbTool.AddParam(command, "@pid", projectId);
+                if (hasOperatorFilter)
+                {
+                    PythonBridgeDbTool.AddParam(command, "@operator", operatorFilter);
+                }
+
+                var value = await command.ExecuteScalarAsync(cancellationToken);
+                return value == null || value == DBNull.Value ? null : Convert.ToString(value);
+            }
+            finally
+            {
+                if (ownsContext && contextToUse != _db)
+                {
+                    await contextToUse.DisposeAsync();
+                }
+            }
         }
 
         public async Task<int> GetNextLteOptimizationScenarioIdAsync(

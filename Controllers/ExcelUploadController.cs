@@ -34,6 +34,89 @@ namespace SignalTracker.Controllers
             catch { return TimeZoneInfo.FindSystemTimeZoneById("Asia/Kolkata"); }
         }
 
+        // Keep history table writes bounded even if the database column is still short.
+        private static string? NormalizeUploadError(string? message, int maxLength = 255)
+        {
+            if (string.IsNullOrWhiteSpace(message))
+            {
+                return null;
+            }
+
+            var trimmed = message.Trim();
+            if (trimmed.Length <= maxLength)
+            {
+                return trimmed;
+            }
+
+            return trimmed[..maxLength];
+        }
+
+        private static string BuildCompactUploadFileName(string prefix, DateTime timestamp, string originalFileName)
+        {
+            var extension = Path.GetExtension(originalFileName);
+            var stamp = timestamp.ToString("yyMMddHHmmssfff");
+            var suffix = Guid.NewGuid().ToString("N")[..8];
+            return $"{prefix}{stamp}_{suffix}{extension}";
+        }
+
+        private async Task<(int UploadHistoryId, bool Success, string? ErrorMessage)> ProcessSingleUploadAsync(
+            IFormFile uploadFile,
+            string remarks,
+            string polygonPath,
+            string polygonFile,
+            int userId,
+            string userName,
+            DateTime nowIst,
+            int uploadFileType,
+            int projectId)
+        {
+            var root = _env.ContentRootPath;
+            var uploadsDir = Path.Combine(root, "UploadedExcels");
+            Directory.CreateDirectory(uploadsDir);
+
+            string savedMainName = BuildCompactUploadFileName("U_", nowIst, uploadFile.FileName);
+            string mainPath = Path.Combine(uploadsDir, savedMainName);
+
+            using (var stream = System.IO.File.Create(mainPath))
+            {
+                await uploadFile.CopyToAsync(stream);
+            }
+
+            var excelDetails = new tbl_upload_history
+            {
+                remarks = remarks,
+                file_name = savedMainName,
+                polygon_file = polygonFile,
+                file_type = uploadFileType,
+                status = 2,
+                uploaded_by = userId,
+                uploaded_on = nowIst
+            };
+
+            db.tbl_upload_history.Add(excelDetails);
+            await db.SaveChangesAsync();
+
+            string errorMsg = "";
+            var csvProc = new ProcessCSVController(db, cf, _redis);
+            bool ok = csvProc.Process(
+                excelDetails.id,
+                mainPath,
+                uploadFile.FileName,
+                polygonPath,
+                uploadFileType,
+                projectId,
+                remarks,
+                out errorMsg,
+                userId
+            );
+
+            excelDetails.status = (short)(ok ? 1 : 0);
+            excelDetails.errors = NormalizeUploadError(errorMsg);
+            await db.SaveChangesAsync();
+
+            return (excelDetails.id, ok, errorMsg);
+        }
+
         public ExcelUploadController(
             ApplicationDbContext context,
             IHttpContextAccessor httpContextAccessor,
@@ -190,21 +273,25 @@ namespace SignalTracker.Controllers
             [FromForm] string ProjectName,
             [FromForm] string SessionIds,
             [FromForm] int UploadFileType,
-            [FromForm] IFormFile UploadFile,
+            [FromForm] List<IFormFile> UploadFile,
             [FromForm] IFormFile UploadNoteFile
         )
         {
-            tbl_upload_history? excel_details = null;
             try
             {
                 cf.SessionCheck();
 
-                if (UploadFile == null || UploadFile.Length == 0)
-                    return Json(new { Status = 0, Message = "Please select excel file." });
+                var uploadFiles = (UploadFile ?? new List<IFormFile>())
+                    .Where(file => file != null && file.Length > 0)
+                    .ToList();
+
+                if (uploadFiles.Count == 0)
+                    return Json(new { Status = 0, Message = "Please select at least one excel file." });
 
                 const long maxUploadBytes = 524_288_000;
-                if (UploadFile.Length > maxUploadBytes)
-                    return Json(new { Status = 0, Message = "Upload file size must be less than 500 MB." });
+                var oversized = uploadFiles.FirstOrDefault(file => file.Length > maxUploadBytes);
+                if (oversized != null)
+                    return Json(new { Status = 0, Message = "Each upload file must be less than 500 MB." });
 
                 if (UploadNoteFile != null && UploadNoteFile.Length > maxUploadBytes)
                     return Json(new { Status = 0, Message = "Polygon file size must be less than 500 MB." });
@@ -216,49 +303,23 @@ namespace SignalTracker.Controllers
 
                 DateTime nowIst = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, INDIAN_ZONE);
 
-                string mainExt = Path.GetExtension(UploadFile.FileName);
-                string savedMainName = "File_" + nowIst.ToString("MMddyyyyHmmss") + mainExt;
-                string mainPath = Path.Combine(uploadsDir, savedMainName);
-
-                using (var stream = System.IO.File.Create(mainPath))
-                    await UploadFile.CopyToAsync(stream);
-
                 // Polygon file if exists
                 string polygonPath = "";
                 string polygonFile = "";
 
                 if (UploadNoteFile != null && UploadNoteFile.Length > 0)
                 {
-                    polygonFile = "Polygon_" + nowIst.ToString("MMddyyyyHmmss") + Path.GetExtension(UploadNoteFile.FileName);
+                    polygonFile = BuildCompactUploadFileName("P_", nowIst, UploadNoteFile.FileName);
                     polygonPath = Path.Combine(uploadsDir, polygonFile);
 
                     using (var stream = System.IO.File.Create(polygonPath))
                         await UploadNoteFile.CopyToAsync(stream);
                 }
 
-                // Save DB history
-                // Note: Upload is always attributed to the current logged-in user
                 int userId = cf.UserId > 0 ? cf.UserId : Convert.ToInt32(HttpContext.Session.GetInt32("UserID"));
                 string userName = cf.UserName ?? "Unknown";
-
-                excel_details = new tbl_upload_history
-                {
-                    remarks = remarks,
-                    file_name = savedMainName,
-                    polygon_file = polygonFile,
-                    file_type = UploadFileType,
-                    status = 2, // Processing
-                    uploaded_by = userId,
-                    uploaded_on = nowIst
-                };
-
-                db.tbl_upload_history.Add(excel_details);
-                db.SaveChanges();
-
-                string errorMsg = "";
                 int projectId = 0;
 
-                // Create Project if type = 2
                 if (UploadFileType == 2)
                 {
                     var objProject = new tbl_project
@@ -275,59 +336,59 @@ namespace SignalTracker.Controllers
                     projectId = objProject.id;
                 }
 
-                var csvProc = new ProcessCSVController(db, cf, _redis);
-                bool ok = csvProc.Process(
-                    excel_details.id,
-                    mainPath,
-                    UploadFile.FileName,
-                    polygonPath,
-                    UploadFileType,
-                    projectId,
-                    remarks,
-                    out errorMsg,
-                    userId
-                );
+                var results = new List<(int UploadHistoryId, bool Success, string? ErrorMessage, string FileName)>();
+                foreach (var file in uploadFiles)
+                {
+                    var result = await ProcessSingleUploadAsync(
+                        file,
+                        remarks,
+                        polygonPath,
+                        polygonFile,
+                        userId,
+                        userName,
+                        nowIst,
+                        UploadFileType,
+                        projectId
+                    );
+                    results.Add((result.UploadHistoryId, result.Success, result.ErrorMessage, file.FileName));
+                }
 
-                excel_details.status = (short)(ok ? 1 : 0);
-                excel_details.errors = string.IsNullOrWhiteSpace(errorMsg) ? null : errorMsg;
-                db.SaveChanges();
+                bool allOk = results.All(item => item.Success);
+                var failedFiles = results.Where(item => !item.Success).Select(item => item.FileName).ToList();
+                var createdUploadIds = results.Select(item => item.UploadHistoryId).ToList();
+                string responseMessage = allOk
+                    ? (results.Count == 1
+                        ? "File uploaded and processed successfully."
+                        : $"{results.Count} files uploaded and processed successfully.")
+                    : (failedFiles.Count == 1
+                        ? $"Upload failed for {failedFiles[0]}."
+                        : $"Upload completed with failures for: {string.Join(", ", failedFiles)}");
 
                 int? createdSessionId = null;
-if (UploadFileType == 1)
-{
-    // Convert the int id to string to match the varchar column in tbl_session
-    string uploadIdStr = excel_details.id.ToString(); 
+                if (UploadFileType == 1 && createdUploadIds.Count == 1)
+                {
+                    // Convert the int id to string to match the varchar column in tbl_session
+                    string uploadIdStr = createdUploadIds[0].ToString();
 
-    createdSessionId = await db.tbl_session
-        .AsNoTracking()
-        .Where(s => s.tbl_upload_id == uploadIdStr) // ✅ Both are now strings
-        .OrderByDescending(s => s.id)
-        .Select(s => (int?)s.id)
-        .FirstOrDefaultAsync();
-}
+                    createdSessionId = await db.tbl_session
+                        .AsNoTracking()
+                        .Where(s => s.tbl_upload_id == uploadIdStr)
+                        .OrderByDescending(s => s.id)
+                        .Select(s => (int?)s.id)
+                        .FirstOrDefaultAsync();
+                }
 
                 return Json(new
                 {
-                    Status = ok ? 1 : 0,
-                    Message = ok
-                        ? "File uploaded and processed successfully."
-                        : (string.IsNullOrWhiteSpace(errorMsg) ? "File processing failed." : errorMsg),
-                    UploadId = excel_details.id,
+                    Status = allOk ? 1 : 0,
+                    Message = responseMessage,
+                    UploadId = createdUploadIds.Count == 1 ? createdUploadIds[0] : (int?)null,
+                    UploadIds = createdUploadIds,
                     SessionId = createdSessionId
                 });
             }
             catch (Exception ex)
             {
-                if (excel_details != null)
-                {
-                    try
-                    {
-                        excel_details.status = 0;
-                        excel_details.errors = SafeException.GetInnermost(ex);
-                        db.SaveChanges();
-                    }
-                    catch { }
-                }
                 return Json(new ReturnAPIResponse
                 {
                     Status = 0,

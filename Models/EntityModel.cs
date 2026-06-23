@@ -974,11 +974,14 @@ public class IndoorOutdoorLogDto
         public int id { get; set; }
         public DateTime uploaded_on { get; set; }
         public int file_type { get; set; }
+        [Column(TypeName = "longtext")]
         public string file_name { get; set; } = string.Empty;
         public int uploaded_by { get; set; }
         public string? remarks { get; set; }
+        [Column(TypeName = "longtext")]
         public string? errors { get; set; }
         public short status { get; set; }
+        [Column(TypeName = "longtext")]
         public string polygon_file { get; set; } = string.Empty;
     }
 

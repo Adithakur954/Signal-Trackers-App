@@ -489,7 +489,10 @@ namespace SignalTracker.Controllers
         }
 
         [HttpGet("GetLatestLteBaselineJobId")]
-        public async Task<IActionResult> GetLatestLteBaselineJobId([FromQuery] long projectId)
+        public async Task<IActionResult> GetLatestLteBaselineJobId(
+            [FromQuery] long projectId,
+            [FromQuery] string? region,
+            [FromQuery] string? @operator)
         {
             var authResult = EnsureAuthorized();
             if (authResult is not null) return authResult;
@@ -501,6 +504,8 @@ namespace SignalTracker.Controllers
 
             var jobId = await _pythonBridgeService.GetLatestLteBaselineJobIdAsync(
                 projectId,
+                region,
+                @operator,
                 HttpContext.RequestAborted
             );
 
