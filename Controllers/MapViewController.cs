@@ -11962,14 +11962,6 @@ public async Task<IActionResult> GetSitePredictionBase(
     var lookupSector = trimmedSectorId ?? trimmedSector;
     var polygonIds = projectId.HasValue ? ParsePolygonIds(polygonIdsCsv) : new List<int>();
     var polygonFilter = BuildPolygonFilterClause(polygonIds, "b.lat", "b.lon");
-    var combinedNodeBCellId =
-        !string.IsNullOrWhiteSpace(trimmedNodeBId) && !string.IsNullOrWhiteSpace(trimmedCellId)
-            ? $"{trimmedNodeBId}_{trimmedCellId}"
-            : (string.IsNullOrWhiteSpace(trimmedNodeBId) &&
-               !string.IsNullOrWhiteSpace(trimmedCellId) &&
-               trimmedCellId.Contains("_", StringComparison.Ordinal)
-                ? trimmedCellId
-                : null);
     var lookupNodeBIds = new List<string>();
     var lookupCellIds = new List<string>();
     var lookupNodeBCellIds = new List<string>();
@@ -11980,10 +11972,46 @@ public async Task<IActionResult> GetSitePredictionBase(
         if (!values.Any(existing => string.Equals(existing, text, StringComparison.OrdinalIgnoreCase)))
             values.Add(text);
     }
+    string? GetPipeExpandedNodeBId(string? value)
+    {
+        var text = (value ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(text) || text.Contains('|', StringComparison.Ordinal)) return null;
+        return $"{text}|{text}";
+    }
+    void AddNodeBLookupValue(string? value)
+    {
+        AddLookupValue(lookupNodeBIds, value);
+        AddLookupValue(lookupNodeBIds, GetPipeExpandedNodeBId(value));
+    }
+    void AddNodeBCellLookupValues(string? nodeValue, params string?[] cellValues)
+    {
+        var normalizedNode = (nodeValue ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalizedNode)) return;
 
-    AddLookupValue(lookupNodeBIds, trimmedNodeBId);
+        var expandedNode = GetPipeExpandedNodeBId(normalizedNode);
+        foreach (var rawCellValue in cellValues)
+        {
+            var normalizedCell = (rawCellValue ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(normalizedCell)) continue;
+
+            AddLookupValue(lookupNodeBCellIds, $"{normalizedNode}_{normalizedCell}");
+            if (!string.IsNullOrWhiteSpace(expandedNode))
+                AddLookupValue(lookupNodeBCellIds, $"{expandedNode}_{normalizedCell}");
+        }
+    }
+    var combinedNodeBCellId =
+        !string.IsNullOrWhiteSpace(trimmedNodeBId) && !string.IsNullOrWhiteSpace(trimmedCellId)
+            ? $"{trimmedNodeBId}_{trimmedCellId}"
+            : (string.IsNullOrWhiteSpace(trimmedNodeBId) &&
+               !string.IsNullOrWhiteSpace(trimmedCellId) &&
+               trimmedCellId.Contains("_", StringComparison.Ordinal)
+                ? trimmedCellId
+                : null);
+
+    AddNodeBLookupValue(trimmedNodeBId);
     AddLookupValue(lookupCellIds, trimmedCellId);
     AddLookupValue(lookupNodeBCellIds, combinedNodeBCellId);
+    AddNodeBCellLookupValues(trimmedNodeBId, trimmedCellId);
 
     if (!string.IsNullOrWhiteSpace(trimmedCellId) && trimmedCellId.Contains("_", StringComparison.Ordinal))
     {
@@ -11994,12 +12022,10 @@ public async Task<IActionResult> GetSitePredictionBase(
             var localCellId = parts[^1];
             var cellWithoutNode = string.Join("_", parts.Skip(1));
 
-            AddLookupValue(lookupNodeBIds, inferredNodeBId);
+            AddNodeBLookupValue(inferredNodeBId);
             AddLookupValue(lookupCellIds, localCellId);
             AddLookupValue(lookupCellIds, cellWithoutNode);
-            AddLookupValue(lookupNodeBCellIds, $"{inferredNodeBId}_{localCellId}");
-            AddLookupValue(lookupNodeBCellIds, $"{inferredNodeBId}_{cellWithoutNode}");
-            AddLookupValue(lookupNodeBCellIds, $"{inferredNodeBId}_{trimmedCellId}");
+            AddNodeBCellLookupValues(inferredNodeBId, localCellId, cellWithoutNode, trimmedCellId);
         }
     }
 
@@ -12009,8 +12035,7 @@ public async Task<IActionResult> GetSitePredictionBase(
             ? trimmedCellId.Split('_', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).LastOrDefault()
             : trimmedCellId;
         AddLookupValue(lookupCellIds, localCellId);
-        AddLookupValue(lookupNodeBCellIds, $"{trimmedNodeBId}_{localCellId}");
-        AddLookupValue(lookupNodeBCellIds, $"{trimmedNodeBId}_{trimmedCellId}");
+        AddNodeBCellLookupValues(trimmedNodeBId, localCellId, trimmedCellId);
     }
 
     if (string.IsNullOrWhiteSpace(trimmedNodeBId) &&
@@ -12053,6 +12078,13 @@ public async Task<IActionResult> GetSitePredictionBase(
 
         string Eq(string alias, string column, string paramName) =>
             $"CONVERT(COALESCE({alias}.`{column}`, '') USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(@{paramName} USING utf8mb4) COLLATE utf8mb4_unicode_ci";
+        string InLookup(string alias, string column, string paramPrefix, IReadOnlyList<string> values)
+        {
+            var names = values
+                .Select((_, i) => $"@{paramPrefix}_{i}")
+                .ToList();
+            return $"CONVERT(COALESCE({alias}.`{column}`, '') USING utf8mb4) COLLATE utf8mb4_unicode_ci IN ({string.Join(", ", names.Select(name => $"CONVERT({name} USING utf8mb4) COLLATE utf8mb4_unicode_ci"))})";
+        }
 
         var andClauses = new List<string>();
         if (projectId.HasValue && baselineColumns.Contains("project_id"))
@@ -12064,38 +12096,44 @@ public async Task<IActionResult> GetSitePredictionBase(
 
         if (hasNodeLookup && hasCellLookup)
         {
-            if (!string.IsNullOrWhiteSpace(baselineCombinedColumn) && !string.IsNullOrWhiteSpace(combinedNodeBCellId))
-                lookupClauses.Add(Eq("b", baselineCombinedColumn, "node_b_cell_id"));
+            if (!string.IsNullOrWhiteSpace(baselineCombinedColumn) && lookupNodeBCellIds.Count > 0)
+                lookupClauses.Add(InLookup("b", baselineCombinedColumn, "node_b_cell_id", lookupNodeBCellIds));
 
-            if (baselineColumns.Contains("node_b_id") && baselineColumns.Contains("cell_id"))
-                lookupClauses.Add($"({Eq("b", "node_b_id", "node_b_id")} AND {Eq("b", "cell_id", "cell_id")})");
-            else if (baselineColumns.Contains("site_id") && baselineColumns.Contains("cell_id"))
-                lookupClauses.Add($"({Eq("b", "site_id", "node_b_id")} AND {Eq("b", "cell_id", "cell_id")})");
+            if (baselineColumns.Contains("node_b_id") && baselineColumns.Contains("cell_id") && lookupNodeBIds.Count > 0 && lookupCellIds.Count > 0)
+                lookupClauses.Add($"({InLookup("b", "node_b_id", "node_b_id", lookupNodeBIds)} AND {InLookup("b", "cell_id", "cell_id", lookupCellIds)})");
+            else if (baselineColumns.Contains("site_id") && baselineColumns.Contains("cell_id") && lookupNodeBIds.Count > 0 && lookupCellIds.Count > 0)
+                lookupClauses.Add($"({InLookup("b", "site_id", "node_b_id", lookupNodeBIds)} AND {InLookup("b", "cell_id", "cell_id", lookupCellIds)})");
         }
         else
         {
             if (hasNodeLookup)
             {
-                if (baselineColumns.Contains("node_b_id")) lookupClauses.Add(Eq("b", "node_b_id", "node_b_id"));
-                if (baselineColumns.Contains("site_id")) lookupClauses.Add(Eq("b", "site_id", "node_b_id"));
-                if (!string.IsNullOrWhiteSpace(baselineCombinedColumn)) lookupClauses.Add(Eq("b", baselineCombinedColumn, "node_b_id"));
+                if (baselineColumns.Contains("node_b_id") && lookupNodeBIds.Count > 0) lookupClauses.Add(InLookup("b", "node_b_id", "node_b_id", lookupNodeBIds));
+                if (baselineColumns.Contains("site_id") && lookupNodeBIds.Count > 0) lookupClauses.Add(InLookup("b", "site_id", "node_b_id", lookupNodeBIds));
+                if (!string.IsNullOrWhiteSpace(baselineCombinedColumn) && lookupNodeBIds.Count > 0) lookupClauses.Add(InLookup("b", baselineCombinedColumn, "node_b_id", lookupNodeBIds));
             }
             if (hasCellLookup)
             {
-                if (baselineColumns.Contains("cell_id")) lookupClauses.Add(Eq("b", "cell_id", "cell_id"));
-                if (!string.IsNullOrWhiteSpace(baselineCombinedColumn)) lookupClauses.Add(Eq("b", baselineCombinedColumn, "cell_id"));
+                if (baselineColumns.Contains("cell_id") && lookupCellIds.Count > 0) lookupClauses.Add(InLookup("b", "cell_id", "cell_id", lookupCellIds));
+                if (!string.IsNullOrWhiteSpace(baselineCombinedColumn))
+                {
+                    var combinedLookupValues = lookupNodeBCellIds.Count > 0 ? lookupNodeBCellIds : lookupCellIds;
+                    if (combinedLookupValues.Count > 0) lookupClauses.Add(InLookup("b", baselineCombinedColumn, "node_b_cell_id", combinedLookupValues));
+                }
             }
         }
 
         if (!string.IsNullOrWhiteSpace(lookupSector))
         {
-            if (hasNodeLookup && !string.IsNullOrWhiteSpace(sectorColumn) && baselineColumns.Contains("node_b_id"))
+            if (!string.IsNullOrWhiteSpace(sectorColumn))
             {
-                lookupClauses.Add($"({Eq("b", "node_b_id", "node_b_id")} AND {Eq("b", sectorColumn, "sector_lookup")})");
+                if (hasNodeLookup || hasCellLookup)
+                    andClauses.Add(Eq("b", sectorColumn, "sector_lookup"));
+                else
+                    lookupClauses.Add(Eq("b", sectorColumn, "sector_lookup"));
             }
-            else
+            else if (!hasNodeLookup && !hasCellLookup)
             {
-                if (!string.IsNullOrWhiteSpace(sectorColumn)) lookupClauses.Add(Eq("b", sectorColumn, "sector_lookup"));
                 if (baselineColumns.Contains("cell_id")) lookupClauses.Add(Eq("b", "cell_id", "sector_lookup"));
             }
         }
@@ -12140,9 +12178,9 @@ ORDER BY b.id DESC;";
         if (projectId.HasValue) Add(cmd, "@project_id", projectId.Value);
         if (polygonIds.Count > 0) Add(cmd, "@pid", projectId!.Value);
         AddPolygonIdsParameters(cmd, polygonIds);
-        if (!string.IsNullOrWhiteSpace(trimmedNodeBId)) Add(cmd, "@node_b_id", trimmedNodeBId);
-        if (!string.IsNullOrWhiteSpace(trimmedCellId)) Add(cmd, "@cell_id", trimmedCellId);
-        if (!string.IsNullOrWhiteSpace(combinedNodeBCellId)) Add(cmd, "@node_b_cell_id", combinedNodeBCellId);
+        for (var i = 0; i < lookupNodeBIds.Count; i++) Add(cmd, $"@node_b_id_{i}", lookupNodeBIds[i]);
+        for (var i = 0; i < lookupCellIds.Count; i++) Add(cmd, $"@cell_id_{i}", lookupCellIds[i]);
+        for (var i = 0; i < lookupNodeBCellIds.Count; i++) Add(cmd, $"@node_b_cell_id_{i}", lookupNodeBCellIds[i]);
         if (!string.IsNullOrWhiteSpace(lookupSector)) Add(cmd, "@sector_lookup", lookupSector);
 
         var items = new List<Dictionary<string, object?>>();
@@ -12163,6 +12201,9 @@ ORDER BY b.id DESC;";
             CellIdFiltered = trimmedCellId,
             NodeBIdFiltered = trimmedNodeBId,
             NodeBCellIdFiltered = combinedNodeBCellId,
+            NodeBIdLookupValues = lookupNodeBIds,
+            CellIdLookupValues = lookupCellIds,
+            NodeBCellIdLookupValues = lookupNodeBCellIds,
             SectorFiltered = lookupSector,
             Total = items.Count,
             Count = items.Count,
@@ -12201,14 +12242,6 @@ public async Task<IActionResult> GetSitePredictionOptimised(
     var polygonIds = projectId.HasValue ? ParsePolygonIds(polygonIdsCsv) : new List<int>();
     var optimizedPolygonFilter = BuildPolygonFilterClause(polygonIds, "o.lat", "o.lon");
     var baselinePolygonFilter = BuildPolygonFilterClause(polygonIds, "b.lat", "b.lon");
-    var combinedNodeBCellId =
-        !string.IsNullOrWhiteSpace(trimmedNodeBId) && !string.IsNullOrWhiteSpace(trimmedCellId)
-            ? $"{trimmedNodeBId}_{trimmedCellId}"
-            : (string.IsNullOrWhiteSpace(trimmedNodeBId) &&
-               !string.IsNullOrWhiteSpace(trimmedCellId) &&
-               trimmedCellId.Contains("_", StringComparison.Ordinal)
-                ? trimmedCellId
-                : null);
     var lookupNodeBIds = new List<string>();
     var lookupCellIds = new List<string>();
     var lookupNodeBCellIds = new List<string>();
@@ -12219,10 +12252,46 @@ public async Task<IActionResult> GetSitePredictionOptimised(
         if (!values.Any(existing => string.Equals(existing, text, StringComparison.OrdinalIgnoreCase)))
             values.Add(text);
     }
+    string? GetPipeExpandedNodeBId(string? value)
+    {
+        var text = (value ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(text) || text.Contains('|', StringComparison.Ordinal)) return null;
+        return $"{text}|{text}";
+    }
+    void AddNodeBLookupValue(string? value)
+    {
+        AddLookupValue(lookupNodeBIds, value);
+        AddLookupValue(lookupNodeBIds, GetPipeExpandedNodeBId(value));
+    }
+    void AddNodeBCellLookupValues(string? nodeValue, params string?[] cellValues)
+    {
+        var normalizedNode = (nodeValue ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalizedNode)) return;
 
-    AddLookupValue(lookupNodeBIds, trimmedNodeBId);
+        var expandedNode = GetPipeExpandedNodeBId(normalizedNode);
+        foreach (var rawCellValue in cellValues)
+        {
+            var normalizedCell = (rawCellValue ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(normalizedCell)) continue;
+
+            AddLookupValue(lookupNodeBCellIds, $"{normalizedNode}_{normalizedCell}");
+            if (!string.IsNullOrWhiteSpace(expandedNode))
+                AddLookupValue(lookupNodeBCellIds, $"{expandedNode}_{normalizedCell}");
+        }
+    }
+    var combinedNodeBCellId =
+        !string.IsNullOrWhiteSpace(trimmedNodeBId) && !string.IsNullOrWhiteSpace(trimmedCellId)
+            ? $"{trimmedNodeBId}_{trimmedCellId}"
+            : (string.IsNullOrWhiteSpace(trimmedNodeBId) &&
+               !string.IsNullOrWhiteSpace(trimmedCellId) &&
+               trimmedCellId.Contains("_", StringComparison.Ordinal)
+                ? trimmedCellId
+                : null);
+
+    AddNodeBLookupValue(trimmedNodeBId);
     AddLookupValue(lookupCellIds, trimmedCellId);
     AddLookupValue(lookupNodeBCellIds, combinedNodeBCellId);
+    AddNodeBCellLookupValues(trimmedNodeBId, trimmedCellId);
 
     if (!string.IsNullOrWhiteSpace(trimmedCellId) && trimmedCellId.Contains("_", StringComparison.Ordinal))
     {
@@ -12233,12 +12302,10 @@ public async Task<IActionResult> GetSitePredictionOptimised(
             var localCellId = parts[^1];
             var cellWithoutNode = string.Join("_", parts.Skip(1));
 
-            AddLookupValue(lookupNodeBIds, inferredNodeBId);
+            AddNodeBLookupValue(inferredNodeBId);
             AddLookupValue(lookupCellIds, localCellId);
             AddLookupValue(lookupCellIds, cellWithoutNode);
-            AddLookupValue(lookupNodeBCellIds, $"{inferredNodeBId}_{localCellId}");
-            AddLookupValue(lookupNodeBCellIds, $"{inferredNodeBId}_{cellWithoutNode}");
-            AddLookupValue(lookupNodeBCellIds, $"{inferredNodeBId}_{trimmedCellId}");
+            AddNodeBCellLookupValues(inferredNodeBId, localCellId, cellWithoutNode, trimmedCellId);
         }
     }
 
@@ -12248,8 +12315,7 @@ public async Task<IActionResult> GetSitePredictionOptimised(
             ? trimmedCellId.Split('_', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).LastOrDefault()
             : trimmedCellId;
         AddLookupValue(lookupCellIds, localCellId);
-        AddLookupValue(lookupNodeBCellIds, $"{trimmedNodeBId}_{localCellId}");
-        AddLookupValue(lookupNodeBCellIds, $"{trimmedNodeBId}_{trimmedCellId}");
+        AddNodeBCellLookupValues(trimmedNodeBId, localCellId, trimmedCellId);
     }
 
     if (string.IsNullOrWhiteSpace(trimmedNodeBId) &&
@@ -12363,13 +12429,15 @@ public async Task<IActionResult> GetSitePredictionOptimised(
 
             if (!string.IsNullOrWhiteSpace(lookupSector))
             {
-                if (hasNodeLookup && !string.IsNullOrWhiteSpace(sectorColumn) && columns.Contains("node_b_id"))
+                if (!string.IsNullOrWhiteSpace(sectorColumn))
                 {
-                    lookupClauses.Add($"({Eq(alias, "node_b_id", "node_b_id")} AND {Eq(alias, sectorColumn, "sector_lookup")})");
+                    if (hasNodeLookup || hasCellLookup)
+                        andClauses.Add(Eq(alias, sectorColumn, "sector_lookup"));
+                    else
+                        lookupClauses.Add(Eq(alias, sectorColumn, "sector_lookup"));
                 }
-                else
+                else if (!hasNodeLookup && !hasCellLookup)
                 {
-                    if (!string.IsNullOrWhiteSpace(sectorColumn)) lookupClauses.Add(Eq(alias, sectorColumn, "sector_lookup"));
                     if (columns.Contains("cell_id")) lookupClauses.Add(Eq(alias, "cell_id", "sector_lookup"));
                 }
             }
