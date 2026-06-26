@@ -83,6 +83,55 @@ namespace SignalTracker.Controllers
                 return StatusCode(500, new { Status = 0, Message = "An internal server error occurred." });
             }
         }
+
+        [HttpPut("updateCompanyStatus")]
+        public async Task<IActionResult> UpdateCompanyStatus(
+            [FromQuery] int companyId,
+            [FromBody] UpdateCompanyStatusRequest request)
+        {
+            try
+            {
+                if (!_userScope.IsSuperAdmin(User))
+                {
+                    return StatusCode(403, new { Status = 0, Message = "Only Super Admin can update company status" });
+                }
+
+                if (companyId <= 0)
+                {
+                    return BadRequest(new { Status = 0, Message = "A valid companyId is required" });
+                }
+
+                if (request == null || (request.status != 0 && request.status != 1))
+                {
+                    return BadRequest(new { Status = 0, Message = "Invalid company status. Allowed values: 0 or 1" });
+                }
+
+                var company = await _db.tbl_company.FirstOrDefaultAsync(c => c.id == companyId);
+                if (company == null)
+                {
+                    return NotFound(new { Status = 0, Message = "Company not found" });
+                }
+
+                company.status = request.status;
+                await _db.SaveChangesAsync();
+
+                return Ok(new
+                {
+                    Status = 1,
+                    Message = "Company status updated successfully",
+                    Data = new
+                    {
+                        company.id,
+                        company.status
+                    }
+                });
+            }
+            catch (Exception)
+            {
+                return StatusCode(500, new { Status = 0, Message = "An internal server error occurred." });
+            }
+        }
+
       [HttpPost("SaveCompanyDetails")]
         public async Task<IActionResult> SaveCompany([FromBody] SaveCompanyRequest request)
         {
@@ -1068,5 +1117,4 @@ public class UpdateIssuedLicenseRequest
     public string? features_csv { get; set; }
 }
 }}
-
 

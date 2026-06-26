@@ -7887,24 +7887,32 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
 
             var polyParams = string.Join(", ", polygonIds.Select((_, i) => $"@poly_{i}"));
 
-            // Note: existing map_regions data may be stored in lat/lon order.
-            // We accept either orientation to avoid dropping valid rows.
+            // Global-safe handling for MySQL geographic SRID 4326:
+            // - Polygons are stored from frontend WKT in lat/lng text order.
+            // - Matching points should be built with POINT(lon, lat) via the POINT constructor,
+            //   not via ST_GeomFromText('POINT(...)'), which can misinterpret axis order.
+            // - Use CASE so MySQL never evaluates an invalid fallback branch.
             return $@"
                 AND EXISTS (
                     SELECT 1
                     FROM map_regions mr_filter
                     WHERE mr_filter.tbl_project_id = @pid
                       AND mr_filter.id IN ({polyParams})
-                      AND (
-                        ST_Contains(
+                      AND CASE
+                        WHEN ({latExpr}) BETWEEN -90 AND 90
+                          AND ({lonExpr}) BETWEEN -180 AND 180
+                        THEN ST_Contains(
                           mr_filter.region,
-                          ST_GeomFromText(CONCAT('POINT(', {lonExpr}, ' ', {latExpr}, ')'), 4326)
+                          ST_SRID(POINT({lonExpr}, {latExpr}), 4326)
                         )
-                        OR ST_Contains(
+                        WHEN ({lonExpr}) BETWEEN -90 AND 90
+                          AND ({latExpr}) BETWEEN -180 AND 180
+                        THEN ST_Contains(
                           mr_filter.region,
-                          ST_GeomFromText(CONCAT('POINT(', {latExpr}, ' ', {lonExpr}, ')'), 4326)
+                          ST_SRID(POINT({latExpr}, {lonExpr}), 4326)
                         )
-                      )
+                        ELSE 0
+                      END = 1
                 )";
         }
 
@@ -7998,11 +8006,15 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             var rawCluster = originalCluster ?? clusterValue ?? optimizedCluster ?? projectProvider;
             row["raw_cluster"] = rawCluster;
 
-            var provider =
+            var normalizedProvider =
                 NormalizeSitePredictionOperator(originalCluster)
                 ?? NormalizeSitePredictionOperator(clusterValue)
                 ?? NormalizeSitePredictionOperator(optimizedCluster)
-                ?? NormalizeSitePredictionOperator(projectProvider)
+                ?? NormalizeSitePredictionOperator(projectProvider);
+
+            var provider =
+                normalizedProvider
+                ?? rawCluster
                 ?? ResolveSitePredictionOperator(rawCluster, bandRaw, earfcnRaw, frequency)
                 ?? projectProvider;
             if (!string.IsNullOrWhiteSpace(provider))

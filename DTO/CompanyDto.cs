@@ -76,7 +76,7 @@ public int total_used_licenses { get; set; }
         public int license_validity_in_months { get; set; }
         public int status { get; set; }
     }
-    public class GrantLicenseRequest
+public class GrantLicenseRequest
     {
         public int tbl_company_id { get; set; }
         public int granted_licenses { get; set; }
@@ -85,6 +85,10 @@ public int total_used_licenses { get; set; }
         public decimal per_license_rate { get; set; }
         public string remarks { get; set; }
     }
-}
 
+    public class UpdateCompanyStatusRequest
+    {
+        public int status { get; set; }
+    }
+}
 
