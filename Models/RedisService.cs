@@ -102,8 +102,8 @@ namespace SignalTracker.Models
                 var jsonBytes = JsonSerializer.SerializeToUtf8Bytes(value);
                 var payload = CreateStoredPayload(jsonBytes);
                 return await WithTimeoutAsync(
-                    _db.StringSetAsync(key, payload, TimeSpan.FromSeconds(ttlSeconds), flags: CommandFlags.FireAndForget),
-                    true);
+                    _db.StringSetAsync(key, payload, TimeSpan.FromSeconds(ttlSeconds)),
+                    false);
             }
             catch (Exception ex)
             {
@@ -135,8 +135,8 @@ namespace SignalTracker.Models
             try
             {
                 return await WithTimeoutAsync(
-                    _db.StringSetAsync(key, value, TimeSpan.FromSeconds(ttlSeconds), flags: CommandFlags.FireAndForget),
-                    true);
+                    _db.StringSetAsync(key, value, TimeSpan.FromSeconds(ttlSeconds)),
+                    false);
             }
             catch (Exception ex)
             {
@@ -352,5 +352,3 @@ namespace SignalTracker.Models
         }
     }
 }
-
-

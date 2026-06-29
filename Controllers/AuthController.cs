@@ -217,6 +217,7 @@ namespace SignalTracker.Controllers
 
             var lockValue = $"{user.id}:{user.email}:{DateTimeOffset.UtcNow:O}";
             var userLockKey = BuildUserLoginLockKey(user.id);
+            var loginLockAcquired = false;
             if (_redis?.IsConnected == true)
             {
                 if (model.ForceLogin == true)
@@ -226,7 +227,16 @@ namespace SignalTracker.Controllers
                     var forcedLockAcquired = await _redis.SetStringAsync(userLockKey, lockValue, UserLoginLockTtlSeconds);
                     if (!forcedLockAcquired)
                     {
-                        return StatusCode(503, new { message = "Login service is temporarily unavailable. Please try again." });
+                        if (_configuration.GetValue<bool>("Security:RequireRedisLoginLock"))
+                        {
+                            return StatusCode(503, new { message = "Login service is temporarily unavailable. Please try again." });
+                        }
+
+                        _logger.LogWarning("Redis force login lock unavailable for {Email}; allowing login because RequireRedisLoginLock is false.", user.email);
+                    }
+                    else
+                    {
+                        loginLockAcquired = true;
                     }
                 }
                 else
@@ -244,6 +254,10 @@ namespace SignalTracker.Controllers
                         }
 
                         _logger.LogWarning("Redis login lock unavailable for {Email}; allowing login because RequireRedisLoginLock is false.", user.email);
+                    }
+                    else
+                    {
+                        loginLockAcquired = true;
                     }
                 }
             }
@@ -310,7 +324,7 @@ namespace SignalTracker.Controllers
             }
             catch (Exception ex)
             {
-                if (!loginCompleted)
+                if (loginLockAcquired && !loginCompleted)
                 {
                     try
                     {
@@ -466,5 +480,4 @@ namespace SignalTracker.Controllers
         public List<string> enabled_features { get; set; } = new();
     }
 }
-
 

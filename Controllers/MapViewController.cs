@@ -2729,12 +2729,16 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
         // 2. Check Cache
         if (_redis != null && _redis.IsConnected)
         {
+            var cacheWatch = Stopwatch.StartNew();
             try 
             {
                 var cachedPage = await _redis.GetObjectAsync<NetworkLogFullResponse>(pageCacheKey);
+                cacheWatch.Stop();
+                Response.Headers["X-Cache-Lookup-Ms"] = cacheWatch.ElapsedMilliseconds.ToString();
                 if (cachedPage != null)
                 {
                     Response.Headers["X-Cache"] = "HIT";
+                    Response.Headers["X-Total-Ms"] = totalStopwatch.ElapsedMilliseconds.ToString();
                     return Json(new { 
                         data = cachedPage.data, 
                         app_summary = cachedPage.app_summary, 
@@ -2747,44 +2751,17 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
                     });
                 }
             }
-            catch {}
-
-            try
+            catch
             {
-                var cached = await _redis.GetObjectAsync<NetworkLogFullResponse>(cacheKey);
-                if (cached != null)
-                {
-                    var cachedPage = SliceCachedPage(cached.data ?? new List<NetworkLogCacheRow>(), limit, pageOffset);
-                    var cachedPageResponse = new NetworkLogFullResponse
-                    {
-                        data = cachedPage,
-                        app_summary = cached.app_summary,
-                        io_summary = cached.io_summary,
-                        tpt_volume = cached.tpt_volume,
-                        TotalCount = cached.TotalCount,
-                        Sessions = cached.Sessions,
-                        CachedAt = cached.CachedAt
-                    };
-                    await SetMapViewCacheAsync(pageCacheKey, cachedPageResponse);
-                    Response.Headers["X-Cache"] = "HIT";
-                    return Json(new { 
-                        data = cachedPage, 
-                        app_summary = cached.app_summary, 
-                        io_summary = cached.io_summary, 
-                        tpt_volume = cached.tpt_volume,
-                        total_count = cached.TotalCount, 
-                        session_count = sessionIds.Count,
-                        sessions = cached.Sessions, 
-                        cachedAt = cached.CachedAt 
-                    });
-                }
+                cacheWatch.Stop();
+                Response.Headers["X-Cache-Lookup-Ms"] = cacheWatch.ElapsedMilliseconds.ToString();
             }
-            catch {}
         }
+        Response.Headers["X-Cache"] = "MISS";
 
         async Task<(List<NetworkLogCacheRow> fullData, Dictionary<string, object> appSummary, CombinedStatsDto stats)> FetchBundleAsync(MapFilter1 activeFilters)
         {
-            var taskData = GetMainDataOnlyRaw(connString, sessionIds, providerNormalized, activeFilters);
+            var taskData = GetMainDataOnlyRaw(connString, sessionIds, providerNormalized, activeFilters, limit, pageOffset);
             var taskApps = GetAppSummaryRaw(connString, sessionIds, providerNormalized, activeFilters);
             var taskStats = GetCombinedStatsRaw(connString, sessionIds, providerNormalized, activeFilters);
             await Task.WhenAll(taskData, taskApps, taskStats);
@@ -2811,8 +2788,7 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
         }
 
         long calculatedTotalCount = bundle.stats.Sessions.Sum(x => x.Count);
-        var fullData = bundle.fullData;
-        var pageData = SliceCachedPage(fullData, limit, pageOffset);
+        var pageData = bundle.fullData;
 
         // =========================================================================
         // ðŸ“¦ PACKAGE RESPONSE
@@ -2831,16 +2807,6 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
         // Cache Logic
         if (_redis != null && _redis.IsConnected)
         {
-             var cacheModel = new NetworkLogFullResponse {
-                 data = fullData,
-                 app_summary = bundle.appSummary,
-                 io_summary = bundle.stats.IoSummary,
-                 tpt_volume = bundle.stats.Volume,
-                 TotalCount = (int)calculatedTotalCount,
-                 Sessions = bundle.stats.Sessions,
-                 CachedAt = DateTime.UtcNow
-             };
-             await _redis.SetObjectAsync(cacheKey, cacheModel, ttlSeconds: 300);
              await _redis.SetObjectAsync(pageCacheKey, new NetworkLogFullResponse
              {
                  data = pageData,
@@ -2849,7 +2815,7 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
                  tpt_volume = bundle.stats.Volume,
                  TotalCount = (int)calculatedTotalCount,
                  Sessions = bundle.stats.Sessions,
-                 CachedAt = cacheModel.CachedAt
+                 CachedAt = DateTime.UtcNow
              }, ttlSeconds: 300);
         }
 
@@ -3031,7 +2997,7 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyEF(
 }
 
 private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
-    string connString, List<long> sessionIds, string provider, MapFilter1 filters)
+    string connString, List<long> sessionIds, string provider, MapFilter1 filters, int limit, int offset)
 {
     using var conn = new MySqlConnection(connString);
     await conn.OpenAsync();
@@ -3064,11 +3030,14 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
             END AS connection_type
         FROM tbl_network_log
         WHERE {whereClause}
-        ORDER BY timestamp;";
+        ORDER BY timestamp
+        LIMIT @limit OFFSET @offset;";
 
     var rows = new List<NetworkLogCacheRow>();
     using var cmd = new MySqlCommand(sql, conn);
     foreach (var p in parameters) cmd.Parameters.AddWithValue(p.Key, p.Value);
+    cmd.Parameters.AddWithValue("@limit", limit);
+    cmd.Parameters.AddWithValue("@offset", offset);
 
     using var rd = await cmd.ExecuteReaderAsync();
     while (await rd.ReadAsync())
@@ -3359,6 +3328,7 @@ private (string Clause, Dictionary<string, object> Params) BuildSqlWhere(
     if (idParams.Any()) clauses.Add($"session_id IN ({string.Join(",", idParams)})");
     else clauses.Add("1 = 0"); 
     clauses.Add("COALESCE(NULLIF(TRIM(m_alpha_short), ''), NULLIF(TRIM(m_alpha_long), '')) IS NOT NULL");
+    clauses.Add("NULLIF(TRIM(band), '') IS NOT NULL");
 
     // Move Wildcard search to the end so it runs on smaller dataset
     if(!string.IsNullOrEmpty(provider)) {
@@ -3558,7 +3528,7 @@ private string BuildNetworkLogCacheKey(
         : "no_project";
     string versionKey = NormalizeCacheKeyPart(dataVersion);
 
-    return $"networklog:v9:{sortedSessionIds}:{providerKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
+    return $"networklog:v10:{sortedSessionIds}:{providerKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
 }
 
 private static string CleanProviderDisplayName(string value)

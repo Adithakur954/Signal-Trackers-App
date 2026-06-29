@@ -266,7 +266,12 @@ namespace SignalTracker.Controllers
                         lockAcquired = await _redis.SetStringAsync(userLockKey, lockValue, UserLoginLockTtlSeconds);
                         if (!lockAcquired)
                         {
-                            return Json(new { success = false, message = "Login service is temporarily unavailable. Please try again." });
+                            if (_configuration.GetValue<bool>("Security:RequireRedisLoginLock"))
+                            {
+                                return Json(new { success = false, message = "Login service is temporarily unavailable. Please try again." });
+                            }
+
+                            _logger.LogWarning("Redis force login lock unavailable for {Email}; allowing login because RequireRedisLoginLock is false.", user.email);
                         }
                     }
                     else
@@ -593,5 +598,4 @@ namespace SignalTracker.Controllers
         }
     }
 }
-
 
