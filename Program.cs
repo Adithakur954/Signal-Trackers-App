@@ -48,6 +48,8 @@ internal class Program
         builder.Services.AddScoped<IOtpService, OtpService>();
         builder.Services.AddScoped<IUserDeletionService, UserDeletionService>();
         builder.Services.AddHttpClient<ISmsService, SmsService>();
+        builder.Services.AddSingleton<NetworkLogRealtimeNotifier>();
+        builder.Services.AddHostedService<NetworkLogChangeWatcherService>();
 
         if (builder.Configuration.GetValue<bool>("UserDeletionCleanup:Enabled"))
         {
@@ -215,6 +217,7 @@ internal class Program
 
         app.UseRouting();
         app.UseCors(SecurityServiceExtensions.CorsPolicyName);
+        app.UseWebSockets();
         app.UseCookiePolicy();
         app.UseSession();
 
@@ -239,4 +242,3 @@ internal class Program
         app.Run();
     }
 }
-

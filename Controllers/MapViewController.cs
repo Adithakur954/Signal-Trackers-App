@@ -2724,7 +2724,16 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
             filters.project_id,
             dataVersion
         );
+        string latestCacheKey = BuildNetworkLogCacheKey(
+            sessionIds,
+            providerNormalized,
+            filters.StartDate,
+            filters.EndDate,
+            filters.project_id,
+            "latest"
+        );
         string pageCacheKey = $"{cacheKey}:page:{page}:limit:{limit}";
+        string latestPageCacheKey = $"{latestCacheKey}:page:{page}:limit:{limit}";
 
         // 2. Check Cache
         if (_redis != null && _redis.IsConnected)
@@ -2732,13 +2741,43 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
             var cacheWatch = Stopwatch.StartNew();
             try 
             {
-                var cachedPage = await _redis.GetObjectAsync<NetworkLogFullResponse>(pageCacheKey);
+                var cachedPage = await _redis.GetObjectAsync<NetworkLogFullResponse>(latestPageCacheKey)
+                    ?? await _redis.GetObjectAsync<NetworkLogFullResponse>(pageCacheKey);
                 cacheWatch.Stop();
                 Response.Headers["X-Cache-Lookup-Ms"] = cacheWatch.ElapsedMilliseconds.ToString();
                 if (cachedPage != null)
                 {
-                    Response.Headers["X-Cache"] = "HIT";
+                    var cacheState = string.Equals(cachedPage.DataVersion, dataVersion, StringComparison.Ordinal)
+                        ? "HIT"
+                        : "STALE";
+                    Response.Headers["X-Cache"] = cacheState;
+                    Response.Headers["X-Data-Version"] = dataVersion;
+                    Response.Headers["X-Cached-Version"] = cachedPage.DataVersion ?? "unknown";
                     Response.Headers["X-Total-Ms"] = totalStopwatch.ElapsedMilliseconds.ToString();
+                    if (cacheState == "STALE")
+                    {
+                        _ = Task.Run(async () =>
+                        {
+                            try
+                            {
+                                await RefreshNetworkLogPageCacheAsync(
+                                    connString,
+                                    sessionIds,
+                                    providerNormalized,
+                                    filters,
+                                    limit,
+                                    pageOffset,
+                                    dataVersion,
+                                    pageCacheKey,
+                                    latestPageCacheKey);
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($" Network log cache refresh failed: {SafeException.Get(ex)}");
+                            }
+                        });
+                    }
+
                     return Json(new { 
                         data = cachedPage.data, 
                         app_summary = cachedPage.app_summary, 
@@ -2747,7 +2786,9 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
                         total_count = cachedPage.TotalCount, 
                         session_count = sessionIds.Count,
                         sessions = cachedPage.Sessions, 
-                        cachedAt = cachedPage.CachedAt 
+                        cachedAt = cachedPage.CachedAt,
+                        cache_state = cacheState,
+                        data_version = cachedPage.DataVersion
                     });
                 }
             }
@@ -2759,68 +2800,27 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
         }
         Response.Headers["X-Cache"] = "MISS";
 
-        async Task<(List<NetworkLogCacheRow> fullData, Dictionary<string, object> appSummary, CombinedStatsDto stats)> FetchBundleAsync(MapFilter1 activeFilters)
-        {
-            var taskData = GetMainDataOnlyRaw(connString, sessionIds, providerNormalized, activeFilters, limit, pageOffset);
-            var taskApps = GetAppSummaryRaw(connString, sessionIds, providerNormalized, activeFilters);
-            var taskStats = GetCombinedStatsRaw(connString, sessionIds, providerNormalized, activeFilters);
-            await Task.WhenAll(taskData, taskApps, taskStats);
-            return (taskData.Result, taskApps.Result, taskStats.Result);
-        }
+        var cacheModel = await BuildNetworkLogPageCacheAsync(
+            connString,
+            sessionIds,
+            providerNormalized,
+            filters,
+            limit,
+            pageOffset,
+            dataVersion);
 
-        // Primary fetch: includes project polygon filter when available.
-        var bundle = await FetchBundleAsync(filters);
-
-        // Fallback: if project polygon filtering returned no rows, retry without project polygon constraint.
-        if (bundle.fullData.Count == 0 && filters.project_id.HasValue && filters.project_id.Value > 0)
-        {
-            var fallbackFilters = new MapFilter1
-            {
-                session_ids = filters.session_ids,
-                page = filters.page,
-                limit = filters.limit,
-                NetworkType = filters.NetworkType,
-                StartDate = filters.StartDate,
-                EndDate = filters.EndDate,
-                project_id = null
-            };
-            bundle = await FetchBundleAsync(fallbackFilters);
-        }
-
-        long calculatedTotalCount = bundle.stats.Sessions.Sum(x => x.Count);
-        var pageData = bundle.fullData;
-
-        // =========================================================================
-        // ðŸ“¦ PACKAGE RESPONSE
-        // =========================================================================
-        var responseObj = new
-        {
-            data = pageData,
-            app_summary = bundle.appSummary,
-            io_summary = bundle.stats.IoSummary,
-            tpt_volume = bundle.stats.Volume,
-            total_count = calculatedTotalCount,
-            session_count = sessionIds.Count,
-            sessions = bundle.stats.Sessions
-        };
+        var responseObj = ToNetworkLogResponseObject(cacheModel, sessionIds.Count, "MISS");
 
         // Cache Logic
         if (_redis != null && _redis.IsConnected)
         {
-             await _redis.SetObjectAsync(pageCacheKey, new NetworkLogFullResponse
-             {
-                 data = pageData,
-                 app_summary = bundle.appSummary,
-                 io_summary = bundle.stats.IoSummary,
-                 tpt_volume = bundle.stats.Volume,
-                 TotalCount = (int)calculatedTotalCount,
-                 Sessions = bundle.stats.Sessions,
-                 CachedAt = DateTime.UtcNow
-             }, ttlSeconds: 300);
+             await _redis.SetObjectAsync(pageCacheKey, cacheModel, ttlSeconds: 300);
+             await _redis.SetObjectAsync(latestPageCacheKey, cacheModel, ttlSeconds: 300);
         }
 
         totalStopwatch.Stop();
         Response.Headers["X-Total-Ms"] = totalStopwatch.ElapsedMilliseconds.ToString();
+        Response.Headers["X-Data-Version"] = dataVersion;
 
         return Json(responseObj);
     }
@@ -2828,6 +2828,102 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
     {
         return Json(new { message = "Server Error", details = SafeException.Get(ex) });
     }
+}
+
+private async Task RefreshNetworkLogPageCacheAsync(
+    string connString,
+    List<long> sessionIds,
+    string provider,
+    MapFilter1 filters,
+    int limit,
+    int pageOffset,
+    string dataVersion,
+    string pageCacheKey,
+    string latestPageCacheKey)
+{
+    if (_redis?.IsConnected != true)
+        return;
+
+    var cacheModel = await BuildNetworkLogPageCacheAsync(
+        connString,
+        sessionIds,
+        provider,
+        filters,
+        limit,
+        pageOffset,
+        dataVersion);
+
+    await _redis.SetObjectAsync(pageCacheKey, cacheModel, ttlSeconds: 300);
+    await _redis.SetObjectAsync(latestPageCacheKey, cacheModel, ttlSeconds: 300);
+}
+
+private async Task<NetworkLogFullResponse> BuildNetworkLogPageCacheAsync(
+    string connString,
+    List<long> sessionIds,
+    string provider,
+    MapFilter1 filters,
+    int limit,
+    int pageOffset,
+    string dataVersion)
+{
+    async Task<(List<NetworkLogCacheRow> fullData, Dictionary<string, object> appSummary, CombinedStatsDto stats)> FetchBundleAsync(MapFilter1 activeFilters)
+    {
+        var taskData = GetMainDataOnlyRaw(connString, sessionIds, provider, activeFilters, limit, pageOffset);
+        var taskApps = GetAppSummaryRaw(connString, sessionIds, provider, activeFilters);
+        var taskStats = GetCombinedStatsRaw(connString, sessionIds, provider, activeFilters);
+        await Task.WhenAll(taskData, taskApps, taskStats);
+        return (taskData.Result, taskApps.Result, taskStats.Result);
+    }
+
+    var bundle = await FetchBundleAsync(filters);
+
+    if (bundle.fullData.Count == 0 && filters.project_id.HasValue && filters.project_id.Value > 0)
+    {
+        var fallbackFilters = new MapFilter1
+        {
+            session_ids = filters.session_ids,
+            page = filters.page,
+            limit = filters.limit,
+            NetworkType = filters.NetworkType,
+            StartDate = filters.StartDate,
+            EndDate = filters.EndDate,
+            project_id = null
+        };
+        bundle = await FetchBundleAsync(fallbackFilters);
+    }
+
+    var calculatedTotalCount = bundle.stats.Sessions.Sum(x => x.Count);
+    return new NetworkLogFullResponse
+    {
+        data = bundle.fullData,
+        app_summary = bundle.appSummary,
+        io_summary = bundle.stats.IoSummary,
+        tpt_volume = bundle.stats.Volume,
+        TotalCount = (int)calculatedTotalCount,
+        Sessions = bundle.stats.Sessions,
+        CachedAt = DateTime.UtcNow,
+        DataVersion = dataVersion
+    };
+}
+
+private static object ToNetworkLogResponseObject(
+    NetworkLogFullResponse cacheModel,
+    int sessionCount,
+    string cacheState)
+{
+    return new
+    {
+        data = cacheModel.data,
+        app_summary = cacheModel.app_summary,
+        io_summary = cacheModel.io_summary,
+        tpt_volume = cacheModel.tpt_volume,
+        total_count = cacheModel.TotalCount,
+        session_count = sessionCount,
+        sessions = cacheModel.Sessions,
+        cachedAt = cacheModel.CachedAt,
+        cache_state = cacheState,
+        data_version = cacheModel.DataVersion
+    };
 }
 
 // ---------------------------------------------------------
@@ -3642,6 +3738,7 @@ public class NetworkLogFullResponse
     public Dictionary<string, object> io_summary { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public object tpt_volume { get; set; }
     public DateTime CachedAt { get; set; }
+    public string? DataVersion { get; set; }
     public int TotalCount { get; set; }
     public List<SessionCountDto> Sessions { get; set; } = new();
 }

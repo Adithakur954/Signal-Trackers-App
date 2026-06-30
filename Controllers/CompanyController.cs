@@ -353,9 +353,9 @@ else
     // ==============================
     // PASSWORD UPDATE (OPTIONAL)
     // ==============================
-    if (!string.IsNullOrEmpty(request.password))
+    if (!string.IsNullOrWhiteSpace(request.password))
     {
-        var hashedPassword = PasswordSecurity.HashPassword(request.password);
+        var hashedPassword = PasswordSecurity.HashPassword(request.password.Trim());
         existingCompany.password = hashedPassword;
 
         // Keep the default company admin user in sync with company password
@@ -367,6 +367,8 @@ else
         {
             u.password = hashedPassword;
         }
+
+        await UpdatePrimaryLoginUsersForCompanyPasswordAsync(existingCompany, hashedPassword);
     }
 
     // ==============================
@@ -1030,8 +1032,11 @@ public async Task<IActionResult> UpdateIssuedLicense([FromQuery] int licenseId, 
         if (hasFeaturePayload && requestedFeatures == null)
             requestedFeatures = new List<string>();
 
-        if (!request.valid_till.HasValue && !request.status.HasValue && !hasFeaturePayload)
-            return BadRequest(new { Status = 0, Message = "Provide at least one field: valid_till or status or features" });
+        var requestedPassword = request.password?.Trim();
+        var shouldUpdatePassword = !string.IsNullOrWhiteSpace(requestedPassword);
+
+        if (!request.valid_till.HasValue && !request.status.HasValue && !hasFeaturePayload && !shouldUpdatePassword)
+            return BadRequest(new { Status = 0, Message = "Provide at least one field: valid_till, status, features, or password" });
 
         int targetCompanyId = _userScope.GetTargetCompanyId(User, null);
 
@@ -1054,6 +1059,21 @@ public async Task<IActionResult> UpdateIssuedLicense([FromQuery] int licenseId, 
                 return BadRequest(new { Status = 0, Message = "Invalid status. Allowed values: 0, 1, 2" });
 
             license.status = request.status.Value;
+        }
+
+        if (shouldUpdatePassword)
+        {
+            var user = await _db.tbl_user.FirstOrDefaultAsync(u => u.id == license.tbl_user_id);
+            var hashedPassword = PasswordSecurity.HashPassword(requestedPassword!);
+
+            var company = await _db.tbl_company.FirstOrDefaultAsync(c => c.id == license.tbl_company_id);
+            if (company != null)
+                company.password = hashedPassword;
+
+            if (user != null)
+                user.password = hashedPassword;
+
+            await UpdatePrimaryLoginUsersForCompanyPasswordAsync(company, hashedPassword, license.tbl_user_id);
         }
 
         await _db.SaveChangesAsync();
@@ -1109,6 +1129,7 @@ public class UpdateIssuedLicenseRequest
 {
     public DateTime? valid_till { get; set; }
     public int? status { get; set; }
+    public string? password { get; set; }
     public List<string>? features { get; set; }
     public List<string>? feature_list { get; set; }
     public List<string>? enabled_features { get; set; }
@@ -1116,5 +1137,28 @@ public class UpdateIssuedLicenseRequest
     public string? feature_codes { get; set; }
     public string? features_csv { get; set; }
 }
-}}
 
+private async Task UpdatePrimaryLoginUsersForCompanyPasswordAsync(
+    tbl_company? company,
+    string hashedPassword,
+    int? linkedUserId = null)
+{
+    if (company == null)
+        return;
+
+    var companyEmail = company.email?.Trim().ToLowerInvariant();
+    var companyCode = company.company_code?.Trim();
+    var hasCompanyCodeId = int.TryParse(companyCode, out var companyCodeAsId);
+
+    var users = await _db.tbl_user
+        .Where(u =>
+            (linkedUserId.HasValue && u.id == linkedUserId.Value) ||
+            u.company_id == company.id ||
+            (hasCompanyCodeId && u.company_id == companyCodeAsId) ||
+            (!string.IsNullOrWhiteSpace(companyEmail) && u.email != null && u.email.ToLower() == companyEmail))
+        .ToListAsync();
+
+    foreach (var loginUser in users)
+        loginUser.password = hashedPassword;
+}
+}}

@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Data;
+using System.Data.Common;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -52,39 +54,7 @@ namespace SignalTracker.Controllers
                 .Distinct()
                 .ToList();
 
-            var rows = await _db.tbl_network_log
-                .AsNoTracking()
-                .Where(x => x.session_id.HasValue && sessionIdInts.Contains(x.session_id.Value))
-                .OrderBy(x => x.timestamp)
-                .Select(x => new UnifiedMapReportRow
-                {
-                    Id = x.id,
-                    SessionId = x.session_id,
-                    Timestamp = x.timestamp,
-                    Lat = x.lat,
-                    Lon = x.lon,
-                    Network = x.network,
-                    Provider = x.m_alpha_long,
-                    Band = x.band,
-                    Pci = x.pci,
-                    Rssi = x.rssi,
-                    Rsrp = x.rsrp,
-                    Rsrq = x.rsrq,
-                    Sinr = x.sinr,
-                    Mos = x.mos,
-                    Jitter = x.jitter,
-                    Latency = x.latency,
-                    PacketLoss = x.packet_loss,
-                    DlTpt = x.dl_tpt,
-                    UlTpt = x.ul_tpt,
-                    Apps = x.apps,
-                    AppName = x.app_name,
-                    IndoorOutdoor = x.indoor_outdoor,
-                    NodebId = x.nodeb_id,
-                    CellId = x.cell_id
-                })
-                .Take(200_000)
-                .ToListAsync();
+            var rows = await QueryReportRowsAsync(request, sessionIdInts);
 
             if (rows.Count == 0)
                 return BadRequest(new { Message = "No drive logs found for the selected sessions." });
@@ -174,6 +144,264 @@ namespace SignalTracker.Controllers
             return null;
         }
 
+        private async Task<List<UnifiedMapReportRow>> QueryReportRowsAsync(UnifiedMapPdfRequest request, List<int> sessionIds)
+        {
+            if (sessionIds.Count == 0)
+                return new List<UnifiedMapReportRow>();
+
+            var limit = request.Limit.HasValue
+                ? Math.Clamp(request.Limit.Value, 1, 200_000)
+                : 200_000;
+            var page = request.Page.GetValueOrDefault(1) <= 0 ? 1 : request.Page.GetValueOrDefault(1);
+            var offset = Math.Max(0, (page - 1) * limit);
+
+            var conn = _db.Database.GetDbConnection();
+            if (conn.State != ConnectionState.Open)
+                await conn.OpenAsync(HttpContext.RequestAborted);
+
+            await using var command = conn.CreateCommand();
+            var (whereClause, parameters) = await BuildReportSqlWhereAsync(request, sessionIds, command);
+            command.CommandText = $@"
+                SELECT
+                    id, session_id, timestamp, lat, lon, network,
+                    COALESCE(
+                        NULLIF(TRIM(BOTH CHAR(39) FROM TRIM(BOTH '""' FROM TRIM(m_alpha_short))), ''),
+                        TRIM(BOTH CHAR(39) FROM TRIM(BOTH '""' FROM TRIM(m_alpha_long)))
+                    ) AS provider_name,
+                    band, pci, rssi, rsrp, rsrq, sinr, mos, jitter, latency,
+                    packet_loss, dl_tpt, ul_tpt, apps, app_name, indoor_outdoor, nodeb_id, cell_id
+                FROM tbl_network_log
+                WHERE {whereClause}
+                ORDER BY timestamp, id
+                LIMIT @limit OFFSET @offset;";
+
+            foreach (var parameter in parameters)
+                command.Parameters.Add(parameter);
+
+            AddParam(command, "@limit", limit);
+            AddParam(command, "@offset", offset);
+
+            var rows = new List<UnifiedMapReportRow>();
+            await using var reader = await command.ExecuteReaderAsync(HttpContext.RequestAborted);
+            while (await reader.ReadAsync(HttpContext.RequestAborted))
+            {
+                rows.Add(new UnifiedMapReportRow
+                {
+                    Id = ReadInt(reader, "id") ?? 0,
+                    SessionId = ReadInt(reader, "session_id"),
+                    Timestamp = ReadDateTime(reader, "timestamp"),
+                    Lat = ReadFloat(reader, "lat"),
+                    Lon = ReadFloat(reader, "lon"),
+                    Network = ReadString(reader, "network"),
+                    Provider = CleanProvider(ReadString(reader, "provider_name")),
+                    Band = ReadString(reader, "band"),
+                    Pci = ReadString(reader, "pci"),
+                    Rssi = ReadFloat(reader, "rssi"),
+                    Rsrp = ClampKpi(ReadFloat(reader, "rsrp"), -140, -44),
+                    Rsrq = ClampKpi(ReadFloat(reader, "rsrq"), -34, 3),
+                    Sinr = ClampKpi(ReadFloat(reader, "sinr"), -23, 40),
+                    Mos = ReadFloat(reader, "mos"),
+                    Jitter = ReadFloat(reader, "jitter"),
+                    Latency = ReadFloat(reader, "latency"),
+                    PacketLoss = ReadFloat(reader, "packet_loss"),
+                    DlTpt = ReadString(reader, "dl_tpt"),
+                    UlTpt = ReadString(reader, "ul_tpt"),
+                    Apps = ReadString(reader, "apps"),
+                    AppName = ReadString(reader, "app_name"),
+                    IndoorOutdoor = ReadString(reader, "indoor_outdoor"),
+                    NodebId = ReadString(reader, "nodeb_id"),
+                    CellId = ReadString(reader, "cell_id")
+                });
+            }
+
+            return rows;
+        }
+
+        private async Task<(string Clause, List<DbParameter> Parameters)> BuildReportSqlWhereAsync(
+            UnifiedMapPdfRequest request,
+            List<int> sessionIds,
+            DbCommand command)
+        {
+            var clauses = new List<string>();
+            var parameters = new List<DbParameter>();
+            var idParams = new List<string>();
+
+            for (var i = 0; i < sessionIds.Count; i++)
+            {
+                var name = $"@sid{i}";
+                idParams.Add(name);
+                parameters.Add(CreateParam(command, name, sessionIds[i]));
+            }
+
+            clauses.Add(idParams.Count > 0 ? $"session_id IN ({string.Join(",", idParams)})" : "1 = 0");
+            clauses.Add("COALESCE(NULLIF(TRIM(m_alpha_short), ''), NULLIF(TRIM(m_alpha_long), '')) IS NOT NULL");
+            clauses.Add("NULLIF(TRIM(band), '') IS NOT NULL");
+
+            var provider = request.Provider?.Trim();
+            if (!string.IsNullOrWhiteSpace(provider))
+            {
+                clauses.Add("COALESCE(NULLIF(TRIM(m_alpha_short), ''), m_alpha_long) LIKE @provider");
+                parameters.Add(CreateParam(command, "@provider", $"%{provider}%"));
+            }
+
+            const string wifiPredicate = @"(
+                primary_cell_info_1 LIKE 'SSID:%'
+                OR primary_cell_info_1 LIKE '%BSSID:%'
+                OR EXISTS (
+                    SELECT 1
+                    FROM tbl_session s
+                    WHERE s.id = tbl_network_log.session_id
+                      AND LOWER(COALESCE(s.type, '')) = 'wifi'
+                )
+            )";
+            const string registeredCellPredicate = "primary_cell_info_1 LIKE '%mRegistered=YES%'";
+            const string fiveGCellPredicate = @"(
+                UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''), COALESCE(primary_cell_info_1, ''), COALESCE(all_neigbor_cell_info, ''))) LIKE '%5G%'
+                OR UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''), COALESCE(primary_cell_info_1, ''), COALESCE(all_neigbor_cell_info, ''))) LIKE '%NRARFCN%'
+                OR UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''), COALESCE(primary_cell_info_1, ''), COALESCE(all_neigbor_cell_info, ''))) LIKE '%MNR%'
+                OR UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''), COALESCE(primary_cell_info_1, ''), COALESCE(all_neigbor_cell_info, ''))) LIKE '%NCI%'
+                OR UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''), COALESCE(primary_cell_info_1, ''), COALESCE(all_neigbor_cell_info, ''))) REGEXP '(^|[^A-Z0-9])NR([^A-Z0-9]|$)'
+                OR UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''), COALESCE(primary_cell_info_1, ''), COALESCE(all_neigbor_cell_info, ''))) REGEXP '(^|[^A-Z0-9])N[0-9]{1,3}([^A-Z0-9]|$)'
+            )";
+
+            var networkType = request.NetworkType?.Trim();
+            if (!string.IsNullOrWhiteSpace(networkType) &&
+                !networkType.Equals("All", StringComparison.OrdinalIgnoreCase))
+            {
+                if (networkType.Equals("wifi", StringComparison.OrdinalIgnoreCase) ||
+                    networkType.Equals("wi-fi", StringComparison.OrdinalIgnoreCase))
+                {
+                    clauses.Add(wifiPredicate);
+                }
+                else if (networkType.Equals("5g", StringComparison.OrdinalIgnoreCase) ||
+                         networkType.Equals("5g nsa", StringComparison.OrdinalIgnoreCase) ||
+                         networkType.Equals("nr", StringComparison.OrdinalIgnoreCase))
+                {
+                    clauses.Add(fiveGCellPredicate);
+                }
+                else
+                {
+                    clauses.Add("network IS NOT NULL AND network LIKE @networkType");
+                    clauses.Add(registeredCellPredicate);
+                    parameters.Add(CreateParam(command, "@networkType", $"%{networkType}%"));
+                }
+            }
+            else
+            {
+                clauses.Add($"({registeredCellPredicate} OR {wifiPredicate} OR {fiveGCellPredicate})");
+            }
+
+            if (request.StartDate.HasValue)
+            {
+                clauses.Add("timestamp >= @from");
+                parameters.Add(CreateParam(command, "@from", request.StartDate.Value));
+            }
+
+            if (request.EndDate.HasValue)
+            {
+                clauses.Add("timestamp < @to");
+                parameters.Add(CreateParam(command, "@to", request.EndDate.Value.AddDays(1)));
+            }
+
+            var projectPolygonWkt = await ResolveProjectFilterWktAsync(request.ProjectId);
+            if (!string.IsNullOrWhiteSpace(projectPolygonWkt))
+            {
+                clauses.Add("lat IS NOT NULL AND lon IS NOT NULL");
+                clauses.Add("ST_Contains(ST_GeomFromText(@projectPolygonWkt, 4326), ST_SRID(POINT(lon, lat), 4326))");
+                parameters.Add(CreateParam(command, "@projectPolygonWkt", projectPolygonWkt));
+            }
+
+            return (string.Join(" AND ", clauses), parameters);
+        }
+
+        private async Task<string?> ResolveProjectFilterWktAsync(int projectId)
+        {
+            if (projectId <= 0)
+                return null;
+
+            var conn = _db.Database.GetDbConnection();
+            if (conn.State != ConnectionState.Open)
+                await conn.OpenAsync(HttpContext.RequestAborted);
+
+            await using var command = conn.CreateCommand();
+            command.CommandText = @"
+                SELECT polygon_wkt
+                FROM (
+                    SELECT
+                        ST_AsText(p.polygon) AS polygon_wkt,
+                        1 AS prio,
+                        0 AS row_order
+                    FROM tbl_project p
+                    WHERE p.id = @pid
+
+                    UNION ALL
+
+                    SELECT
+                        ST_AsText(mr.region) AS polygon_wkt,
+                        2 AS prio,
+                        mr.id AS row_order
+                    FROM map_regions mr
+                    WHERE mr.tbl_project_id = @pid
+                ) src
+                WHERE polygon_wkt IS NOT NULL AND polygon_wkt <> ''
+                ORDER BY prio ASC, row_order DESC
+                LIMIT 1;";
+            AddParam(command, "@pid", projectId);
+
+            var result = await command.ExecuteScalarAsync(HttpContext.RequestAborted);
+            return result == null || result == DBNull.Value
+                ? null
+                : Convert.ToString(result, CultureInfo.InvariantCulture)?.Trim();
+        }
+
+        private static DbParameter CreateParam(DbCommand command, string name, object? value)
+        {
+            var parameter = command.CreateParameter();
+            parameter.ParameterName = name;
+            parameter.Value = value ?? DBNull.Value;
+            return parameter;
+        }
+
+        private static void AddParam(DbCommand command, string name, object? value)
+        {
+            command.Parameters.Add(CreateParam(command, name, value));
+        }
+
+        private static string CleanProvider(string? value)
+        {
+            return (value ?? "").Trim().Trim('"').Trim('\'');
+        }
+
+        private static string? ReadString(DbDataReader reader, string name)
+        {
+            var ordinal = reader.GetOrdinal(name);
+            return reader.IsDBNull(ordinal) ? null : Convert.ToString(reader.GetValue(ordinal), CultureInfo.InvariantCulture);
+        }
+
+        private static int? ReadInt(DbDataReader reader, string name)
+        {
+            var ordinal = reader.GetOrdinal(name);
+            return reader.IsDBNull(ordinal) ? null : Convert.ToInt32(reader.GetValue(ordinal), CultureInfo.InvariantCulture);
+        }
+
+        private static float? ReadFloat(DbDataReader reader, string name)
+        {
+            var ordinal = reader.GetOrdinal(name);
+            return reader.IsDBNull(ordinal) ? null : Convert.ToSingle(reader.GetValue(ordinal), CultureInfo.InvariantCulture);
+        }
+
+        private static float? ClampKpi(float? value, float min, float max)
+        {
+            if (!value.HasValue) return null;
+            return Math.Min(Math.Max(value.Value, min), max);
+        }
+
+        private static DateTime? ReadDateTime(DbDataReader reader, string name)
+        {
+            var ordinal = reader.GetOrdinal(name);
+            return reader.IsDBNull(ordinal) ? null : Convert.ToDateTime(reader.GetValue(ordinal), CultureInfo.InvariantCulture);
+        }
+
         private static List<long> ResolveSessionIds(IEnumerable<long>? requestSessionIds, string? projectSessionIds)
         {
             var ids = new List<long>();
@@ -199,6 +427,12 @@ namespace SignalTracker.Controllers
         public string? Title { get; set; }
         public string? GeneratedBy { get; set; }
         public List<long>? SessionIds { get; set; }
+        public string? NetworkType { get; set; } = "ALL";
+        public string? Provider { get; set; }
+        public DateTime? StartDate { get; set; }
+        public DateTime? EndDate { get; set; }
+        public int? Page { get; set; }
+        public int? Limit { get; set; }
         public Dictionary<string, object?>? Summary { get; set; }
     }
 
@@ -244,6 +478,7 @@ namespace SignalTracker.Controllers
         public DateTime? From { get; set; }
         public DateTime? To { get; set; }
         public Dictionary<string, string> Summary { get; set; } = new();
+        public List<UnifiedMapReportRow> Rows { get; set; } = new();
         public List<ChartSeries> LineCharts { get; set; } = new();
         public List<BarChartData> BarCharts { get; set; } = new();
         public List<TableData> Tables { get; set; } = new();
@@ -432,7 +667,8 @@ namespace SignalTracker.Controllers
                 SessionIds = sessionIds,
                 TotalRows = orderedRows.Count,
                 From = orderedRows.Select(x => x.Timestamp).Where(x => x.HasValue).Min(),
-                To = orderedRows.Select(x => x.Timestamp).Where(x => x.HasValue).Max()
+                To = orderedRows.Select(x => x.Timestamp).Where(x => x.HasValue).Max(),
+                Rows = orderedRows
             };
 
             report.Summary = BuildSummary(report, orderedRows, thresholds);
@@ -779,171 +1015,507 @@ namespace SignalTracker.Controllers
 
     internal static class UnifiedMapRawPdfBuilder
     {
-        private const double PageWidth = 842;
-        private const double PageHeight = 595;
+        private const double PageWidth = 596;
+        private const double PageHeight = 842;
         private const double Margin = 40;
 
         public static byte[] Build(UnifiedMapReport report)
         {
             var contents = new List<byte[]>
             {
-                BuildSummaryPage(report)
+                BuildCoverPage(report),
+                BuildTableOfContentsPage(report),
+                BuildIntroductionPage(report),
+                BuildAreaSummaryPage(report),
+                BuildDriveAndKpiSummaryPage(report),
+                BuildMapViewPage(report, "a) Band", BuildBandNarrative(report), FindBarChart(report, "Band Distribution")),
+                BuildMapViewPage(report, "b) RSRP", BuildMetricNarrative(report, "RSRP", "Reference Signal Received Power", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Rsrp))), "dBm", -105, "falling below -105 dBm")),
+                BuildMapViewPage(report, "c) RSRQ", BuildMetricNarrative(report, "RSRQ", "Reference Signal Received Quality", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Rsrq))), "dB", -14, "falling below -14 dB")),
+                BuildMapViewPage(report, "d) SINR", BuildMetricNarrative(report, "SINR", "Signal-to-Interference Noise Ratio", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Sinr))), "dB", 5, "falling below 5 dB")),
+                BuildMapViewPage(report, "e) DL Throughput", BuildMetricNarrative(report, "DL throughput", "Downlink throughput", MetricStats(report.Rows.Select(x => ParseNumber(x.DlTpt))), "Mbps", 10, "falling below 10 Mbps")),
+                BuildMapViewPage(report, "f) UL Throughput", BuildMetricNarrative(report, "UL throughput", "Uplink throughput", MetricStats(report.Rows.Select(x => ParseNumber(x.UlTpt))), "Mbps", 5, "falling below 5 Mbps")),
+                BuildPciSummaryPage(report),
+                BuildPciDetailsPage(report),
+                BuildPerformanceSummaryPage(report)
             };
-
-            contents.AddRange(report.BarCharts.Select(chart => BuildBarChartPage(report, chart)));
-            contents.AddRange(report.LineCharts.Where(x => x.Values.Count > 1).Select(chart => BuildLineChartPage(report, chart)));
-            contents.AddRange(report.Tables.Select(table => BuildTablePage(report, table)));
 
             return WritePdf(contents, report);
         }
 
-        private static byte[] BuildSummaryPage(UnifiedMapReport report)
+        private static byte[] BuildCoverPage(UnifiedMapReport report)
         {
-            var lines = Header(report, "Executive Summary", 1);
-            var y = 480.0;
-            foreach (var item in report.Summary.Take(14))
-            {
-                lines.Add(Text(60, y, 11, $"{item.Key}: {item.Value}"));
-                y -= 24;
-            }
-            return Ascii(string.Join("\n", lines) + "\n");
-        }
-
-        private static byte[] BuildBarChartPage(UnifiedMapReport report, BarChartData chart)
-        {
-            var lines = Header(report, chart.Title, 1);
-            var items = chart.Items.Where(x => x.Value > 0).Take(14).ToList();
-
-            if (items.Count == 0)
-            {
-                lines.Add(Text(60, 300, 12, "No data available."));
-                return Ascii(string.Join("\n", lines) + "\n");
-            }
-
-            var max = items.Max(x => x.Value);
-            var chartX = 230.0;
-            var chartY = 455.0;
-            var barMaxWidth = 500.0;
-            var barHeight = 18.0;
-            var gap = 13.0;
-
-            foreach (var item in items)
-            {
-                var width = Math.Max(2, barMaxWidth * item.Value / max);
-                lines.Add(FillColor(37, 99, 235));
-                lines.Add(Rect(chartX, chartY - barHeight + 3, width, barHeight, true));
-                lines.Add(FillColor(15, 23, 42));
-                lines.Add(Text(60, chartY - 10, 9, Truncate(item.Label, 26)));
-                lines.Add(Text(chartX + width + 8, chartY - 10, 9, item.Value.ToString("N0", CultureInfo.InvariantCulture)));
-                chartY -= barHeight + gap;
-            }
-
-            return Ascii(string.Join("\n", lines) + "\n");
-        }
-
-        private static byte[] BuildLineChartPage(UnifiedMapReport report, ChartSeries chart)
-        {
-            var lines = Header(report, chart.Title, 1);
-            var values = chart.Values;
-            var min = values.Min();
-            var max = values.Max();
-            if (Math.Abs(max - min) < 0.0001)
-            {
-                max += 1;
-                min -= 1;
-            }
-
-            var x = 70.0;
-            var y = 95.0;
-            var width = 700.0;
-            var height = 360.0;
-            lines.Add(StrokeColor(203, 213, 225));
-            lines.Add(Rect(x, y, width, height, false));
-            lines.Add(Text(x, y + height + 20, 9, $"Max: {max:0.##} {chart.Unit}".Trim()));
-            lines.Add(Text(x, y - 20, 9, $"Min: {min:0.##} {chart.Unit}".Trim()));
-
-            var points = new List<string>();
-            for (var i = 0; i < values.Count; i++)
-            {
-                var px = x + (i * width / Math.Max(values.Count - 1, 1));
-                var py = y + ((values[i] - min) / (max - min) * height);
-                points.Add($"{Fmt(px)} {Fmt(py)}");
-            }
-
-            if (points.Count > 1)
-            {
-                lines.Add(StrokeColor(14, 165, 233));
-                lines.Add("1.4 w");
-                lines.Add($"{points[0]} m");
-                for (var i = 1; i < points.Count; i++)
-                    lines.Add($"{points[i]} l");
-                lines.Add("S");
-            }
-
-            return Ascii(string.Join("\n", lines) + "\n");
-        }
-
-        private static byte[] BuildTablePage(UnifiedMapReport report, TableData table)
-        {
-            var lines = Header(report, table.Title, 1);
-            var x = 35.0;
-            var y = 485.0;
-            var rowHeight = 18.0;
-            var colWidth = (PageWidth - 70) / Math.Max(table.Headers.Count, 1);
-
-            lines.Add(FillColor(226, 232, 240));
-            lines.Add(Rect(x, y - 4, PageWidth - 70, rowHeight + 4, true));
+            var lines = PageBackground();
             lines.Add(FillColor(15, 23, 42));
-
-            for (var i = 0; i < table.Headers.Count; i++)
-                lines.Add(Text(x + (i * colWidth) + 4, y + 1, 7.5, Truncate(table.Headers[i], 18)));
-
-            y -= rowHeight;
-            foreach (var row in table.Rows.Take(44))
-            {
-                for (var i = 0; i < table.Headers.Count && i < row.Count; i++)
-                    lines.Add(Text(x + (i * colWidth) + 4, y + 1, 7, Truncate(row[i], 18)));
-                lines.Add(StrokeColor(226, 232, 240));
-                lines.Add($"{Fmt(x)} {Fmt(y - 4)} m {Fmt(PageWidth - 35)} {Fmt(y - 4)} l S");
-                y -= rowHeight;
-                if (y < 50) break;
-            }
-
-            return Ascii(string.Join("\n", lines) + "\n");
-        }
-
-        private static List<string> Header(UnifiedMapReport report, string pageTitle, int pageNumber)
-        {
-            var lines = new List<string>
-            {
-                "q",
-                FillColor(248, 250, 252),
-                Rect(0, 0, PageWidth, PageHeight, true),
-                FillColor(15, 23, 42),
-            };
-
+            lines.Add(Text(178, 520, 24, "Drive Test Report"));
+            lines.Add(Text(210, 490, 13, report.ProjectName));
+            lines.Add(Text(202, 452, 11, $"Generated on {report.GeneratedAt:MMMM dd, yyyy}"));
+            lines.Add(StrokeColor(37, 99, 235));
+            lines.Add("2 w");
+            lines.Add($"{Fmt(170)} {Fmt(475)} m {Fmt(426)} {Fmt(475)} l S");
             if (report.Logo != null)
             {
-                var logoWidth = 58.0;
+                var logoWidth = 82.0;
                 var logoHeight = logoWidth * report.Logo.Height / Math.Max(report.Logo.Width, 1);
-                lines.Add($"q {Fmt(logoWidth)} 0 0 {Fmt(logoHeight)} {Fmt(Margin)} {Fmt(533)} cm /Logo Do Q");
+                lines.Add($"q {Fmt(logoWidth)} 0 0 {Fmt(logoHeight)} {Fmt((PageWidth - logoWidth) / 2)} {Fmt(610)} cm /Logo Do Q");
+            }
+            lines.Add(FillColor(71, 85, 105));
+            lines.Add(Text(185, 95, 9, report.CompanyName));
+            lines.Add("Q");
+            return Ascii(string.Join("\n", lines) + "\n");
+        }
+
+        private static byte[] BuildTableOfContentsPage(UnifiedMapReport report)
+        {
+            var lines = Header(report, "Table of Contents");
+            var y = 710.0;
+            var entries = new[]
+            {
+                ("1. Introduction", "3"),
+                ("2. Area Summary", "4"),
+                ("3. Drive Summary", "5"),
+                ("4. KPI Summary", "5"),
+                ("5. Map View", "6"),
+                ("   a) Band", "6"),
+                ("   b) RSRP", "7"),
+                ("   c) RSRQ", "8"),
+                ("   d) SINR", "9"),
+                ("   e) DL Throughput", "10"),
+                ("   f) UL Throughput", "11"),
+                ("6. PCI Summary", "12"),
+                ("   a) Top PCI Values", "13"),
+                ("   b) PCI with Poor RSRP", "13"),
+                ("   c) PCI with Poor RSRQ", "13"),
+                ("7. Performance Summary", "14")
+            };
+
+            foreach (var entry in entries)
+            {
+                lines.Add(Text(Margin, y, 11, entry.Item1));
+                lines.Add(Text(PageWidth - Margin - 20, y, 11, entry.Item2));
+                y -= 28;
+            }
+            return Ascii(string.Join("\n", lines) + "\n");
+        }
+
+        private static byte[] BuildIntroductionPage(UnifiedMapReport report)
+        {
+            var lines = Header(report, "1. Introduction");
+            var y = 710.0;
+            AddWrapped(lines, Margin, ref y, $"This drive test report provides insights into network performance for {report.ProjectName}. Drive testing is essential for evaluating signal strength, coverage, quality, and provider performance, enabling actionable recommendations for optimization and deployment planning.", 11, 86);
+            y -= 12;
+            AddWrapped(lines, Margin, ref y, "The report highlights areas of strong and weak coverage, summarizes key radio and service KPIs, and presents PCI and performance summaries to support data-driven network improvement.", 11, 86);
+            AddSectionTitle(lines, "2. Area Summary", ref y);
+            AddWrapped(lines, Margin, ref y, "Drive route coverage is summarized from available session samples and spatial distribution. Use this section with the map layers in Unified Map to identify operational areas, dense sample clusters, and marked route segments.", 11, 86);
+
+            return Ascii(string.Join("\n", lines) + "\n");
+        }
+
+        private static byte[] BuildAreaSummaryPage(UnifiedMapReport report)
+        {
+            var lines = Header(report, "2. Area Summary");
+            var y = 710.0;
+            AddWrapped(lines, Margin, ref y, "Drive route covers key operational areas identified from collected GPS samples and session density.", 11, 86);
+            y -= 10;
+            AddSectionTitle(lines, "Hotspots & Marked Locations", ref y, 13);
+            AddWrapped(lines, Margin, ref y, BuildCoordinateSummary(report), 11, 86);
+            y -= 8;
+            AddSectionTitle(lines, "Major Areas Covered", ref y, 13);
+            AddWrapped(lines, Margin, ref y, $"The drive covered {report.TotalRows:N0} samples across {report.SessionIds.Count:N0} session(s). Latitude and longitude ranges are included when valid GPS points are available.", 11, 86);
+            AddGpsRange(lines, report, ref y);
+            return Ascii(string.Join("\n", lines) + "\n");
+        }
+
+        private static byte[] BuildDriveAndKpiSummaryPage(UnifiedMapReport report)
+        {
+            var lines = Header(report, "3. Drive Summary");
+            var y = 710.0;
+            var days = report.From.HasValue && report.To.HasValue
+                ? Math.Max(1, (int)Math.Ceiling((report.To.Value.Date - report.From.Value.Date).TotalDays) + 1)
+                : 0;
+            var period = report.From.HasValue && report.To.HasValue
+                ? $"from {report.From:yyyy-MM-dd HH:mm} to {report.To:yyyy-MM-dd HH:mm}"
+                : "from an unspecified start date to an unspecified end date";
+            AddWrapped(lines, Margin, ref y, $"The drive test was conducted over {(days == 0 ? "an unspecified number of" : days.ToString(CultureInfo.InvariantCulture))} day(s) {period}, with {report.TotalRows:N0} samples collected across {report.SessionIds.Count:N0} session(s).", 11, 86);
+            AddSectionTitle(lines, "4. KPI Summary", ref y);
+            AddWrapped(lines, Margin, ref y, "Network KPI metrics including coverage, quality, throughput, latency, jitter, and packet loss were analyzed across the drive route. Detailed KPI observations are provided in the Map View and Performance Summary sections.", 11, 86);
+            y -= 12;
+            DrawTable(lines, Margin, ref y, new[] { "Metric", "Average", "Minimum", "Maximum", "Samples" }, BuildKpiRows(report).Take(8).ToList(), 10);
+            return Ascii(string.Join("\n", lines) + "\n");
+        }
+
+        private static byte[] BuildMapViewPage(UnifiedMapReport report, string subsection, string narrative, BarChartData? chart = null)
+        {
+            var lines = Header(report, $"5. Map View - {subsection}");
+            var y = 710.0;
+            AddWrapped(lines, Margin, ref y, narrative, 11, 86);
+            if (chart != null)
+            {
+                y -= 16;
+                DrawBarChart(lines, chart, Margin, y - 20, PageWidth - (Margin * 2), 260);
+            }
+            return Ascii(string.Join("\n", lines) + "\n");
+        }
+
+        private static byte[] BuildPciSummaryPage(UnifiedMapReport report)
+        {
+            var lines = Header(report, "6. PCI Summary");
+            var y = 710.0;
+            var pciGroups = PciGroups(report).ToList();
+            var unique = pciGroups.Count;
+            var top30 = pciGroups.Take(30).Sum(x => x.Count);
+            var percent = report.TotalRows == 0 ? 0 : top30 * 100.0 / report.TotalRows;
+            AddWrapped(lines, Margin, ref y, $"The network utilized a total of {unique:N0} unique PCI values during the drive test. The top 30 PCI values accounted for {percent:0.##}% of samples, indicating the concentration of PCI distribution across the measured route.", 11, 86);
+            y -= 20;
+            DrawTable(lines, Margin, ref y, new[] { "PCI", "Samples", "Share" }, pciGroups.Take(12).Select(x => new List<string> { x.Pci, x.Count.ToString("N0", CultureInfo.InvariantCulture), $"{(report.TotalRows == 0 ? 0 : x.Count * 100.0 / report.TotalRows):0.##}%" }).ToList(), 10);
+            return Ascii(string.Join("\n", lines) + "\n");
+        }
+
+        private static byte[] BuildPciDetailsPage(UnifiedMapReport report)
+        {
+            var lines = Header(report, "6. PCI Summary - Details");
+            var y = 710.0;
+            AddSectionTitle(lines, "a) Top 30 PCI Values", ref y, 13);
+            DrawTable(lines, Margin, ref y, new[] { "PCI", "Samples" }, PciGroups(report).Take(10).Select(x => new List<string> { x.Pci, x.Count.ToString("N0", CultureInfo.InvariantCulture) }).ToList(), 9);
+            y -= 14;
+            AddSectionTitle(lines, "b) PCI with Poor RSRP", ref y, 13);
+            DrawTable(lines, Margin, ref y, new[] { "PCI", "Poor RSRP Samples" }, PoorPciGroups(report, x => x.Rsrp.HasValue && x.Rsrp.Value < -105).Take(8).Select(x => new List<string> { x.Pci, x.Count.ToString("N0", CultureInfo.InvariantCulture) }).ToList(), 9);
+            y -= 14;
+            AddSectionTitle(lines, "c) PCI with Poor RSRQ", ref y, 13);
+            DrawTable(lines, Margin, ref y, new[] { "PCI", "Poor RSRQ Samples" }, PoorPciGroups(report, x => x.Rsrq.HasValue && x.Rsrq.Value < -14).Take(8).Select(x => new List<string> { x.Pci, x.Count.ToString("N0", CultureInfo.InvariantCulture) }).ToList(), 9);
+            return Ascii(string.Join("\n", lines) + "\n");
+        }
+
+        private static byte[] BuildPerformanceSummaryPage(UnifiedMapReport report)
+        {
+            var lines = Header(report, "7. Performance Summary");
+            var y = 710.0;
+            AddSectionTitle(lines, "a) Network Quality Metrics", ref y, 13);
+            DrawTable(lines, Margin, ref y, new[] { "Metric", "Average", "Poor Samples" }, BuildQualityRows(report), 9);
+            y -= 16;
+            AddSectionTitle(lines, "b) Speed Metrics", ref y, 13);
+            DrawTable(lines, Margin, ref y, new[] { "Metric", "Average", "Slow Samples" }, BuildSpeedRows(report), 9);
+            y -= 16;
+            AddSectionTitle(lines, "c) Latency Distribution", ref y, 13);
+            DrawTable(lines, Margin, ref y, new[] { "Range", "Samples" }, BuildRangeRows(report.Rows.Select(x => ToNullableDouble(x.Latency)), new[] { 50.0, 100.0, 200.0 }), 9);
+            y -= 16;
+            AddSectionTitle(lines, "d) Jitter Distribution", ref y, 13);
+            DrawTable(lines, Margin, ref y, new[] { "Range", "Samples" }, BuildRangeRows(report.Rows.Select(x => ToNullableDouble(x.Jitter)), new[] { 10.0, 30.0, 50.0 }), 9);
+            return Ascii(string.Join("\n", lines) + "\n");
+        }
+
+        private static List<string> PageBackground()
+        {
+            return new List<string>
+            {
+                "q",
+                FillColor(255, 255, 255),
+                Rect(0, 0, PageWidth, PageHeight, true)
+            };
+        }
+
+        private static List<string> Header(UnifiedMapReport report, string pageTitle)
+        {
+            var lines = PageBackground();
+            if (report.Logo != null)
+            {
+                var logoWidth = 52.0;
+                var logoHeight = logoWidth * report.Logo.Height / Math.Max(report.Logo.Width, 1);
+                lines.Add($"q {Fmt(logoWidth)} 0 0 {Fmt(logoHeight)} {Fmt(Margin)} {Fmt(764)} cm /Logo Do Q");
             }
 
             lines.AddRange(new[]
             {
-                Text(report.Logo == null ? Margin : 108, 558, 20, report.CompanyName),
-                Text(report.Logo == null ? Margin : 108, 538, 9, "Drive Test Analytics Report"),
-                Text(520, 552, 9, $"{report.ProjectName}"),
-                Text(520, 536, 8, $"Generated {report.GeneratedAt:yyyy-MM-dd HH:mm}" + (string.IsNullOrWhiteSpace(report.GeneratedBy) ? "" : $" by {report.GeneratedBy}")),
+                FillColor(15, 23, 42),
+                Text(report.Logo == null ? Margin : 105, 792, 13, "Drive Test Report"),
+                FillColor(71, 85, 105),
+                Text(report.Logo == null ? Margin : 105, 775, 8.5, report.ProjectName),
                 StrokeColor(203, 213, 225),
-                $"{Fmt(Margin)} 522 m {Fmt(PageWidth - Margin)} 522 l S",
-                FillColor(30, 41, 59),
-                Text(Margin, 500, 15, pageTitle),
+                $"{Fmt(Margin)} 748 m {Fmt(PageWidth - Margin)} 748 l S",
+                FillColor(15, 23, 42),
+                Text(Margin, 725, 16, pageTitle),
                 "Q"
             });
 
             return lines;
         }
+
+        private static void AddSectionTitle(List<string> lines, string title, ref double y, double size = 15)
+        {
+            y -= 28;
+            lines.Add(FillColor(15, 23, 42));
+            lines.Add(Text(Margin, y, size, title));
+            y -= 24;
+        }
+
+        private static void AddWrapped(List<string> lines, double x, ref double y, string text, double size, int maxChars)
+        {
+            foreach (var line in Wrap(text, maxChars))
+            {
+                lines.Add(FillColor(30, 41, 59));
+                lines.Add(Text(x, y, size, line));
+                y -= size + 6;
+            }
+        }
+
+        private static IEnumerable<string> Wrap(string text, int maxChars)
+        {
+            var words = Regex.Split(text ?? "", @"\s+").Where(x => x.Length > 0);
+            var line = "";
+            foreach (var word in words)
+            {
+                if (line.Length == 0)
+                {
+                    line = word;
+                    continue;
+                }
+
+                if (line.Length + word.Length + 1 > maxChars)
+                {
+                    yield return line;
+                    line = word;
+                }
+                else
+                {
+                    line += " " + word;
+                }
+            }
+
+            if (line.Length > 0)
+                yield return line;
+        }
+
+        private static BarChartData? FindBarChart(UnifiedMapReport report, string title)
+        {
+            return report.BarCharts.FirstOrDefault(x => string.Equals(x.Title, title, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static string BuildBandNarrative(UnifiedMapReport report)
+        {
+            var chart = FindBarChart(report, "Band Distribution");
+            var top = chart?.Items.Where(x => x.Value > 0).Take(3).ToList() ?? new List<(string Label, double Value)>();
+            if (top.Count == 0)
+                return "The network utilized available serving bands during the drive test. No band distribution data was available for the selected samples.";
+
+            var parts = top.Select(x => $"{x.Label} at {(report.TotalRows == 0 ? 0 : x.Value * 100.0 / report.TotalRows):0.##}%");
+            return $"The network utilized various frequency bands during the drive test. The {top[0].Label} band accounted for {(report.TotalRows == 0 ? 0 : top[0].Value * 100.0 / report.TotalRows):0.##}% of samples, followed by {string.Join(", ", parts.Skip(1))}. These bands played a significant role in maintaining network coverage and capacity.";
+        }
+
+        private static string BuildMetricNarrative(UnifiedMapReport report, string metric, string description, MetricSummary stats, string unit, double poorLimit, string poorText)
+        {
+            if (stats.Count == 0)
+                return $"{metric} ({description}) was analyzed across the drive route, but no valid samples were available for this metric.";
+
+            var poorCount = report.Rows.Count(x =>
+            {
+                var value = metric.StartsWith("DL", StringComparison.OrdinalIgnoreCase) ? ParseNumber(x.DlTpt)
+                    : metric.StartsWith("UL", StringComparison.OrdinalIgnoreCase) ? ParseNumber(x.UlTpt)
+                    : metric == "RSRP" ? ToNullableDouble(x.Rsrp)
+                    : metric == "RSRQ" ? ToNullableDouble(x.Rsrq)
+                    : metric == "SINR" ? ToNullableDouble(x.Sinr)
+                    : null;
+
+                return value.HasValue && (metric == "RSRP" || metric == "RSRQ" ? value.Value < poorLimit : value.Value < poorLimit);
+            });
+
+            var poorPercent = report.TotalRows == 0 ? 0 : poorCount * 100.0 / report.TotalRows;
+            var performance = poorPercent >= 60 ? "poor" : poorPercent >= 25 ? "moderate" : "strong";
+            return $"{metric} ({description}) is a key indicator for network performance. The measured values show an average of {stats.Average:0.##} {unit}, ranging from {stats.Min:0.##} to {stats.Max:0.##} {unit}. The network demonstrates {performance} {metric} performance with {poorCount:N0} samples ({poorPercent:0.##}%) {poorText}.";
+        }
+
+        private static string BuildCoordinateSummary(UnifiedMapReport report)
+        {
+            var points = report.Rows
+                .Where(x => x.Lat.HasValue && x.Lon.HasValue && x.Lat.Value is >= -90 and <= 90 && x.Lon.Value is >= -180 and <= 180)
+                .Select(x => new { Lat = x.Lat!.Value, Lon = x.Lon!.Value })
+                .ToList();
+
+            if (points.Count == 0)
+                return "No valid GPS coordinates were available in the selected drive samples.";
+
+            return $"Crowded and high-traffic locations should be reviewed around the densest measured route segments. Valid GPS samples span approximately {points.Min(x => x.Lat):0.000000} to {points.Max(x => x.Lat):0.000000} latitude and {points.Min(x => x.Lon):0.000000} to {points.Max(x => x.Lon):0.000000} longitude.";
+        }
+
+        private static void AddGpsRange(List<string> lines, UnifiedMapReport report, ref double y)
+        {
+            var points = report.Rows
+                .Where(x => x.Lat.HasValue && x.Lon.HasValue && x.Lat.Value is >= -90 and <= 90 && x.Lon.Value is >= -180 and <= 180)
+                .ToList();
+            if (points.Count == 0) return;
+
+            y -= 14;
+            DrawTable(lines, Margin, ref y, new[] { "GPS Summary", "Value" }, new List<List<string>>
+            {
+                new() { "Valid GPS samples", points.Count.ToString("N0", CultureInfo.InvariantCulture) },
+                new() { "Latitude range", $"{points.Min(x => x.Lat):0.000000} to {points.Max(x => x.Lat):0.000000}" },
+                new() { "Longitude range", $"{points.Min(x => x.Lon):0.000000} to {points.Max(x => x.Lon):0.000000}" }
+            }, 10);
+        }
+
+        private static void DrawBarChart(List<string> lines, BarChartData chart, double x, double y, double width, double height)
+        {
+            var items = chart.Items.Where(x => x.Value > 0).Take(8).ToList();
+            if (items.Count == 0) return;
+
+            var max = items.Max(x => x.Value);
+            var labelWidth = 128.0;
+            var barWidth = width - labelWidth - 70;
+            var rowHeight = Math.Min(28, height / items.Count);
+            lines.Add(FillColor(15, 23, 42));
+            lines.Add(Text(x, y + 24, 12, chart.Title));
+
+            for (var i = 0; i < items.Count; i++)
+            {
+                var item = items[i];
+                var rowY = y - (i * rowHeight);
+                var filled = Math.Max(2, barWidth * item.Value / max);
+                lines.Add(FillColor(51, 102, 204));
+                lines.Add(Rect(x + labelWidth, rowY - 8, filled, 12, true));
+                lines.Add(FillColor(30, 41, 59));
+                lines.Add(Text(x, rowY - 6, 9, Truncate(item.Label, 22)));
+                lines.Add(Text(x + labelWidth + filled + 8, rowY - 6, 9, item.Value.ToString("N0", CultureInfo.InvariantCulture)));
+            }
+        }
+
+        private static void DrawTable(List<string> lines, double x, ref double y, IReadOnlyList<string> headers, IReadOnlyList<List<string>> rows, double size)
+        {
+            if (headers.Count == 0) return;
+
+            var rowHeight = size + 10;
+            var tableWidth = PageWidth - (Margin * 2);
+            var colWidth = tableWidth / headers.Count;
+            lines.Add(FillColor(226, 232, 240));
+            lines.Add(Rect(x, y - 6, tableWidth, rowHeight, true));
+            lines.Add(FillColor(15, 23, 42));
+            for (var i = 0; i < headers.Count; i++)
+                lines.Add(Text(x + (i * colWidth) + 5, y, size, Truncate(headers[i], 18)));
+
+            y -= rowHeight;
+            foreach (var row in rows)
+            {
+                lines.Add(StrokeColor(226, 232, 240));
+                lines.Add($"{Fmt(x)} {Fmt(y - 7)} m {Fmt(x + tableWidth)} {Fmt(y - 7)} l S");
+                lines.Add(FillColor(30, 41, 59));
+                for (var i = 0; i < headers.Count && i < row.Count; i++)
+                    lines.Add(Text(x + (i * colWidth) + 5, y, size - 1, Truncate(row[i], 22)));
+                y -= rowHeight;
+                if (y < 70) break;
+            }
+        }
+
+        private static void DrawTable(List<string> lines, double x, ref double y, IReadOnlyList<string> headers, List<List<string>> rows, double size)
+        {
+            DrawTable(lines, x, ref y, headers, (IReadOnlyList<List<string>>)rows, size);
+        }
+
+        private static List<List<string>> BuildKpiRows(UnifiedMapReport report)
+        {
+            var metrics = new List<(string Name, MetricSummary Stats, string Unit)>
+            {
+                ("RSRP", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Rsrp))), "dBm"),
+                ("RSRQ", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Rsrq))), "dB"),
+                ("SINR", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Sinr))), "dB"),
+                ("MOS", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Mos))), ""),
+                ("DL Throughput", MetricStats(report.Rows.Select(x => ParseNumber(x.DlTpt))), "Mbps"),
+                ("UL Throughput", MetricStats(report.Rows.Select(x => ParseNumber(x.UlTpt))), "Mbps"),
+                ("Latency", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Latency))), "ms"),
+                ("Jitter", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Jitter))), "ms")
+            };
+
+            return metrics.Select(x => new List<string>
+            {
+                x.Name,
+                FormatStat(x.Stats.Average, x.Stats.Count, x.Unit),
+                FormatStat(x.Stats.Min, x.Stats.Count, x.Unit),
+                FormatStat(x.Stats.Max, x.Stats.Count, x.Unit),
+                x.Stats.Count.ToString("N0", CultureInfo.InvariantCulture)
+            }).ToList();
+        }
+
+        private static List<List<string>> BuildQualityRows(UnifiedMapReport report)
+        {
+            return new List<List<string>>
+            {
+                QualityRow("RSRP", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Rsrp))), "dBm", report.Rows.Count(x => x.Rsrp.HasValue && x.Rsrp.Value < -105)),
+                QualityRow("RSRQ", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Rsrq))), "dB", report.Rows.Count(x => x.Rsrq.HasValue && x.Rsrq.Value < -14)),
+                QualityRow("SINR", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Sinr))), "dB", report.Rows.Count(x => x.Sinr.HasValue && x.Sinr.Value < 5)),
+                QualityRow("MOS", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Mos))), "", report.Rows.Count(x => x.Mos.HasValue && x.Mos.Value < 3))
+            };
+        }
+
+        private static List<string> QualityRow(string metric, MetricSummary stats, string unit, int poorCount)
+        {
+            return new List<string> { metric, FormatStat(stats.Average, stats.Count, unit), poorCount.ToString("N0", CultureInfo.InvariantCulture) };
+        }
+
+        private static List<List<string>> BuildSpeedRows(UnifiedMapReport report)
+        {
+            return new List<List<string>>
+            {
+                new() { "DL Throughput", FormatStat(MetricStats(report.Rows.Select(x => ParseNumber(x.DlTpt))).Average, MetricStats(report.Rows.Select(x => ParseNumber(x.DlTpt))).Count, "Mbps"), report.Rows.Count(x => ParseNumber(x.DlTpt) is < 10).ToString("N0", CultureInfo.InvariantCulture) },
+                new() { "UL Throughput", FormatStat(MetricStats(report.Rows.Select(x => ParseNumber(x.UlTpt))).Average, MetricStats(report.Rows.Select(x => ParseNumber(x.UlTpt))).Count, "Mbps"), report.Rows.Count(x => ParseNumber(x.UlTpt) is < 5).ToString("N0", CultureInfo.InvariantCulture) }
+            };
+        }
+
+        private static List<List<string>> BuildRangeRows(IEnumerable<double?> values, IReadOnlyList<double> cutoffs)
+        {
+            var list = values.Where(x => x.HasValue).Select(x => x!.Value).ToList();
+            if (list.Count == 0) return new List<List<string>> { new() { "No data", "0" } };
+
+            return new List<List<string>>
+            {
+                new() { $"< {cutoffs[0]:0.##}", list.Count(x => x < cutoffs[0]).ToString("N0", CultureInfo.InvariantCulture) },
+                new() { $"{cutoffs[0]:0.##} - {cutoffs[1]:0.##}", list.Count(x => x >= cutoffs[0] && x < cutoffs[1]).ToString("N0", CultureInfo.InvariantCulture) },
+                new() { $"{cutoffs[1]:0.##} - {cutoffs[2]:0.##}", list.Count(x => x >= cutoffs[1] && x < cutoffs[2]).ToString("N0", CultureInfo.InvariantCulture) },
+                new() { $">= {cutoffs[2]:0.##}", list.Count(x => x >= cutoffs[2]).ToString("N0", CultureInfo.InvariantCulture) }
+            };
+        }
+
+        private static IEnumerable<(string Pci, int Count)> PciGroups(UnifiedMapReport report)
+        {
+            return report.Rows
+                .Select(x => string.IsNullOrWhiteSpace(x.Pci) ? "Unknown" : x.Pci.Trim())
+                .GroupBy(x => x, StringComparer.OrdinalIgnoreCase)
+                .Select(x => (Pci: x.Key, Count: x.Count()))
+                .OrderByDescending(x => x.Count)
+                .ThenBy(x => x.Pci);
+        }
+
+        private static IEnumerable<(string Pci, int Count)> PoorPciGroups(UnifiedMapReport report, Func<UnifiedMapReportRow, bool> predicate)
+        {
+            return report.Rows
+                .Where(predicate)
+                .Select(x => string.IsNullOrWhiteSpace(x.Pci) ? "Unknown" : x.Pci.Trim())
+                .GroupBy(x => x, StringComparer.OrdinalIgnoreCase)
+                .Select(x => (Pci: x.Key, Count: x.Count()))
+                .OrderByDescending(x => x.Count)
+                .ThenBy(x => x.Pci);
+        }
+
+        private static MetricSummary MetricStats(IEnumerable<double?> source)
+        {
+            var values = source.Where(x => x.HasValue && !double.IsNaN(x.Value) && !double.IsInfinity(x.Value)).Select(x => x!.Value).ToList();
+            return values.Count == 0
+                ? new MetricSummary(0, 0, 0, 0)
+                : new MetricSummary(values.Count, values.Average(), values.Min(), values.Max());
+        }
+
+        private static double? ToNullableDouble(float? value) => value.HasValue ? value.Value : null;
+
+        private static double? ParseNumber(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return null;
+            var match = Regex.Match(value, @"-?\d+(\.\d+)?");
+            return match.Success && double.TryParse(match.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var number)
+                ? number
+                : null;
+        }
+
+        private static string FormatStat(double value, int count, string unit)
+        {
+            return count == 0 ? "N/A" : $"{value:0.##} {unit}".Trim();
+        }
+
+        private sealed record MetricSummary(int Count, double Average, double Min, double Max);
 
         private static byte[] WritePdf(IReadOnlyList<byte[]> pageContents, UnifiedMapReport report)
         {
