@@ -354,7 +354,18 @@ namespace SignalTracker.Controllers
                 }
 
                 bool allOk = results.All(item => item.Success);
-                var failedFiles = results.Where(item => !item.Success).Select(item => item.FileName).ToList();
+                var failures = results
+                    .Where(item => !item.Success)
+                    .Select(item => new
+                    {
+                        item.FileName,
+                        item.UploadHistoryId,
+                        ErrorMessage = string.IsNullOrWhiteSpace(item.ErrorMessage)
+                            ? "Processing failed without a detailed error message."
+                            : item.ErrorMessage
+                    })
+                    .ToList();
+                var failedFiles = failures.Select(item => item.FileName).ToList();
                 var createdUploadIds = results.Select(item => item.UploadHistoryId).ToList();
                 string responseMessage = allOk
                     ? (results.Count == 1
@@ -384,7 +395,8 @@ namespace SignalTracker.Controllers
                     Message = responseMessage,
                     UploadId = createdUploadIds.Count == 1 ? createdUploadIds[0] : (int?)null,
                     UploadIds = createdUploadIds,
-                    SessionId = createdSessionId
+                    SessionId = createdSessionId,
+                    Failures = failures
                 });
             }
             catch (Exception ex)

@@ -29,7 +29,8 @@ namespace SignalTracker.Controllers
     [Authorize]
     public class ProcessCSVController : Controller
     {
-        private const long MaxZipEntryBytes = 50_000_000;
+        private const long MaxZipEntryBytes = 200L * 1024 * 1024;
+        private const long MaxZipTotalExtractedBytes = 500L * 1024 * 1024;
         private static readonly HashSet<string> AllowedZipExtensions = new(StringComparer.OrdinalIgnoreCase)
         {
             ".csv",
@@ -1003,6 +1004,7 @@ public IActionResult UploadSitePrediction(
                 throw new InvalidOperationException("Zip archive contains too many entries.");
             }
 
+            long totalExtractedBytes = 0;
             foreach (var entry in archive.Entries)
             {
                 if (string.IsNullOrEmpty(entry.Name))
@@ -1012,7 +1014,18 @@ public IActionResult UploadSitePrediction(
 
                 if (entry.Length > MaxZipEntryBytes || entry.CompressedLength > MaxZipEntryBytes)
                 {
-                    throw new InvalidOperationException("Zip archive contains an entry that exceeds the allowed file size.");
+                    throw new InvalidOperationException(
+                        $"Zip entry '{entry.FullName}' exceeds the allowed file size. " +
+                        $"Uncompressed={FormatBytes(entry.Length)}, Compressed={FormatBytes(entry.CompressedLength)}, " +
+                        $"Limit={FormatBytes(MaxZipEntryBytes)}.");
+                }
+
+                if (totalExtractedBytes + entry.Length > MaxZipTotalExtractedBytes)
+                {
+                    throw new InvalidOperationException(
+                        $"Zip archive exceeds the allowed extracted size. " +
+                        $"Current={FormatBytes(totalExtractedBytes)}, Entry='{entry.FullName}', " +
+                        $"EntrySize={FormatBytes(entry.Length)}, Limit={FormatBytes(MaxZipTotalExtractedBytes)}.");
                 }
 
                 var destinationPath = GetNormalizedDestinationPath(extractPath, entry.FullName);
@@ -1026,8 +1039,67 @@ public IActionResult UploadSitePrediction(
 
                 using var entryStream = entry.Open();
                 using var outputStream = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None);
-                entryStream.CopyTo(outputStream);
+                var copiedBytes = CopyZipEntryToFileWithLimit(
+                    entryStream,
+                    outputStream,
+                    entry.FullName,
+                    MaxZipEntryBytes,
+                    MaxZipTotalExtractedBytes - totalExtractedBytes);
+                totalExtractedBytes += copiedBytes;
             }
+        }
+
+        private static long CopyZipEntryToFileWithLimit(
+            Stream entryStream,
+            Stream outputStream,
+            string entryName,
+            long maxEntryBytes,
+            long remainingTotalBytes)
+        {
+            var buffer = new byte[128 * 1024];
+            long copied = 0;
+            int read;
+
+            while ((read = entryStream.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                copied += read;
+                if (copied > maxEntryBytes)
+                {
+                    throw new InvalidOperationException(
+                        $"Zip entry '{entryName}' exceeds the allowed file size while extracting. " +
+                        $"Copied={FormatBytes(copied)}, Limit={FormatBytes(maxEntryBytes)}.");
+                }
+
+                if (copied > remainingTotalBytes)
+                {
+                    throw new InvalidOperationException(
+                        $"Zip archive exceeds the allowed extracted size while extracting '{entryName}'. " +
+                        $"CopiedForEntry={FormatBytes(copied)}, RemainingArchiveLimit={FormatBytes(remainingTotalBytes)}.");
+                }
+
+                outputStream.Write(buffer, 0, read);
+            }
+
+            return copied;
+        }
+
+        private static string FormatBytes(long bytes)
+        {
+            if (bytes < 0)
+            {
+                return "unknown";
+            }
+
+            string[] units = { "B", "KB", "MB", "GB" };
+            double value = bytes;
+            var unitIndex = 0;
+            while (value >= 1024 && unitIndex < units.Length - 1)
+            {
+                value /= 1024;
+                unitIndex++;
+            }
+
+            return $"{value:0.##} {units[unitIndex]}";
         }
 
         [NonAction]
@@ -1913,5 +1985,4 @@ public bool ProcessSitePredictionSheet(
 }
 
         
-
 

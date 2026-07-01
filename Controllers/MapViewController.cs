@@ -2676,6 +2676,8 @@ public class MapFilter1
     public DateTime? StartDate { get; set; }
     public DateTime? EndDate { get; set; }
     public long? project_id { get; set; }
+    public bool force_refresh { get; set; }
+    public bool ForceRefresh { get; set; }
 
     public List<long> GetSessionIds()
     {
@@ -2704,6 +2706,7 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
         var limit = Math.Min(Math.Max(filters.limit, 1), 50000);
         var page = filters.page <= 0 ? 1 : filters.page;
         var pageOffset = (page - 1) * limit;
+        var forceRefresh = filters.force_refresh || filters.ForceRefresh;
         string connString = db.Database.GetConnectionString();
         string providerNormalized = null;
         await InvalidateObsoleteNetworkLogCachesAsync();
@@ -2736,7 +2739,7 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
         string latestPageCacheKey = $"{latestCacheKey}:page:{page}:limit:{limit}";
 
         // 2. Check Cache
-        if (_redis != null && _redis.IsConnected)
+        if (_redis != null && _redis.IsConnected && !forceRefresh)
         {
             var cacheWatch = Stopwatch.StartNew();
             try 
@@ -2798,7 +2801,7 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
                 Response.Headers["X-Cache-Lookup-Ms"] = cacheWatch.ElapsedMilliseconds.ToString();
             }
         }
-        Response.Headers["X-Cache"] = "MISS";
+        Response.Headers["X-Cache"] = forceRefresh ? "BYPASS" : "MISS";
 
         var cacheModel = await BuildNetworkLogPageCacheAsync(
             connString,
@@ -2809,7 +2812,7 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
             pageOffset,
             dataVersion);
 
-        var responseObj = ToNetworkLogResponseObject(cacheModel, sessionIds.Count, "MISS");
+        var responseObj = ToNetworkLogResponseObject(cacheModel, sessionIds.Count, forceRefresh ? "BYPASS" : "MISS");
 
         // Cache Logic
         if (_redis != null && _redis.IsConnected)
