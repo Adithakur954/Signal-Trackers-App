@@ -1279,6 +1279,26 @@ namespace SignalTracker.Services
                 cancellationToken);
             var inserted = 0;
 
+            if (request.ReplaceExisting)
+            {
+                var projectIds = rows
+                    .Select(row => Convert.ToInt64(RowValue(row, "project_id") ?? request.ProjectId))
+                    .Where(projectId => projectId > 0)
+                    .Distinct()
+                    .ToList();
+
+                foreach (var projectId in projectIds)
+                {
+                    await using var deleteCommand = conn.CreateCommand();
+                    deleteCommand.Transaction = transaction;
+                    deleteCommand.CommandText = @"
+                        DELETE FROM lte_prediction_baseline_results
+                        WHERE project_id = @project_id;";
+                    PythonBridgeDbTool.AddParam(deleteCommand, "@project_id", projectId);
+                    await deleteCommand.ExecuteNonQueryAsync(cancellationToken);
+                }
+            }
+
             foreach (var batch in rows.Chunk(300))
             {
                 await using var command = conn.CreateCommand();

@@ -12060,25 +12060,48 @@ public async Task<IActionResult> GetSitePredictionBase(
         if (string.IsNullOrWhiteSpace(text) || text.Contains('|', StringComparison.Ordinal)) return null;
         return $"{text}|{text}";
     }
+    IEnumerable<string> GetSiteSelectorNodeBVariants(string? value)
+    {
+        var text = (value ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(text)) yield break;
+
+        yield return text;
+
+        if (text.StartsWith("s-", StringComparison.OrdinalIgnoreCase))
+        {
+            var withoutPrefix = text[2..].Trim();
+            if (!string.IsNullOrWhiteSpace(withoutPrefix)) yield return withoutPrefix;
+        }
+        else if (text.All(char.IsDigit))
+        {
+            yield return $"s-{text}";
+        }
+    }
     void AddNodeBLookupValue(string? value)
     {
-        AddLookupValue(lookupNodeBIds, value);
-        AddLookupValue(lookupNodeBIds, GetPipeExpandedNodeBId(value));
+        foreach (var variant in GetSiteSelectorNodeBVariants(value))
+        {
+            AddLookupValue(lookupNodeBIds, variant);
+            AddLookupValue(lookupNodeBIds, GetPipeExpandedNodeBId(variant));
+        }
     }
     void AddNodeBCellLookupValues(string? nodeValue, params string?[] cellValues)
     {
         var normalizedNode = (nodeValue ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(normalizedNode)) return;
 
-        var expandedNode = GetPipeExpandedNodeBId(normalizedNode);
-        foreach (var rawCellValue in cellValues)
+        foreach (var nodeVariant in GetSiteSelectorNodeBVariants(normalizedNode))
         {
-            var normalizedCell = (rawCellValue ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(normalizedCell)) continue;
+            var expandedNode = GetPipeExpandedNodeBId(nodeVariant);
+            foreach (var rawCellValue in cellValues)
+            {
+                var normalizedCell = (rawCellValue ?? string.Empty).Trim();
+                if (string.IsNullOrWhiteSpace(normalizedCell)) continue;
 
-            AddLookupValue(lookupNodeBCellIds, $"{normalizedNode}_{normalizedCell}");
-            if (!string.IsNullOrWhiteSpace(expandedNode))
-                AddLookupValue(lookupNodeBCellIds, $"{expandedNode}_{normalizedCell}");
+                AddLookupValue(lookupNodeBCellIds, $"{nodeVariant}_{normalizedCell}");
+                if (!string.IsNullOrWhiteSpace(expandedNode))
+                    AddLookupValue(lookupNodeBCellIds, $"{expandedNode}_{normalizedCell}");
+            }
         }
     }
     var combinedNodeBCellId =
@@ -12340,25 +12363,48 @@ public async Task<IActionResult> GetSitePredictionOptimised(
         if (string.IsNullOrWhiteSpace(text) || text.Contains('|', StringComparison.Ordinal)) return null;
         return $"{text}|{text}";
     }
+    IEnumerable<string> GetSiteSelectorNodeBVariants(string? value)
+    {
+        var text = (value ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(text)) yield break;
+
+        yield return text;
+
+        if (text.StartsWith("s-", StringComparison.OrdinalIgnoreCase))
+        {
+            var withoutPrefix = text[2..].Trim();
+            if (!string.IsNullOrWhiteSpace(withoutPrefix)) yield return withoutPrefix;
+        }
+        else if (text.All(char.IsDigit))
+        {
+            yield return $"s-{text}";
+        }
+    }
     void AddNodeBLookupValue(string? value)
     {
-        AddLookupValue(lookupNodeBIds, value);
-        AddLookupValue(lookupNodeBIds, GetPipeExpandedNodeBId(value));
+        foreach (var variant in GetSiteSelectorNodeBVariants(value))
+        {
+            AddLookupValue(lookupNodeBIds, variant);
+            AddLookupValue(lookupNodeBIds, GetPipeExpandedNodeBId(variant));
+        }
     }
     void AddNodeBCellLookupValues(string? nodeValue, params string?[] cellValues)
     {
         var normalizedNode = (nodeValue ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(normalizedNode)) return;
 
-        var expandedNode = GetPipeExpandedNodeBId(normalizedNode);
-        foreach (var rawCellValue in cellValues)
+        foreach (var nodeVariant in GetSiteSelectorNodeBVariants(normalizedNode))
         {
-            var normalizedCell = (rawCellValue ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(normalizedCell)) continue;
+            var expandedNode = GetPipeExpandedNodeBId(nodeVariant);
+            foreach (var rawCellValue in cellValues)
+            {
+                var normalizedCell = (rawCellValue ?? string.Empty).Trim();
+                if (string.IsNullOrWhiteSpace(normalizedCell)) continue;
 
-            AddLookupValue(lookupNodeBCellIds, $"{normalizedNode}_{normalizedCell}");
-            if (!string.IsNullOrWhiteSpace(expandedNode))
-                AddLookupValue(lookupNodeBCellIds, $"{expandedNode}_{normalizedCell}");
+                AddLookupValue(lookupNodeBCellIds, $"{nodeVariant}_{normalizedCell}");
+                if (!string.IsNullOrWhiteSpace(expandedNode))
+                    AddLookupValue(lookupNodeBCellIds, $"{expandedNode}_{normalizedCell}");
+            }
         }
     }
     var combinedNodeBCellId =
