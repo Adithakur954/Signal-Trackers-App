@@ -2711,75 +2711,53 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
         string providerNormalized = null;
         await InvalidateObsoleteNetworkLogCachesAsync();
         await EnsureNetworkLogUpdatedAtColumnAsync(connString);
-        string dataVersion = await GetNetworkLogDataVersionAsync(
-            connString,
-            sessionIds,
-            providerNormalized,
-            filters
-        );
 
-        // 1. Prepare Cache Key
-        string cacheKey = BuildNetworkLogCacheKey(
-            sessionIds,
-            providerNormalized,
-            filters.StartDate,
-            filters.EndDate,
-            filters.project_id,
-            dataVersion
-        );
+        // Fast path: return the latest cached page immediately. Refresh happens
+        // in the background so Redis hits do not wait for DB count/version work.
         string latestCacheKey = BuildNetworkLogCacheKey(
             sessionIds,
             providerNormalized,
+            filters.NetworkType,
             filters.StartDate,
             filters.EndDate,
             filters.project_id,
             "latest"
         );
-        string pageCacheKey = $"{cacheKey}:page:{page}:limit:{limit}";
         string latestPageCacheKey = $"{latestCacheKey}:page:{page}:limit:{limit}";
 
-        // 2. Check Cache
         if (_redis != null && _redis.IsConnected && !forceRefresh)
         {
             var cacheWatch = Stopwatch.StartNew();
             try 
             {
-                var cachedPage = await _redis.GetObjectAsync<NetworkLogFullResponse>(latestPageCacheKey)
-                    ?? await _redis.GetObjectAsync<NetworkLogFullResponse>(pageCacheKey);
+                var cachedPage = await _redis.GetObjectAsync<NetworkLogFullResponse>(latestPageCacheKey);
                 cacheWatch.Stop();
                 Response.Headers["X-Cache-Lookup-Ms"] = cacheWatch.ElapsedMilliseconds.ToString();
                 if (cachedPage != null)
                 {
-                    var cacheState = string.Equals(cachedPage.DataVersion, dataVersion, StringComparison.Ordinal)
-                        ? "HIT"
-                        : "STALE";
+                    const string cacheState = "HIT_REFRESHING";
                     Response.Headers["X-Cache"] = cacheState;
-                    Response.Headers["X-Data-Version"] = dataVersion;
                     Response.Headers["X-Cached-Version"] = cachedPage.DataVersion ?? "unknown";
                     Response.Headers["X-Total-Ms"] = totalStopwatch.ElapsedMilliseconds.ToString();
-                    if (cacheState == "STALE")
+
+                    _ = Task.Run(async () =>
                     {
-                        _ = Task.Run(async () =>
+                        try
                         {
-                            try
-                            {
-                                await RefreshNetworkLogPageCacheAsync(
-                                    connString,
-                                    sessionIds,
-                                    providerNormalized,
-                                    filters,
-                                    limit,
-                                    pageOffset,
-                                    dataVersion,
-                                    pageCacheKey,
-                                    latestPageCacheKey);
-                            }
-                            catch (Exception ex)
-                            {
-                                Console.WriteLine($" Network log cache refresh failed: {SafeException.Get(ex)}");
-                            }
-                        });
-                    }
+                            await RefreshNetworkLogLatestPageCacheAsync(
+                                connString,
+                                sessionIds,
+                                providerNormalized,
+                                filters,
+                                limit,
+                                pageOffset,
+                                latestPageCacheKey);
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($" Network log cache refresh failed: {SafeException.Get(ex)}");
+                        }
+                    });
 
                     return Json(new { 
                         data = cachedPage.data, 
@@ -2802,6 +2780,24 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
             }
         }
         Response.Headers["X-Cache"] = forceRefresh ? "BYPASS" : "MISS";
+
+        string dataVersion = await GetNetworkLogDataVersionAsync(
+            connString,
+            sessionIds,
+            providerNormalized,
+            filters
+        );
+
+        string cacheKey = BuildNetworkLogCacheKey(
+            sessionIds,
+            providerNormalized,
+            filters.NetworkType,
+            filters.StartDate,
+            filters.EndDate,
+            filters.project_id,
+            dataVersion
+        );
+        string pageCacheKey = $"{cacheKey}:page:{page}:limit:{limit}";
 
         var cacheModel = await BuildNetworkLogPageCacheAsync(
             connString,
@@ -2833,19 +2829,36 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
     }
 }
 
-private async Task RefreshNetworkLogPageCacheAsync(
+private async Task RefreshNetworkLogLatestPageCacheAsync(
     string connString,
     List<long> sessionIds,
     string provider,
     MapFilter1 filters,
     int limit,
     int pageOffset,
-    string dataVersion,
-    string pageCacheKey,
     string latestPageCacheKey)
 {
     if (_redis?.IsConnected != true)
         return;
+
+    var dataVersion = await GetNetworkLogDataVersionAsync(
+        connString,
+        sessionIds,
+        provider,
+        filters
+    );
+
+    var cacheKey = BuildNetworkLogCacheKey(
+        sessionIds,
+        provider,
+        filters.NetworkType,
+        filters.StartDate,
+        filters.EndDate,
+        filters.project_id,
+        dataVersion
+    );
+    var page = filters.page <= 0 ? 1 : filters.page;
+    var pageCacheKey = $"{cacheKey}:page:{page}:limit:{limit}";
 
     var cacheModel = await BuildNetworkLogPageCacheAsync(
         connString,
@@ -3613,6 +3626,7 @@ private async Task<string> GetNetworkLogDataVersionAsync(
 private string BuildNetworkLogCacheKey(
     List<long> sessionIds, 
     string provider, 
+    string networkType,
     DateTime? from, 
     DateTime? to,
     long? projectId = null,
@@ -3620,6 +3634,7 @@ private string BuildNetworkLogCacheKey(
 {
     var sortedSessionIds = string.Join("-", sessionIds.OrderBy(x => x));
     string providerKey = provider ?? "all";
+    string networkTypeKey = NormalizeCacheKeyPart(string.IsNullOrWhiteSpace(networkType) ? "all" : networkType);
     string fromKey = from?.ToString("yyyyMMdd") ?? "null";
     string toKey = to?.ToString("yyyyMMdd") ?? "null";
     string projectKey = projectId.HasValue && projectId.Value > 0
@@ -3627,7 +3642,7 @@ private string BuildNetworkLogCacheKey(
         : "no_project";
     string versionKey = NormalizeCacheKeyPart(dataVersion);
 
-    return $"networklog:v10:{sortedSessionIds}:{providerKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
+    return $"networklog:v11:{sortedSessionIds}:{providerKey}:{networkTypeKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
 }
 
 private static string CleanProviderDisplayName(string value)
@@ -8500,6 +8515,31 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                    int.TryParse(token?.ToString(), out value);
         }
 
+        private static bool IsBaselineSaveRequest(IReadOnlyList<Newtonsoft.Json.Linq.JObject> items)
+        {
+            foreach (var item in items)
+            {
+                foreach (var key in new[] { "save_target", "saveTarget", "target_table", "targetTable" })
+                {
+                    if (!item.TryGetValue(key, StringComparison.OrdinalIgnoreCase, out var token))
+                        continue;
+
+                    var value = token?.ToString()?.Trim();
+                    if (string.IsNullOrWhiteSpace(value))
+                        continue;
+
+                    if (value.Equals("baseline", StringComparison.OrdinalIgnoreCase) ||
+                        value.Equals("base", StringComparison.OrdinalIgnoreCase) ||
+                        value.Equals("site_prediction", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
         private string ResolveSitePredictionUpdatedBy()
         {
             return User?.FindFirst("UserId")?.Value
@@ -9329,6 +9369,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 await EnsureSitePredictionOptimizedTableAsync(conn);
                 var sourceColumns = await GetTableColumnSetAsync(conn, "site_prediction");
                 var optimizedColumns = await GetTableColumnSetAsync(conn, "site_prediction_optimized");
+                var saveToBaseline = IsBaselineSaveRequest(items);
                 var reservedOptimizedColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
                 {
                     "id",
@@ -9372,7 +9413,236 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                     return BadRequest(new
                     {
                         Status = 0,
-                        Message = "project_id is required to save an optimized scenario."
+                        Message = saveToBaseline
+                            ? "project_id is required to save baseline site prediction changes."
+                            : "project_id is required to save an optimized scenario."
+                    });
+                }
+
+                if (saveToBaseline)
+                {
+                    var reservedSourceColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        "id",
+                        "tbl_project_id",
+                        "project_id",
+                        "projectId",
+                        "scenario",
+                        "scenario_id",
+                        "save_target",
+                        "saveTarget",
+                        "target_table",
+                        "targetTable",
+                        "move_entire_site",
+                        "site_id_selector",
+                        "site_selector",
+                        "sector_selector"
+                    };
+
+                    var baselineItemIndex = 0;
+                    foreach (var item in items)
+                    {
+                        baselineItemIndex++;
+                        long parsedLookupId = 0;
+                        var hasLookupId =
+                            item.TryGetValue("id", StringComparison.OrdinalIgnoreCase, out var idToken) &&
+                            long.TryParse(idToken.ToString(), out parsedLookupId) &&
+                            parsedLookupId > 0;
+                        var lookupId = hasLookupId ? parsedLookupId : baselineItemIndex;
+
+                        if (hasLookupId)
+                        {
+                            currentItemId = lookupId;
+                            requestedIds.Add(lookupId);
+                        }
+
+                        long? explicitSourceId = null;
+                        if (item.TryGetValue("source_id", StringComparison.OrdinalIgnoreCase, out var sourceIdToken) &&
+                            long.TryParse(sourceIdToken.ToString(), out var parsedSourceId) &&
+                            parsedSourceId > 0)
+                        {
+                            explicitSourceId = parsedSourceId;
+                        }
+
+                        long? explicitSiteId = null;
+                        string? explicitSiteSelectorText = null;
+                        if (item.TryGetValue("site_id_selector", StringComparison.OrdinalIgnoreCase, out var siteIdToken) &&
+                            long.TryParse(siteIdToken.ToString(), out var parsedSiteId))
+                        {
+                            explicitSiteId = parsedSiteId;
+                        }
+                        if (item.TryGetValue("site_id_selector", StringComparison.OrdinalIgnoreCase, out var siteSelectorToken))
+                        {
+                            var rawSiteSelector = siteSelectorToken?.ToString()?.Trim();
+                            if (!string.IsNullOrWhiteSpace(rawSiteSelector))
+                                explicitSiteSelectorText = rawSiteSelector;
+                        }
+                        if (string.IsNullOrWhiteSpace(explicitSiteSelectorText) &&
+                            item.TryGetValue("site_selector", StringComparison.OrdinalIgnoreCase, out var altSiteSelectorToken))
+                        {
+                            var rawAltSiteSelector = altSiteSelectorToken?.ToString()?.Trim();
+                            if (!string.IsNullOrWhiteSpace(rawAltSiteSelector))
+                                explicitSiteSelectorText = rawAltSiteSelector;
+                        }
+
+                        string? explicitSectorSelectorText = null;
+                        if (item.TryGetValue("sector_selector", StringComparison.OrdinalIgnoreCase, out var sectorSelectorToken))
+                        {
+                            var rawSectorSelector = sectorSelectorToken?.ToString()?.Trim();
+                            if (!string.IsNullOrWhiteSpace(rawSectorSelector))
+                                explicitSectorSelectorText = rawSectorSelector;
+                        }
+
+                        var hasSiteSectorSelector =
+                            !string.IsNullOrWhiteSpace(explicitSiteSelectorText) &&
+                            !string.IsNullOrWhiteSpace(explicitSectorSelectorText);
+                        var moveEntireSite =
+                            item.TryGetValue("move_entire_site", StringComparison.OrdinalIgnoreCase, out var moveEntireSiteToken) &&
+                            bool.TryParse(moveEntireSiteToken.ToString(), out var parsedMoveEntireSite) &&
+                            parsedMoveEntireSite;
+                        var hasWholeSiteSelector =
+                            moveEntireSite &&
+                            !string.IsNullOrWhiteSpace(explicitSiteSelectorText);
+
+                        long? sourceId = explicitSourceId;
+                        long? siteId = explicitSiteId;
+
+                        if (!sourceId.HasValue && !siteId.HasValue && hasLookupId)
+                        {
+                            await using var existsCmd = conn.CreateCommand();
+                            existsCmd.Transaction = tx;
+                            existsCmd.CommandText = "SELECT COUNT(*) FROM site_prediction WHERE id = @id;";
+                            Add(existsCmd, "@id", lookupId);
+                            var existsObj = await existsCmd.ExecuteScalarAsync();
+                            var rowExists = existsObj != null && existsObj != DBNull.Value && Convert.ToInt32(existsObj) > 0;
+
+                            if (rowExists) sourceId = lookupId;
+                            else siteId = lookupId;
+                        }
+
+                        if (!sourceId.HasValue && !siteId.HasValue && !hasSiteSectorSelector && !hasWholeSiteSelector)
+                        {
+                            skippedIds.Add(lookupId);
+                            continue;
+                        }
+
+                        var updates = new List<string>();
+                        var parameters = new Dictionary<string, object?>();
+                        var seenDbColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                        foreach (var prop in item.Properties())
+                        {
+                            var key = prop.Name;
+                            if (key.Equals("id", StringComparison.OrdinalIgnoreCase)) continue;
+                            if (key.Equals("source_id", StringComparison.OrdinalIgnoreCase)) continue;
+                            if (reservedSourceColumns.Contains(key)) continue;
+
+                            string? dbColumn = null;
+                            if (key.Equals("node_id", StringComparison.OrdinalIgnoreCase) ||
+                                key.Equals("nodeId", StringComparison.OrdinalIgnoreCase) ||
+                                key.Equals("node_b_id", StringComparison.OrdinalIgnoreCase) ||
+                                key.Equals("nodeb_id", StringComparison.OrdinalIgnoreCase) ||
+                                key.Equals("nodebId", StringComparison.OrdinalIgnoreCase))
+                            {
+                                dbColumn = new[] { "node_id", "nodeb_id", "node_b_id" }
+                                    .FirstOrDefault(candidate => sourceColumns.Contains(candidate));
+                            }
+                            else if (SitePredictionColumnMap.TryGetValue(key, out var mappedColumn))
+                            {
+                                dbColumn = mappedColumn;
+                            }
+                            else if (!string.IsNullOrWhiteSpace(key) &&
+                                     sourceColumns.Contains(key) &&
+                                     !reservedSourceColumns.Contains(key))
+                            {
+                                dbColumn = key;
+                            }
+
+                            if (!string.IsNullOrWhiteSpace(dbColumn) && sourceColumns.Contains(dbColumn))
+                            {
+                                if (!seenDbColumns.Add(dbColumn)) continue;
+                                string paramName = "@" + key + "_" + lookupId;
+                                updates.Add($"sp.`{dbColumn}` = {paramName}");
+                                parameters[paramName] = dbColumn.Equals("band", StringComparison.OrdinalIgnoreCase)
+                                    ? NormalizeSitePredictionBandValue(prop.Value)
+                                    : NormalizeSitePredictionValue(prop.Value);
+                            }
+                        }
+
+                        if (updates.Count == 0)
+                        {
+                            skippedIds.Add(lookupId);
+                            continue;
+                        }
+
+                        var sql = sourceId.HasValue
+                            ? $@"
+                                UPDATE site_prediction sp
+                                SET {string.Join(", ", updates)}
+                                WHERE sp.id = @sourceId_{lookupId}
+                                  AND sp.tbl_project_id = @scenarioProjectId_{lookupId};"
+                            : hasWholeSiteSelector
+                                ? $@"
+                                UPDATE site_prediction sp
+                                SET {string.Join(", ", updates)}
+                                WHERE CONVERT(sp.site USING utf8mb4) COLLATE utf8mb4_unicode_ci = @targetSiteText_{lookupId}
+                                  AND sp.tbl_project_id = @scenarioProjectId_{lookupId};"
+                                : hasSiteSectorSelector
+                                    ? $@"
+                                UPDATE site_prediction sp
+                                SET {string.Join(", ", updates)}
+                                WHERE CONVERT(sp.site USING utf8mb4) COLLATE utf8mb4_unicode_ci = @targetSiteText_{lookupId}
+                                  AND CONVERT(sp.sector USING utf8mb4) COLLATE utf8mb4_unicode_ci = @targetSectorText_{lookupId}
+                                  AND sp.tbl_project_id = @scenarioProjectId_{lookupId};"
+                                    : $@"
+                                UPDATE site_prediction sp
+                                SET {string.Join(", ", updates)}
+                                WHERE sp.site = @targetSite_{lookupId}
+                                  AND sp.tbl_project_id = @scenarioProjectId_{lookupId};";
+
+                        await using var cmd = conn.CreateCommand();
+                        cmd.Transaction = tx;
+                        cmd.CommandText = sql;
+                        Add(cmd, $"@scenarioProjectId_{lookupId}", scenarioProjectId.Value);
+                        if (sourceId.HasValue) Add(cmd, $"@sourceId_{lookupId}", sourceId.Value);
+                        else if (hasWholeSiteSelector)
+                        {
+                            Add(cmd, $"@targetSiteText_{lookupId}", explicitSiteSelectorText!);
+                        }
+                        else if (hasSiteSectorSelector)
+                        {
+                            Add(cmd, $"@targetSiteText_{lookupId}", explicitSiteSelectorText!);
+                            Add(cmd, $"@targetSectorText_{lookupId}", explicitSectorSelectorText!);
+                        }
+                        else Add(cmd, $"@targetSite_{lookupId}", siteId!.Value);
+
+                        foreach (var kvp in parameters)
+                        {
+                            Add(cmd, kvp.Key, kvp.Value ?? DBNull.Value);
+                        }
+
+                        int rows = await cmd.ExecuteNonQueryAsync();
+                        totalUpdated += rows;
+                        if (rows > 0) updatedIds.Add(lookupId);
+                        else skippedIds.Add(lookupId);
+                    }
+
+                    await tx.CommitAsync();
+                    await InvalidateMapViewCachesAsync();
+
+                    return Ok(new
+                    {
+                        Status = 1,
+                        Message = $"Successfully updated {totalUpdated} baseline prediction(s)",
+                        SavedTable = "site_prediction",
+                        BaseTable = "site_prediction",
+                        BaseTableUpdated = true,
+                        Scenario = (int?)null,
+                        ScenarioName = "Baseline",
+                        RowsAffected = totalUpdated,
+                        Requested = requestedIds.Count,
+                        UpdatedIds = updatedIds.Distinct().ToArray(),
+                        SkippedIds = skippedIds.Distinct().ToArray()
                     });
                 }
 
@@ -9485,6 +9755,10 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                         if (key.Equals("projectId", StringComparison.OrdinalIgnoreCase)) continue;
                         if (key.Equals("scenario", StringComparison.OrdinalIgnoreCase)) continue;
                         if (key.Equals("scenario_id", StringComparison.OrdinalIgnoreCase)) continue;
+                        if (key.Equals("save_target", StringComparison.OrdinalIgnoreCase)) continue;
+                        if (key.Equals("saveTarget", StringComparison.OrdinalIgnoreCase)) continue;
+                        if (key.Equals("target_table", StringComparison.OrdinalIgnoreCase)) continue;
+                        if (key.Equals("targetTable", StringComparison.OrdinalIgnoreCase)) continue;
                         if (key.Equals("move_entire_site", StringComparison.OrdinalIgnoreCase)) continue;
                         if (key.Equals("site_id_selector", StringComparison.OrdinalIgnoreCase)) continue;
                         if (key.Equals("site_selector", StringComparison.OrdinalIgnoreCase)) continue;
