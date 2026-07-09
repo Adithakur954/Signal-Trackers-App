@@ -3557,13 +3557,13 @@ private (string Clause, Dictionary<string, object> Params) BuildSqlWhere(
     var clauses = new List<string>();
     if (idParams.Any()) clauses.Add($"session_id IN ({string.Join(",", idParams)})");
     else clauses.Add("1 = 0"); 
-    clauses.Add(@"(
-        COALESCE(
-            NULLIF(TRIM(m_alpha_short), ''),
-            NULLIF(TRIM(m_alpha_long), '')
-        ) IS NOT NULL
-        OR UPPER(TRIM(COALESCE(network, ''))) LIKE '%5G%'
-    )");
+    // clauses.Add(@"(
+    //     COALESCE(
+    //         NULLIF(TRIM(m_alpha_short), ''),
+    //         NULLIF(TRIM(m_alpha_long), '')
+    //     ) IS NOT NULL
+    //     OR UPPER(TRIM(COALESCE(network, ''))) LIKE '%5G%'
+    // )");
     clauses.Add(@"(
         NULLIF(TRIM(band), '') IS NOT NULL
         OR UPPER(TRIM(COALESCE(network, ''))) LIKE '%5G%'
