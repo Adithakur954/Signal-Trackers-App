@@ -3197,7 +3197,7 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
                       AND src.id < bp.id
                       AND src.lat <=> bp.lat
                       AND src.lon <=> bp.lon
-                      AND {srcTechKey} = {bpTechKey}
+                      AND ({srcTechKey} = {bpTechKey} OR {bpTechKey} = '5G')
                       AND {srcShort} IS NOT NULL
                     ORDER BY src.id DESC
                     LIMIT 1
@@ -3209,7 +3209,7 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
                       AND src.id > bp.id
                       AND src.lat <=> bp.lat
                       AND src.lon <=> bp.lon
-                      AND {srcTechKey} = {bpTechKey}
+                      AND ({srcTechKey} = {bpTechKey} OR {bpTechKey} = '5G')
                       AND {srcShort} IS NOT NULL
                     ORDER BY src.id ASC
                     LIMIT 1
@@ -3221,7 +3221,7 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
                       AND src.id < bp.id
                       AND src.lat <=> bp.lat
                       AND src.lon <=> bp.lon
-                      AND {srcTechKey} = {bpTechKey}
+                      AND ({srcTechKey} = {bpTechKey} OR {bpTechKey} = '5G')
                       AND {srcLong} IS NOT NULL
                     ORDER BY src.id DESC
                     LIMIT 1
@@ -3233,7 +3233,7 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
                       AND src.id > bp.id
                       AND src.lat <=> bp.lat
                       AND src.lon <=> bp.lon
-                      AND {srcTechKey} = {bpTechKey}
+                      AND ({srcTechKey} = {bpTechKey} OR {bpTechKey} = '5G')
                       AND {srcLong} IS NOT NULL
                     ORDER BY src.id ASC
                     LIMIT 1
@@ -3815,14 +3815,12 @@ private static void Backfill5GNetworkLogFields(List<NetworkLogCacheRow> rows)
         if (!needsShort && !needsLong)
             continue;
 
-        string techKey = GetNetworkLogTechKey(row.network);
         NetworkLogCacheRow? previous = null;
         for (var scan = index - 1; scan >= 0; scan--)
         {
             var candidate = rows[scan];
             if (candidate.lat == row.lat &&
-                candidate.lon == row.lon &&
-                GetNetworkLogTechKey(candidate.network) == techKey)
+                candidate.lon == row.lon)
             {
                 previous = candidate;
                 break;
@@ -3837,8 +3835,7 @@ private static void Backfill5GNetworkLogFields(List<NetworkLogCacheRow> rows)
             {
                 var candidate = rows[scan];
                 if (candidate.lat == row.lat &&
-                    candidate.lon == row.lon &&
-                    GetNetworkLogTechKey(candidate.network) == techKey)
+                    candidate.lon == row.lon)
                 {
                     next = candidate;
                     break;
