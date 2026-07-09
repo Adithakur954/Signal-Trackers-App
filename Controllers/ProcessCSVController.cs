@@ -1400,6 +1400,7 @@ public IActionResult UploadSitePrediction(
 	            if (isColValValid)
 	            {
 	                db.SaveChanges();
+                    Apply5GAlphaAndBandFillRules(sessionId);
 	                InvalidateNetworkLogCachesBestEffort();
 	            }
 	            else
@@ -1428,6 +1429,156 @@ public IActionResult UploadSitePrediction(
 
     return isColValValid;
 }
+
+        [NonAction]
+        private void Apply5GAlphaAndBandFillRules(int sessionId)
+        {
+            if (sessionId <= 0)
+            {
+                return;
+            }
+
+            // Fill missing 5G operator fields from rows at the same coordinates,
+            // preferring the nearest previous row and falling back to the next row.
+            db.Database.ExecuteSqlInterpolated($@"
+WITH normalized AS (
+    SELECT
+        id,
+        session_id,
+        lat,
+        lon,
+        network,
+        m_alpha_long,
+        m_alpha_short,
+        band,
+        CASE
+            WHEN UPPER(TRIM(COALESCE(network, ''))) LIKE '%5G%' THEN '5G'
+            WHEN UPPER(TRIM(COALESCE(network, ''))) = '4G(LTE-ANCHOR NSA)' THEN '4G(LTE-ANCHOR NSA)'
+            WHEN UPPER(TRIM(COALESCE(network, ''))) LIKE '%4G%' THEN '4G'
+            WHEN UPPER(TRIM(COALESCE(network, ''))) LIKE '%3G%' THEN '3G'
+            WHEN UPPER(TRIM(COALESCE(network, ''))) LIKE '%2G%' THEN '2G'
+            ELSE UPPER(TRIM(COALESCE(network, '')))
+        END AS tech_key,
+        CASE
+            WHEN UPPER(TRIM(COALESCE(network, ''))) LIKE '%5G%' THEN 1
+            ELSE 0
+        END AS is_5g
+    FROM tbl_network_log
+    WHERE session_id = {sessionId}
+),
+prev_long AS (
+    SELECT
+        t.id AS target_id,
+        s.m_alpha_long AS fill_value,
+        ROW_NUMBER() OVER (PARTITION BY t.id ORDER BY s.id DESC) AS rn
+    FROM normalized t
+    JOIN normalized s
+      ON s.session_id = t.session_id
+     AND s.id < t.id
+     AND s.lat <=> t.lat
+     AND s.lon <=> t.lon
+     AND s.tech_key = t.tech_key
+    WHERE t.is_5g = 1
+      AND (t.m_alpha_long IS NULL OR TRIM(t.m_alpha_long) = '' OR UPPER(TRIM(t.m_alpha_long)) = 'NA')
+      AND s.m_alpha_long IS NOT NULL
+      AND TRIM(s.m_alpha_long) <> ''
+      AND UPPER(TRIM(s.m_alpha_long)) <> 'NA'
+),
+next_long AS (
+    SELECT
+        t.id AS target_id,
+        s.m_alpha_long AS fill_value,
+        ROW_NUMBER() OVER (PARTITION BY t.id ORDER BY s.id ASC) AS rn
+    FROM normalized t
+    JOIN normalized s
+      ON s.session_id = t.session_id
+     AND s.id > t.id
+     AND s.lat <=> t.lat
+     AND s.lon <=> t.lon
+     AND s.tech_key = t.tech_key
+    WHERE t.is_5g = 1
+      AND (t.m_alpha_long IS NULL OR TRIM(t.m_alpha_long) = '' OR UPPER(TRIM(t.m_alpha_long)) = 'NA')
+      AND s.m_alpha_long IS NOT NULL
+      AND TRIM(s.m_alpha_long) <> ''
+      AND UPPER(TRIM(s.m_alpha_long)) <> 'NA'
+),
+prev_short AS (
+    SELECT
+        t.id AS target_id,
+        s.m_alpha_short AS fill_value,
+        ROW_NUMBER() OVER (PARTITION BY t.id ORDER BY s.id DESC) AS rn
+    FROM normalized t
+    JOIN normalized s
+      ON s.session_id = t.session_id
+     AND s.id < t.id
+     AND s.lat <=> t.lat
+     AND s.lon <=> t.lon
+     AND s.tech_key = t.tech_key
+    WHERE t.is_5g = 1
+      AND (t.m_alpha_short IS NULL OR TRIM(t.m_alpha_short) = '' OR UPPER(TRIM(t.m_alpha_short)) = 'NA')
+      AND s.m_alpha_short IS NOT NULL
+      AND TRIM(s.m_alpha_short) <> ''
+      AND UPPER(TRIM(s.m_alpha_short)) <> 'NA'
+),
+next_short AS (
+    SELECT
+        t.id AS target_id,
+        s.m_alpha_short AS fill_value,
+        ROW_NUMBER() OVER (PARTITION BY t.id ORDER BY s.id ASC) AS rn
+    FROM normalized t
+    JOIN normalized s
+      ON s.session_id = t.session_id
+     AND s.id > t.id
+     AND s.lat <=> t.lat
+     AND s.lon <=> t.lon
+     AND s.tech_key = t.tech_key
+    WHERE t.is_5g = 1
+      AND (t.m_alpha_short IS NULL OR TRIM(t.m_alpha_short) = '' OR UPPER(TRIM(t.m_alpha_short)) = 'NA')
+      AND s.m_alpha_short IS NOT NULL
+      AND TRIM(s.m_alpha_short) <> ''
+      AND UPPER(TRIM(s.m_alpha_short)) <> 'NA'
+),
+chosen AS (
+    SELECT
+        t.id,
+        COALESCE(pl.fill_value, nl.fill_value) AS fill_long,
+        COALESCE(ps.fill_value, ns.fill_value) AS fill_short
+    FROM normalized t
+    LEFT JOIN prev_long pl
+        ON pl.target_id = t.id AND pl.rn = 1
+    LEFT JOIN next_long nl
+        ON nl.target_id = t.id AND nl.rn = 1
+    LEFT JOIN prev_short ps
+        ON ps.target_id = t.id AND ps.rn = 1
+    LEFT JOIN next_short ns
+        ON ns.target_id = t.id AND ns.rn = 1
+    WHERE t.is_5g = 1
+)
+UPDATE tbl_network_log dst
+JOIN chosen c
+  ON c.id = dst.id
+SET
+    dst.m_alpha_long = CASE
+        WHEN dst.m_alpha_long IS NULL OR TRIM(dst.m_alpha_long) = '' OR UPPER(TRIM(dst.m_alpha_long)) = 'NA'
+            THEN COALESCE(c.fill_long, dst.m_alpha_long)
+        ELSE dst.m_alpha_long
+    END,
+    dst.m_alpha_short = CASE
+        WHEN dst.m_alpha_short IS NULL OR TRIM(dst.m_alpha_short) = '' OR UPPER(TRIM(dst.m_alpha_short)) = 'NA'
+            THEN COALESCE(c.fill_short, dst.m_alpha_short)
+        ELSE dst.m_alpha_short
+    END,
+    dst.band = CASE
+        WHEN dst.network IS NOT NULL
+         AND UPPER(TRIM(dst.network)) LIKE '%5G%'
+         AND (dst.band IS NULL OR TRIM(dst.band) = '' OR UPPER(TRIM(dst.band)) = 'NA')
+            THEN 'nr'
+        ELSE dst.band
+    END
+WHERE dst.session_id = {sessionId}
+  AND dst.network IS NOT NULL
+  AND UPPER(TRIM(dst.network)) LIKE '%5G%';");
+        }
         // =====================================================================
         // Process: CTR Prediction (fileType=2)
         // =====================================================================
@@ -1985,4 +2136,3 @@ public bool ProcessSitePredictionSheet(
 }
 
         
-

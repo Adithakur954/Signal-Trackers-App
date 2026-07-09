@@ -863,6 +863,8 @@ public class ProjectPolygonItem
                 public int RecordCount { get; private set; }
                 public double TotalDuration { get; private set; }
                 public int DurationCount { get; private set; }
+                public double TotalSetupTime { get; private set; }
+                public int SetupTimeCount { get; private set; }
                 public double TotalSpeed { get; private set; }
                 public int SpeedCount { get; private set; }
                 public double TotalFileSize { get; private set; }
@@ -870,7 +872,7 @@ public class ProjectPolygonItem
                 public double? MinSpeed { get; private set; }
                 public double? MaxSpeed { get; private set; }
 
-                public void AddObservation(double? durationMs, double? speedKbps, double? fileSizeBytes)
+                public void AddObservation(double? durationMs, double? setupMs, double? speedKbps, double? fileSizeBytes)
                 {
                     RecordCount++;
 
@@ -878,6 +880,12 @@ public class ProjectPolygonItem
                     {
                         TotalDuration += durationMs.Value;
                         DurationCount++;
+                    }
+
+                    if (setupMs.HasValue)
+                    {
+                        TotalSetupTime += setupMs.Value;
+                        SetupTimeCount++;
                     }
 
                     if (speedKbps.HasValue)
@@ -909,6 +917,7 @@ public class ProjectPolygonItem
                 public float? EndLat { get; set; }
                 public float? EndLon { get; set; }
                 public double? DurationMs { get; set; }
+                public double? SetupMs { get; set; }
                 public string? ResultStatus { get; set; }
             }
 
@@ -921,6 +930,8 @@ public class ProjectPolygonItem
             private Dictionary<long, SubSessionLocation> SubSessionLocationMap { get; } = new();
             public double TotalDuration { get; private set; }
             public int DurationCount { get; private set; }
+            public double TotalSetupTime { get; private set; }
+            public int SetupTimeCount { get; private set; }
             public double TotalSpeed { get; private set; }
             public int SpeedCount { get; private set; }
             public double TotalFileSize { get; private set; }
@@ -1009,6 +1020,10 @@ public class ProjectPolygonItem
                     avg_duration = statusMetrics.DurationCount > 0
                         ? RoundMetric(statusMetrics.TotalDuration / statusMetrics.DurationCount)
                         : 0d,
+                    total_setup_time = RoundMetric(statusMetrics.TotalSetupTime),
+                    avg_setup_time = statusMetrics.SetupTimeCount > 0
+                        ? RoundMetric(statusMetrics.TotalSetupTime / statusMetrics.SetupTimeCount)
+                        : 0d,
                     avg_speed = statusMetrics.SpeedCount > 0
                         ? RoundMetric(statusMetrics.TotalSpeed / statusMetrics.SpeedCount)
                         : 0d,
@@ -1037,6 +1052,8 @@ public class ProjectPolygonItem
                 {
                     total_duration = RoundMetric(TotalDuration),
                     avg_duration = DurationCount > 0 ? RoundMetric(TotalDuration / DurationCount) : 0d,
+                    total_setup_time = RoundMetric(TotalSetupTime),
+                    avg_setup_time = SetupTimeCount > 0 ? RoundMetric(TotalSetupTime / SetupTimeCount) : 0d,
                     total_speed = RoundMetric(TotalSpeed),
                     avg_speed = SpeedCount > 0 ? RoundMetric(TotalSpeed / SpeedCount) : 0d,
                     min_speed = MinSpeed.HasValue ? RoundMetric(MinSpeed.Value) : (double?)null,
@@ -1057,12 +1074,18 @@ public class ProjectPolygonItem
                 };
             }
 
-            public void AddMetrics(double? durationMs, double? speedKbps, double? fileSizeBytes, string? resultStatusRaw)
+            public void AddMetrics(double? durationMs, double? setupMs, double? speedKbps, double? fileSizeBytes, string? resultStatusRaw)
             {
                 if (durationMs.HasValue)
                 {
                     TotalDuration += durationMs.Value;
                     DurationCount++;
+                }
+
+                if (setupMs.HasValue)
+                {
+                    TotalSetupTime += setupMs.Value;
+                    SetupTimeCount++;
                 }
 
                 if (speedKbps.HasValue)
@@ -1080,10 +1103,10 @@ public class ProjectPolygonItem
                 }
 
                 var statusMetrics = GetOrCreateStatusMetrics(resultStatusRaw);
-                statusMetrics.AddObservation(durationMs, speedKbps, fileSizeBytes);
+                statusMetrics.AddObservation(durationMs, setupMs, speedKbps, fileSizeBytes);
             }
 
-            public void AddSubSessionLocation(long rowId, long? subSessionId, string? subSessionType, string? number, string? direction, float? startLat, float? startLon, float? endLat, float? endLon, double? durationMs, string? resultStatusRaw)
+            public void AddSubSessionLocation(long rowId, long? subSessionId, string? subSessionType, string? number, string? direction, float? startLat, float? startLon, float? endLat, float? endLon, double? durationMs, double? setupMs, string? resultStatusRaw)
             {
                 if (!subSessionId.HasValue || subSessionId.Value < int.MinValue || subSessionId.Value > int.MaxValue)
                 {
@@ -1106,6 +1129,7 @@ public class ProjectPolygonItem
                     existing.EndLat ??= endLat;
                     existing.EndLon ??= endLon;
                     existing.DurationMs ??= durationMs;
+                    existing.SetupMs ??= setupMs;
                     existing.ResultStatus = MergeStatus(existing.ResultStatus, resultStatusRaw);
                     return;
                 }
@@ -1123,6 +1147,7 @@ public class ProjectPolygonItem
                     EndLat = endLat,
                     EndLon = endLon,
                     DurationMs = durationMs,
+                    SetupMs = setupMs,
                     ResultStatus = NormalizeStatus(resultStatusRaw)
                 };
             }
@@ -1160,6 +1185,7 @@ public class ProjectPolygonItem
                             end_lon = x.EndLon
                         },
                         duration_ms = x.DurationMs.HasValue ? RoundMetric(x.DurationMs.Value) : (double?)null,
+                        setup_ms = x.SetupMs.HasValue ? RoundMetric(x.SetupMs.Value) : (double?)null,
                         result_status_raw = x.ResultStatusRaw,
                         result_status = string.Equals(x.ResultStatus, "1", StringComparison.OrdinalIgnoreCase) ? "connected" : "not_connected"
                     })
@@ -1809,6 +1835,13 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                             ELSE NULL
                         END";
 
+                var setupSql = @"
+    CASE
+        WHEN JSON_VALID(json_data) THEN
+            JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.setup_ms'))
+        ELSE NULL
+    END";
+
                 var speedSql = speedColumn != null
                     ? $"NULLIF(TRIM(CAST(`{speedColumn.Replace("`", "``")}` AS CHAR)), '')"
                     : @"
@@ -1836,6 +1869,7 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                         end_lat,
                         end_lon,
                         " + durationSql + @" AS duration_ms,
+                        " + setupSql + @" AS setup_ms,
                         " + speedSql + @" AS speed_kbps,
                         " + fileSizeSql + @" AS file_size_bytes,
                         " + resultStatusSql + @" AS result_status,
@@ -1880,11 +1914,12 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                         float? subSessionEndLat = TryParseNullableFloat(reader.IsDBNull(6) ? null : reader.GetValue(6)?.ToString());
                         float? subSessionEndLon = TryParseNullableFloat(reader.IsDBNull(7) ? null : reader.GetValue(7)?.ToString());
                         var durationMs = TryParseNullableDouble(reader.IsDBNull(8) ? null : reader.GetValue(8)?.ToString());
-                        var speedKbps = TryParseNullableDouble(reader.IsDBNull(9) ? null : reader.GetValue(9)?.ToString());
-                        var fileSizeBytes = TryParseNullableDouble(reader.IsDBNull(10) ? null : reader.GetValue(10)?.ToString());
-                        var resultStatus = reader.IsDBNull(11) ? null : reader.GetValue(11)?.ToString();
-                        var number = reader.IsDBNull(12) ? null : reader.GetValue(12)?.ToString();
-                        var direction = reader.IsDBNull(13) ? null : reader.GetValue(13)?.ToString();
+                        var setupMs = TryParseNullableDouble(reader.IsDBNull(9) ? null : reader.GetValue(9)?.ToString());
+                        var speedKbps = TryParseNullableDouble(reader.IsDBNull(10) ? null : reader.GetValue(10)?.ToString());
+                        var fileSizeBytes = TryParseNullableDouble(reader.IsDBNull(11) ? null : reader.GetValue(11)?.ToString());
+                        var resultStatus = reader.IsDBNull(12) ? null : reader.GetValue(12)?.ToString();
+                        var number = reader.IsDBNull(13) ? null : reader.GetValue(13)?.ToString();
+                        var direction = reader.IsDBNull(14) ? null : reader.GetValue(14)?.ToString();
 
                         if (!sessionMap.TryGetValue(currentSessionId, out var sessionAgg))
                         {
@@ -1893,10 +1928,10 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                         }
 
                         sessionAgg.AddSubSession(subSessionId);
-                        sessionAgg.AddSubSessionLocation(rowId, subSessionId, subSessionType, number, direction, subSessionStartLat, subSessionStartLon, subSessionEndLat, subSessionEndLon, durationMs, resultStatus);
-                        sessionAgg.AddMetrics(durationMs, speedKbps, fileSizeBytes, resultStatus);
+                        sessionAgg.AddSubSessionLocation(rowId, subSessionId, subSessionType, number, direction, subSessionStartLat, subSessionStartLon, subSessionEndLat, subSessionEndLon, durationMs, setupMs, resultStatus);
+                        sessionAgg.AddMetrics(durationMs, setupMs, speedKbps, fileSizeBytes, resultStatus);
 
-                        overall.AddMetrics(durationMs, speedKbps, fileSizeBytes, resultStatus);
+                        overall.AddMetrics(durationMs, setupMs, speedKbps, fileSizeBytes, resultStatus);
                     }
                 }
 
@@ -2953,7 +2988,8 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyEF(
 
     query = query.Where(log =>
         (log.m_alpha_short != null && log.m_alpha_short.Trim() != "") ||
-        (log.m_alpha_long != null && log.m_alpha_long.Trim() != ""));
+        (log.m_alpha_long != null && log.m_alpha_long.Trim() != "") ||
+        ((log.network ?? "").ToUpper().Contains("5G")));
 
     if (!string.IsNullOrEmpty(provider))
         query = query.Where(log =>
@@ -3077,9 +3113,8 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyEF(
             apps = log.apps ?? "",
             num_cells = log.num_cells,
             network = log.network ?? "",
-            m_alpha_long = log.m_alpha_short != null && log.m_alpha_short != ""
-                ? log.m_alpha_short
-                : (log.m_alpha_long ?? ""),
+            m_alpha_short = log.m_alpha_short ?? "",
+            m_alpha_long = log.m_alpha_long ?? "",
             pci = log.pci ?? "",
             rssi = log.rssi,
             rsrp = log.rsrp,
@@ -3104,6 +3139,7 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyEF(
         })
         .ToListAsync();
 
+    Backfill5GNetworkLogFields(rows);
     NormalizeNetworkLogRows(rows);
     return rows;
 }
@@ -3118,32 +3154,114 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
     await cmdConfig.ExecuteNonQueryAsync();
 
     var (whereClause, parameters) = await BuildSqlWhereAsync(sessionIds, provider, filters);
+    const string cleanedShortTemplate = "NULLIF(TRIM(BOTH CHAR(39) FROM TRIM(BOTH '\"\"' FROM TRIM({0}.m_alpha_short))), '')";
+    const string cleanedLongTemplate = "NULLIF(TRIM(BOTH CHAR(39) FROM TRIM(BOTH '\"\"' FROM TRIM({0}.m_alpha_long))), '')";
+    const string techKeyTemplate = @"
+                CASE
+                    WHEN UPPER(TRIM(COALESCE({0}.network, ''))) LIKE '%5G%' THEN '5G'
+                    WHEN UPPER(TRIM(COALESCE({0}.network, ''))) = '4G(LTE-ANCHOR NSA)' THEN '4G(LTE-ANCHOR NSA)'
+                    WHEN UPPER(TRIM(COALESCE({0}.network, ''))) LIKE '%4G%' THEN '4G'
+                    WHEN UPPER(TRIM(COALESCE({0}.network, ''))) LIKE '%3G%' THEN '3G'
+                    WHEN UPPER(TRIM(COALESCE({0}.network, ''))) LIKE '%2G%' THEN '2G'
+                    ELSE UPPER(TRIM(COALESCE({0}.network, '')))
+                END";
+    var bpShort = string.Format(CultureInfo.InvariantCulture, cleanedShortTemplate, "bp");
+    var bpLong = string.Format(CultureInfo.InvariantCulture, cleanedLongTemplate, "bp");
+    var srcShort = string.Format(CultureInfo.InvariantCulture, cleanedShortTemplate, "src");
+    var srcLong = string.Format(CultureInfo.InvariantCulture, cleanedLongTemplate, "src");
+    var bpTechKey = string.Format(CultureInfo.InvariantCulture, techKeyTemplate, "bp");
+    var srcTechKey = string.Format(CultureInfo.InvariantCulture, techKeyTemplate, "src");
     string sql = $@"
+        WITH base_page AS (
+            SELECT
+                id, session_id, timestamp, lat, lon, battery, Speed, level, apps, num_cells,
+                network, m_alpha_short, m_alpha_long,
+                pci, rssi, rsrp, rsrq, sinr, mos, jitter, latency, tac,
+                packet_loss, dl_tpt, ul_tpt, band, image_path, indoor_outdoor, nodeb_id, cell_id,
+                primary_cell_info_1
+            FROM tbl_network_log
+            WHERE {whereClause}
+            ORDER BY timestamp
+            LIMIT @limit OFFSET @offset
+        )
         SELECT
-            id, session_id, timestamp, lat, lon, battery, Speed, level, apps, num_cells,
-            network,
+            bp.id, bp.session_id, bp.timestamp, bp.lat, bp.lon, bp.battery, bp.Speed, bp.level, bp.apps, bp.num_cells,
+            bp.network,
             COALESCE(
-                NULLIF(TRIM(BOTH CHAR(39) FROM TRIM(BOTH '""' FROM TRIM(m_alpha_short))), ''),
-                TRIM(BOTH CHAR(39) FROM TRIM(BOTH '""' FROM TRIM(m_alpha_long)))
+                {bpShort},
+                {bpLong},
+                (
+                    SELECT {srcShort}
+                    FROM tbl_network_log src
+                    WHERE src.session_id = bp.session_id
+                      AND src.id < bp.id
+                      AND src.lat <=> bp.lat
+                      AND src.lon <=> bp.lon
+                      AND {srcTechKey} = {bpTechKey}
+                      AND {srcShort} IS NOT NULL
+                    ORDER BY src.id DESC
+                    LIMIT 1
+                ),
+                (
+                    SELECT {srcShort}
+                    FROM tbl_network_log src
+                    WHERE src.session_id = bp.session_id
+                      AND src.id > bp.id
+                      AND src.lat <=> bp.lat
+                      AND src.lon <=> bp.lon
+                      AND {srcTechKey} = {bpTechKey}
+                      AND {srcShort} IS NOT NULL
+                    ORDER BY src.id ASC
+                    LIMIT 1
+                ),
+                (
+                    SELECT {srcLong}
+                    FROM tbl_network_log src
+                    WHERE src.session_id = bp.session_id
+                      AND src.id < bp.id
+                      AND src.lat <=> bp.lat
+                      AND src.lon <=> bp.lon
+                      AND {srcTechKey} = {bpTechKey}
+                      AND {srcLong} IS NOT NULL
+                    ORDER BY src.id DESC
+                    LIMIT 1
+                ),
+                (
+                    SELECT {srcLong}
+                    FROM tbl_network_log src
+                    WHERE src.session_id = bp.session_id
+                      AND src.id > bp.id
+                      AND src.lat <=> bp.lat
+                      AND src.lon <=> bp.lon
+                      AND {srcTechKey} = {bpTechKey}
+                      AND {srcLong} IS NOT NULL
+                    ORDER BY src.id ASC
+                    LIMIT 1
+                )
             ) AS provider_name,
-            pci, rssi, rsrp, rsrq, sinr, mos, jitter, latency, tac,
-            packet_loss, dl_tpt, ul_tpt, band, image_path, indoor_outdoor, nodeb_id, cell_id,
+            bp.pci, bp.rssi, bp.rsrp, bp.rsrq, bp.sinr, bp.mos, bp.jitter, bp.latency, bp.tac,
+            bp.packet_loss, bp.dl_tpt, bp.ul_tpt,
             CASE
-                WHEN primary_cell_info_1 LIKE 'SSID:%'
-                  OR primary_cell_info_1 LIKE '%BSSID:%'
+                WHEN UPPER(TRIM(COALESCE(bp.network, ''))) LIKE '%5G%'
+                  AND (bp.band IS NULL OR TRIM(bp.band) = '' OR UPPER(TRIM(bp.band)) = 'NA')
+                THEN 'nr'
+                ELSE bp.band
+            END AS band,
+            bp.image_path, bp.indoor_outdoor, bp.nodeb_id, bp.cell_id,
+            CASE
+                WHEN bp.primary_cell_info_1 LIKE 'SSID:%'
+                  OR bp.primary_cell_info_1 LIKE '%BSSID:%'
                   OR EXISTS (
                       SELECT 1
                       FROM tbl_session s
-                      WHERE s.id = tbl_network_log.session_id
+                      WHERE s.id = bp.session_id
                         AND LOWER(COALESCE(s.type, '')) = 'wifi'
                   )
                 THEN 'wifi'
                 ELSE 'network'
             END AS connection_type
-        FROM tbl_network_log
-        WHERE {whereClause}
-        ORDER BY timestamp
-        LIMIT @limit OFFSET @offset;";
+        FROM base_page bp
+        ORDER BY bp.timestamp;";
 
     var rows = new List<NetworkLogCacheRow>();
     using var cmd = new MySqlCommand(sql, conn);
@@ -3439,8 +3557,17 @@ private (string Clause, Dictionary<string, object> Params) BuildSqlWhere(
     var clauses = new List<string>();
     if (idParams.Any()) clauses.Add($"session_id IN ({string.Join(",", idParams)})");
     else clauses.Add("1 = 0"); 
-    clauses.Add("COALESCE(NULLIF(TRIM(m_alpha_short), ''), NULLIF(TRIM(m_alpha_long), '')) IS NOT NULL");
-    clauses.Add("NULLIF(TRIM(band), '') IS NOT NULL");
+    clauses.Add(@"(
+        COALESCE(
+            NULLIF(TRIM(m_alpha_short), ''),
+            NULLIF(TRIM(m_alpha_long), '')
+        ) IS NOT NULL
+        OR UPPER(TRIM(COALESCE(network, ''))) LIKE '%5G%'
+    )");
+    clauses.Add(@"(
+        NULLIF(TRIM(band), '') IS NOT NULL
+        OR UPPER(TRIM(COALESCE(network, ''))) LIKE '%5G%'
+    )");
 
     // Move Wildcard search to the end so it runs on smaller dataset
     if(!string.IsNullOrEmpty(provider)) {
@@ -3656,7 +3783,7 @@ private static void NormalizeNetworkLogRows(List<NetworkLogCacheRow> rows)
 {
     foreach (var row in rows)
     {
-        row.m_alpha_long = CleanProviderDisplayName(row.m_alpha_long);
+        row.m_alpha_long = CleanProviderDisplayName(ResolvePreferredProviderName(row));
         row.provider = NormalizeNetworkLogProvider(row);
         row.band = NormalizeNetworkLogBand(row.band);
         row.technology = NormalizeNetworkLogTechnology(row.network, row.band);
@@ -3667,6 +3794,115 @@ private static void NormalizeNetworkLogRows(List<NetworkLogCacheRow> rows)
         row.is_wifi = string.Equals(row.connection_type, "wifi", StringComparison.OrdinalIgnoreCase);
         row.log_type = row.is_wifi ? "wifi" : "network";
     }
+}
+
+private static void Backfill5GNetworkLogFields(List<NetworkLogCacheRow> rows)
+{
+    if (rows.Count == 0)
+        return;
+
+    for (var index = 0; index < rows.Count; index++)
+    {
+        var row = rows[index];
+        if (!Is5GNetworkLogTechnology(row.network))
+            continue;
+
+        if (IsMissingNetworkLogValue(row.band))
+            row.band = "nr";
+
+        var needsShort = IsMissingNetworkLogValue(row.m_alpha_short);
+        var needsLong = IsMissingNetworkLogValue(row.m_alpha_long);
+        if (!needsShort && !needsLong)
+            continue;
+
+        string techKey = GetNetworkLogTechKey(row.network);
+        NetworkLogCacheRow? previous = null;
+        for (var scan = index - 1; scan >= 0; scan--)
+        {
+            var candidate = rows[scan];
+            if (candidate.lat == row.lat &&
+                candidate.lon == row.lon &&
+                GetNetworkLogTechKey(candidate.network) == techKey)
+            {
+                previous = candidate;
+                break;
+            }
+        }
+
+        NetworkLogCacheRow? next = null;
+        if ((needsShort && (previous == null || IsMissingNetworkLogValue(previous.m_alpha_short))) ||
+            (needsLong && (previous == null || IsMissingNetworkLogValue(previous.m_alpha_long))))
+        {
+            for (var scan = index + 1; scan < rows.Count; scan++)
+            {
+                var candidate = rows[scan];
+                if (candidate.lat == row.lat &&
+                    candidate.lon == row.lon &&
+                    GetNetworkLogTechKey(candidate.network) == techKey)
+                {
+                    next = candidate;
+                    break;
+                }
+            }
+        }
+
+        if (needsShort)
+        {
+            if (previous != null && !IsMissingNetworkLogValue(previous.m_alpha_short))
+                row.m_alpha_short = previous.m_alpha_short;
+            else if (next != null && !IsMissingNetworkLogValue(next.m_alpha_short))
+                row.m_alpha_short = next.m_alpha_short;
+        }
+
+        if (needsLong)
+        {
+            if (previous != null && !IsMissingNetworkLogValue(previous.m_alpha_long))
+                row.m_alpha_long = previous.m_alpha_long;
+            else if (next != null && !IsMissingNetworkLogValue(next.m_alpha_long))
+                row.m_alpha_long = next.m_alpha_long;
+        }
+    }
+}
+
+private static string ResolvePreferredProviderName(NetworkLogCacheRow row)
+{
+    if (!IsMissingNetworkLogValue(row.m_alpha_short))
+        return row.m_alpha_short;
+
+    return row.m_alpha_long;
+}
+
+private static bool IsMissingNetworkLogValue(string? value)
+{
+    if (string.IsNullOrWhiteSpace(value))
+        return true;
+
+    var normalized = value.Trim();
+    return normalized.Equals("NA", StringComparison.OrdinalIgnoreCase) ||
+           normalized.Equals("N/A", StringComparison.OrdinalIgnoreCase) ||
+           normalized.Equals("NULL", StringComparison.OrdinalIgnoreCase);
+}
+
+private static bool Is5GNetworkLogTechnology(string? network)
+{
+    return !string.IsNullOrWhiteSpace(network) &&
+           network.Trim().IndexOf("5G", StringComparison.OrdinalIgnoreCase) >= 0;
+}
+
+private static string GetNetworkLogTechKey(string? network)
+{
+    var normalized = network?.Trim() ?? string.Empty;
+    if (normalized.IndexOf("5G", StringComparison.OrdinalIgnoreCase) >= 0)
+        return "5G";
+    if (normalized.Equals("4G(LTE-ANCHOR NSA)", StringComparison.OrdinalIgnoreCase))
+        return "4G(LTE-ANCHOR NSA)";
+    if (normalized.IndexOf("4G", StringComparison.OrdinalIgnoreCase) >= 0)
+        return "4G";
+    if (normalized.IndexOf("3G", StringComparison.OrdinalIgnoreCase) >= 0)
+        return "3G";
+    if (normalized.IndexOf("2G", StringComparison.OrdinalIgnoreCase) >= 0)
+        return "2G";
+    return normalized.ToUpperInvariant();
 }
 
 private static string NormalizeNetworkLogProvider(NetworkLogCacheRow row)
@@ -3789,6 +4025,8 @@ public class NetworkLogCacheRow
     public string network { get; set; } = "";
     public string technology { get; set; } = "";
     public string networkType { get; set; } = "";
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string m_alpha_short { get; set; } = "";
     public string m_alpha_long { get; set; } = "";
     public string provider { get; set; } = "";
     public string pci { get; set; } = "";

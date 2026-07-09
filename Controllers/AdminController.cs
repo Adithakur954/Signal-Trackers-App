@@ -4838,7 +4838,8 @@ GROUP BY provider, tech;
             string networkType,
             DateTime? from,
             DateTime? to,
-            [FromQuery] int? company_id = null) // <--- ADDED PARAMETER
+            [FromQuery] int? company_id = null,
+            [FromQuery] bool forceRefresh = false) // <--- forceRefresh busts the cache
         {
             // =========================================================
             // 1. SMART SECURITY: RESOLVE COMPANY ID
@@ -4846,10 +4847,27 @@ GROUP BY provider, tech;
             int targetCompanyId = GetTargetCompanyId(company_id);
             int currentUserId = GetCurrentUserId();
             bool useUserScope = UseCurrentUserScope(targetCompanyId, currentUserId);
-if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope) 
+if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
 {
     return Unauthorized(new { Status = 0, Message = "Unauthorized. Invalid Company." });
 }
+
+            // Force a default 30-day window when none is provided so the SQL can
+            // use the timestamp index. Without a date filter the query scans the
+            // entire tbl_network_log (millions of rows) and takes 60-90s.
+            var effectiveTo = to ?? DateTime.UtcNow;
+            var effectiveFrom = from ?? effectiveTo.AddDays(-30);
+            if (effectiveFrom > effectiveTo)
+            {
+                var tmp = effectiveFrom;
+                effectiveFrom = effectiveTo;
+                effectiveTo = tmp;
+            }
+            from = effectiveFrom;
+            to = effectiveTo;
+
+            var totalSw = System.Diagnostics.Stopwatch.StartNew();
+
             var opSet = ParseCsv(operatorName);
             if (opSet != null)
             {
@@ -4886,13 +4904,23 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
             // =========================================================
             // 3. TRY REDIS
             // =========================================================
-            if (_redis != null && _redis.IsConnected)
+            if (!forceRefresh && _redis != null && _redis.IsConnected)
             {
                 var cached = await _redis.GetObjectAsync<List<OpNetValueDto>>(cacheKey);
                 if (cached != null)
                 {
+                    totalSw.Stop();
+                    Console.WriteLine($" OperatorSamplesV2: CACHE HIT key={cacheKey} ms={totalSw.ElapsedMilliseconds}");
+                    Response.Headers["X-Cache"] = "HIT";
+                    Response.Headers["X-Total-Ms"] = totalSw.ElapsedMilliseconds.ToString();
+                    Response.Headers["X-Action"] = "OperatorSamplesV2";
                     return Ok(new { Status = 1, Source = "REDIS", Data = cached });
                 }
+                Response.Headers["X-Cache"] = "MISS";
+            }
+            else
+            {
+                Response.Headers["X-Cache"] = forceRefresh ? "BYPASS" : "MISS";
             }
 
             // =========================================================
@@ -5063,6 +5091,13 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
             {
                 await _redis.SetObjectAsync(cacheKey, result, ttlSeconds: 600);
             }
+
+            totalSw.Stop();
+            Console.WriteLine($" OperatorSamplesV2: CACHE MISS key={cacheKey} sql+total ms={totalSw.ElapsedMilliseconds} rows={result.Count}");
+            Response.Headers["X-Cache"] = "MISS";
+            Response.Headers["X-Total-Ms"] = totalSw.ElapsedMilliseconds.ToString();
+            Response.Headers["X-Action"] = "OperatorSamplesV2";
+            Response.Headers["X-Row-Count"] = result.Count.ToString();
 
             return Ok(new { Status = 1, Source = "DATABASE", Data = result });
         }
@@ -5791,7 +5826,8 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
         public async Task<IActionResult> HandsetDistributionV2(
             [FromQuery] DateTime? from,
             [FromQuery] DateTime? to,
-            [FromQuery] int? company_id = null) // <--- ADDED PARAMETER
+            [FromQuery] int? company_id = null,
+            [FromQuery] bool forceRefresh = false) // <--- forceRefresh busts the cache
         {
             // =========================================================
             // 1. SMART SECURITY: RESOLVE COMPANY ID
@@ -5817,16 +5853,28 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
             string toKey = hasDateFilter ? effectiveTo.ToString("yyyyMMdd") : "ALL";
             string cacheKey = $"HandsetDist:MakeOnly:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:{fromKey}:{toKey}";
 
+            var totalSw = System.Diagnostics.Stopwatch.StartNew();
+
             // =========================================================
             // 3. TRY REDIS
             // =========================================================
-            if (_redis != null && _redis.IsConnected)
+            if (!forceRefresh && _redis != null && _redis.IsConnected)
             {
                 var cached = await _redis.GetObjectAsync<List<HandsetDistResult>>(cacheKey);
                 if (cached != null)
                 {
+                    totalSw.Stop();
+                    Console.WriteLine($" HandsetDistributionV2: CACHE HIT key={cacheKey} ms={totalSw.ElapsedMilliseconds}");
+                    Response.Headers["X-Cache"] = "HIT";
+                    Response.Headers["X-Total-Ms"] = totalSw.ElapsedMilliseconds.ToString();
+                    Response.Headers["X-Action"] = "HandsetDistributionV2";
                     return Ok(new { Status = 1, Source = "REDIS", Data = cached });
                 }
+                Response.Headers["X-Cache"] = "MISS";
+            }
+            else
+            {
+                Response.Headers["X-Cache"] = forceRefresh ? "BYPASS" : "MISS";
             }
 
             // =========================================================
