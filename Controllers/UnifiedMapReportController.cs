@@ -9,6 +9,9 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using SignalTracker.Helper;
 using SignalTracker.Models;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats.Jpeg;
+using NetTopologySuite.GeometriesGraph;
 
 namespace SignalTracker.Controllers
 {
@@ -20,6 +23,8 @@ namespace SignalTracker.Controllers
         private readonly ApplicationDbContext _db;
         private readonly CommonFunction _cf;
         private readonly IWebHostEnvironment _env;
+        
+        private static readonly HttpClient _httpClient = new HttpClient();
 
         public UnifiedMapReportController(
             ApplicationDbContext db,
@@ -54,13 +59,21 @@ namespace SignalTracker.Controllers
                 .Distinct()
                 .ToList();
 
-            var rows = await QueryReportRowsAsync(request, sessionIdInts);
+            var thresholds = ReportThresholdConfig.Hardcoded();
+            var logo = LoadCompanyLogo();
+            var primarySessionId = sessionIds.FirstOrDefault();
+
+            var rowsTask = QueryReportRowsAsync(request, sessionIdInts);
+            var mapImagesTask = FetchMapImagesAsync(primarySessionId);
+
+            await Task.WhenAll(rowsTask, mapImagesTask);
+
+            var rows = rowsTask.Result;
+            var mapImages = mapImagesTask.Result;
 
             if (rows.Count == 0)
                 return BadRequest(new { Message = "No drive logs found for the selected sessions." });
 
-            var thresholds = await GetThresholdConfigAsync();
-            var logo = LoadCompanyLogo();
             var report = UnifiedMapReportFactory.Create(
                 request,
                 project?.project_name,
@@ -68,10 +81,65 @@ namespace SignalTracker.Controllers
                 rows,
                 thresholds,
                 logo);
+                
+            report.MapImages = mapImages;
 
             var pdf = UnifiedMapRawPdfBuilder.Build(report);
             var filename = $"UnifiedMap_Report_{request.ProjectId}_{DateTime.Now:yyyy-MM-dd}.pdf";
             return File(pdf, "application/pdf", filename);
+        }
+
+        private async Task<Dictionary<string, ReportLogo>> FetchMapImagesAsync(long sessionId)
+        {
+            var headers = new[] { "BAND", "RSRP", "RSRQ", "SINR", "DL_THPT", "UL_THPT", "EARFCN", "LTE_BLER","PCI", "NODEB_ID", "VOLTE_CALL", "PUSCH_TX" };
+
+            var downloadTasks = headers.Select(async header =>
+            {
+                var url = $"https://apistracer.vinfocom.co.in/uploaded_images/{sessionId}_{header}.png";
+                try
+                {
+                    var response = await _httpClient.GetAsync(url);
+                    if (response.IsSuccessStatusCode)
+                    {
+                        var originalBytes = await response.Content.ReadAsByteArrayAsync();
+                        byte[] jpegBytes;
+
+                        try
+                        {
+                            using var image = Image.Load(originalBytes);
+                            using var ms = new MemoryStream();
+                            image.Save(ms, new JpegEncoder { Quality = 90 });
+                            jpegBytes = ms.ToArray();
+                        }
+                        catch
+                        {
+                            jpegBytes = originalBytes;
+                        }
+
+                        var (width, height) = UnifiedMapRawPdfBuilder.GetJpegDimensions(jpegBytes);
+                        if (width > 0 && height > 0)
+                        {
+                            return new KeyValuePair<string, ReportLogo>(header, new ReportLogo(jpegBytes, width, height));
+                        }
+                    }
+                }
+                catch { }
+                
+                return new KeyValuePair<string, ReportLogo>(header, null!); 
+            });
+
+            var results = await Task.WhenAll(downloadTasks);
+
+            var images = new Dictionary<string, ReportLogo>();
+            foreach (var res in results)
+            {
+                if (res.Value != null)
+                {
+                    images[res.Key] = res.Value;
+                }
+            }
+
+            return images;
         }
 
         private async Task<ReportThresholdConfig> GetThresholdConfigAsync()
@@ -90,10 +158,7 @@ namespace SignalTracker.Controllers
                 if (userSetting != null)
                     return ReportThresholdConfig.FromDb(userSetting, "User custom settings");
             }
-            catch
-            {
-                // If session/user resolution fails, continue with default settings.
-            }
+            catch { }
 
             var defaultSetting = await _db.thresholds
                 .AsNoTracking()
@@ -135,10 +200,7 @@ namespace SignalTracker.Controllers
                     if (width <= 0 || height <= 0) continue;
                     return new ReportLogo(bytes, width, height);
                 }
-                catch
-                {
-                    // Try next candidate.
-                }
+                catch { }
             }
 
             return null;
@@ -169,7 +231,7 @@ namespace SignalTracker.Controllers
                         TRIM(BOTH CHAR(39) FROM TRIM(BOTH '""' FROM TRIM(m_alpha_long)))
                     ) AS provider_name,
                     band, pci, rssi, rsrp, rsrq, sinr, mos, jitter, latency,
-                    packet_loss, dl_tpt, ul_tpt, apps, app_name, indoor_outdoor, nodeb_id, cell_id
+                    packet_loss, dl_tpt, ul_tpt, apps, app_name, indoor_outdoor, nodeb_id, cell_id,earfcn,bler,volte_call
                 FROM tbl_network_log
                 WHERE {whereClause}
                 ORDER BY timestamp, id
@@ -200,16 +262,14 @@ namespace SignalTracker.Controllers
                     Rsrp = ClampKpi(ReadFloat(reader, "rsrp"), -140, -44),
                     Rsrq = ClampKpi(ReadFloat(reader, "rsrq"), -34, 3),
                     Sinr = ClampKpi(ReadFloat(reader, "sinr"), -23, 40),
-                    Mos = ReadFloat(reader, "mos"),
-                    Jitter = ReadFloat(reader, "jitter"),
-                    Latency = ReadFloat(reader, "latency"),
-                    PacketLoss = ReadFloat(reader, "packet_loss"),
+                    Earfcn = ReadInt(reader, "earfcn"),
+                    Bler = ReadString(reader, "bler"), // Kept as string 
+                    VolteCall = ReadInt(reader,"volte_call"), // Reverted to int?
                     DlTpt = ReadString(reader, "dl_tpt"),
+                    NodebId = ReadString(reader, "nodeb_id"),
                     UlTpt = ReadString(reader, "ul_tpt"),
                     Apps = ReadString(reader, "apps"),
-                    AppName = ReadString(reader, "app_name"),
                     IndoorOutdoor = ReadString(reader, "indoor_outdoor"),
-                    NodebId = ReadString(reader, "nodeb_id"),
                     CellId = ReadString(reader, "cell_id")
                 });
             }
@@ -462,6 +522,10 @@ namespace SignalTracker.Controllers
         public string? IndoorOutdoor { get; set; }
         public string? NodebId { get; set; }
         public string? CellId { get; set; }
+        public int? Earfcn { get; set; }
+        public string? Bler { get; set; }
+        public int? VolteCall { get; set; } // Kept as int?
+        public string? PuschTx { get; set; } 
     }
 
     internal sealed class UnifiedMapReport
@@ -482,6 +546,8 @@ namespace SignalTracker.Controllers
         public List<ChartSeries> LineCharts { get; set; } = new();
         public List<BarChartData> BarCharts { get; set; } = new();
         public List<TableData> Tables { get; set; } = new();
+        public Dictionary<string, ReportLogo> MapImages { get; set; } = new();
+        public ReportThresholdConfig? Thresholds { get; set; }
     }
 
     internal sealed record ReportLogo(byte[] Bytes, int Width, int Height);
@@ -494,6 +560,12 @@ namespace SignalTracker.Controllers
         public List<ThresholdRange> Rsrq { get; set; } = new();
         public List<ThresholdRange> Sinr { get; set; } = new();
         public List<ThresholdRange> Mos { get; set; } = new();
+        public List<ThresholdRange> DlTpt { get; set; } = new();
+        public List<ThresholdRange> UlTpt { get; set; } = new();
+        public List<ThresholdRange> Earfcn { get; set; } = new();
+        public List<ThresholdRange> Bler { get; set; } = new();
+        public List<ThresholdRange> VolteCall { get; set; } = new();
+        public List<ThresholdRange> PuschTx { get; set; } = new();
 
         public static ReportThresholdConfig FromDb(thresholds setting, string source)
         {
@@ -508,7 +580,11 @@ namespace SignalTracker.Controllers
                 Rsrp = ParseRanges(setting.rsrp_json, fallback.Rsrp),
                 Rsrq = ParseRanges(setting.rsrq_json, fallback.Rsrq),
                 Sinr = ParseRanges(setting.sinr_json, fallback.Sinr),
-                Mos = ParseRanges(setting.mos_json, fallback.Mos)
+                Mos = ParseRanges(setting.mos_json, fallback.Mos),
+                DlTpt = ParseRanges(setting.dl_thpt_json, fallback.DlTpt),
+                UlTpt = ParseRanges(setting.ul_thpt_json, fallback.UlTpt),
+                Bler = ParseRanges(setting.lte_bler_json, fallback.Bler),
+                VolteCall = ParseRanges(setting.volte_call, fallback.VolteCall)
             };
         }
 
@@ -516,36 +592,75 @@ namespace SignalTracker.Controllers
         {
             return new ReportThresholdConfig
             {
-                Source = "Hardcoded fallback",
+                Source = "Hardcoded",
                 CoverageHoleLimit = -110,
+
                 Rsrp = new List<ThresholdRange>
                 {
-                    new("Excellent", -80, -44),
-                    new("Good", -90, -80),
-                    new("Fair", -100, -90),
-                    new("Poor", -110, -100),
-                    new("Coverage Hole", -140, -110)
+                    new("Excellent",-75,0,"#008000"),
+                    new("Very Good",-85,-75,"#66CC66"),
+                    new("Good",-95,-85,"#ADD8E6"),
+                    new("Fair",-105,-95,"#0000FF"),
+                    new("Poor",-115,-105,"#FFFF00"),
+                    new("Very Poor",-140,-115,"#FF0000")
                 },
                 Rsrq = new List<ThresholdRange>
                 {
-                    new("Excellent", -10, -3),
-                    new("Good", -15, -10),
-                    new("Fair", -20, -15),
-                    new("Poor", -34, -20)
+                    new("Good",-14,0,"#008000"),
+                    new("Fair",-16,-14,"#66CC66"),
+                    new("Poor",-18,-16,"#FFFF00"),
+                    new("Very Poor",-30,-18,"#FF0000")
                 },
                 Sinr = new List<ThresholdRange>
                 {
-                    new("Excellent", 20, 40),
-                    new("Good", 10, 20),
-                    new("Fair", 0, 10),
-                    new("Poor", -20, 0)
+                    new("Excellent",15,40,"#008000"),
+                    new("Good",10,15,"#66CC66"),
+                    new("Fair",5,10,"#0000FF"),
+                    new("Poor",0,5,"#FFFF00"),
+                    new("Very Poor",-20,0,"#FF0000")
                 },
-                Mos = new List<ThresholdRange>
+                DlTpt = new List<ThresholdRange>
                 {
-                    new("Excellent", 4, 5),
-                    new("Good", 3, 4),
-                    new("Fair", 2, 3),
-                    new("Poor", 1, 2)
+                    new("Excellent",4,1000,"#008000"),
+                    new("Good",3,4,"#66CC66"),
+                    new("Fair",2,3,"#FFFF00"),
+                    new("Poor",1,2,"#0000FF"),
+                    new("Very Poor",0,1,"#FF0000")
+                },
+                UlTpt = new List<ThresholdRange>
+                {
+                    new("Excellent",4,1000,"#008000"),
+                    new("Good",3,4,"#66CC66"),
+                    new("Fair",2,3,"#FFFF00"),
+                    new("Poor",1,2,"#0000FF"),
+                    new("Very Poor",0,1,"#FF0000")
+                },
+                Earfcn = new List<ThresholdRange>
+                {
+                    new("B3 1800MHz",0,0,"#4AA3FF") { ValueMatch="B3" },
+                    new("B5 850MHz",0,0,"#00AA00") { ValueMatch="B5" },
+                    new("B40 2300MHz",0,0,"#FFA500") { ValueMatch="B40" },
+                    new("B41 2500MHz",0,0,"#FF1493") { ValueMatch="B41" }
+                },
+                Bler = new List<ThresholdRange>
+                {
+                    new("No Errors",0,0,"#008000") { ValueMatch="No Errors" },
+                    new("Low",0,0,"#FFFF00") { ValueMatch="Low" },
+                    new("Medium",0,0,"#FFA500") { ValueMatch="Medium" },
+                    new("High",0,0,"#FF0000") { ValueMatch="High" }
+                },
+                VolteCall = new List<ThresholdRange>
+                {
+                    new("VoLTE Active",1,1,"#008000") { ValueMatch="1" },
+                    new("No VoLTE",0,0,"#FF0000") { ValueMatch="0" }
+                },
+                PuschTx = new List<ThresholdRange>
+                {
+                    new("Excellent",23,30,"#008000"),
+                    new("Good",18,23,"#66CC66"),
+                    new("Fair",13,18,"#FFFF00"),
+                    new("Poor",8,13,"#0000FF"),
+                    new("Very Poor",0,8,"#FF0000")
                 }
             };
         }
@@ -564,15 +679,17 @@ namespace SignalTracker.Controllers
                 {
                     var min = GetDouble(item, "min");
                     var max = GetDouble(item, "max");
-                    if (!min.HasValue || !max.HasValue) continue;
+                    var val = GetStringFallback(item, "value");
 
-                    var label =
-                        GetString(item, "label") ??
-                        GetString(item, "range") ??
-                        GetString(item, "name") ??
-                        $"{min:0.##} to {max:0.##}";
+                    if (!min.HasValue && !max.HasValue && string.IsNullOrWhiteSpace(val)) continue;
 
-                    ranges.Add(new ThresholdRange(label, min.Value, max.Value));
+                    var label = GetStringFallback(item, "label", "range", "name");
+                    var color = GetStringFallback(item, "color", "hex", "colorCode") ?? "#808080";
+
+                    ranges.Add(new ThresholdRange(label ?? "", min ?? 0, max ?? 0, color) 
+                    { 
+                        ValueMatch = val 
+                    });
                 }
 
                 return ranges.Count > 0 ? ranges : fallback;
@@ -583,19 +700,25 @@ namespace SignalTracker.Controllers
             }
         }
 
+        private static string? GetStringFallback(JsonElement item, params string[] names)
+        {
+            foreach (var name in names)
+            {
+                if (item.TryGetProperty(name, out var prop) && prop.ValueKind == JsonValueKind.String)
+                {
+                    var val = prop.GetString();
+                    if (!string.IsNullOrWhiteSpace(val)) return val;
+                }
+            }
+            return null;
+        }
+
         private static double? GetDouble(JsonElement item, string name)
         {
             if (!item.TryGetProperty(name, out var prop)) return null;
             if (prop.ValueKind == JsonValueKind.Number && prop.TryGetDouble(out var number)) return number;
             if (prop.ValueKind == JsonValueKind.String) return ParseDouble(prop.GetString());
             return null;
-        }
-
-        private static string? GetString(JsonElement item, string name)
-        {
-            return item.TryGetProperty(name, out var prop) && prop.ValueKind == JsonValueKind.String
-                ? prop.GetString()
-                : null;
         }
 
         private static double? ParseDouble(string? value)
@@ -608,16 +731,51 @@ namespace SignalTracker.Controllers
         }
     }
 
-    internal sealed record ThresholdRange(string Label, double Min, double Max)
+    internal sealed record ThresholdRange(string Label, double Min, double Max, string ColorHex = "#808080")
     {
+        public string? ValueMatch { get; set; }
+
         public bool Contains(double value)
         {
+            if (!string.IsNullOrWhiteSpace(ValueMatch))
+            {
+                if (double.TryParse(ValueMatch, NumberStyles.Any, CultureInfo.InvariantCulture, out var matchVal))
+                    return Math.Abs(value - matchVal) < 0.0001;
+                return value.ToString(CultureInfo.InvariantCulture) == ValueMatch;
+            }
+
+            var low = Math.Min(Min, Max);
+            var high = Math.Max(Min, Max);
+
+            if (Math.Abs(low - high) < 0.0001)
+                return Math.Abs(value - low) < 0.0001;
+
+            return value >= low && value < high;
+        }
+
+        public bool ContainsInclusive(double value)
+        {
+            if (!string.IsNullOrWhiteSpace(ValueMatch)) return Contains(value);
+
             var low = Math.Min(Min, Max);
             var high = Math.Max(Min, Max);
             return value >= low && value <= high;
         }
 
-        public string Display => $"{Label} ({Min:0.##} to {Max:0.##})";
+        public string Display
+        {
+            get
+            {
+                if (!string.IsNullOrWhiteSpace(ValueMatch)) 
+                    return !string.IsNullOrWhiteSpace(Label) && Label != ValueMatch ? $"{Label} ({ValueMatch})" : ValueMatch;
+
+                var rangeStr = $"{Min:0.##} to {Max:0.##}";
+                if (string.IsNullOrWhiteSpace(Label)) return rangeStr;
+                if (Label.Contains(Min.ToString("0.##"))) return Label;
+                
+                return $"{Label} ({rangeStr})";
+            }
+        }
     }
 
     internal sealed class ChartSeries
@@ -650,10 +808,7 @@ namespace SignalTracker.Controllers
             ReportThresholdConfig thresholds,
             ReportLogo? logo)
         {
-            var orderedRows = rows
-                .OrderBy(x => x.Timestamp ?? DateTime.MinValue)
-                .ThenBy(x => x.Id)
-                .ToList();
+            var orderedRows = rows.OrderBy(x => x.Timestamp ?? DateTime.MinValue).ThenBy(x => x.Id).ToList();
 
             var report = new UnifiedMapReport
             {
@@ -695,14 +850,13 @@ namespace SignalTracker.Controllers
             report.Tables.Add(BuildKpiTable(orderedRows));
             report.Tables.Add(BuildDriveLogTable(orderedRows));
             report.Tables.Add(BuildNetworkSiteTable(orderedRows));
+            
+            report.Thresholds = thresholds;
 
             return report;
         }
 
-        private static Dictionary<string, string> BuildSummary(
-            UnifiedMapReport report,
-            List<UnifiedMapReportRow> rows,
-            ReportThresholdConfig thresholds)
+        private static Dictionary<string, string> BuildSummary(UnifiedMapReport report, List<UnifiedMapReportRow> rows, ReportThresholdConfig thresholds)
         {
             var coverageHoleCount = rows.Count(x => x.Rsrp.HasValue && x.Rsrp.Value <= thresholds.CoverageHoleLimit);
             return new Dictionary<string, string>
@@ -710,9 +864,7 @@ namespace SignalTracker.Controllers
                 ["Project"] = report.ProjectName,
                 ["Sessions"] = string.Join(", ", report.SessionIds.Take(12)),
                 ["Total drive logs"] = report.TotalRows.ToString("N0", CultureInfo.InvariantCulture),
-                ["Date range"] = report.From.HasValue && report.To.HasValue
-                    ? $"{report.From:yyyy-MM-dd HH:mm} to {report.To:yyyy-MM-dd HH:mm}"
-                    : "N/A",
+                ["Date range"] = report.From.HasValue && report.To.HasValue ? $"{report.From:yyyy-MM-dd HH:mm} to {report.To:yyyy-MM-dd HH:mm}" : "N/A",
                 ["Average RSRP"] = FormatAverage(rows.Select(x => x.Rsrp), "dBm"),
                 ["Average RSRQ"] = FormatAverage(rows.Select(x => x.Rsrq), "dB"),
                 ["Average SINR"] = FormatAverage(rows.Select(x => x.Sinr), "dB"),
@@ -725,37 +877,17 @@ namespace SignalTracker.Controllers
             };
         }
 
-        private static ChartSeries BuildLineChart(string title, string unit, IEnumerable<float?> source)
-        {
-            return BuildLineChart(title, unit, source.Select(x => x.HasValue ? (double?)x.Value : null));
-        }
+        private static ChartSeries BuildLineChart(string title, string unit, IEnumerable<float?> source) => BuildLineChart(title, unit, source.Select(x => x.HasValue ? (double?)x.Value : null));
 
         private static ChartSeries BuildLineChart(string title, string unit, IEnumerable<double?> source)
         {
-            var values = source
-                .Where(x => x.HasValue && !double.IsNaN(x.Value) && !double.IsInfinity(x.Value))
-                .Select(x => x!.Value)
-                .ToList();
-
-            return new ChartSeries
-            {
-                Title = title,
-                Unit = unit,
-                Values = Sample(values, 240)
-            };
+            var values = source.Where(x => x.HasValue && !double.IsNaN(x.Value) && !double.IsInfinity(x.Value)).Select(x => x!.Value).ToList();
+            return new ChartSeries { Title = title, Unit = unit, Values = Sample(values, 240) };
         }
 
         private static BarChartData BuildBarChart(string title, IEnumerable<string> groups, int take)
         {
-            var items = groups
-                .Select(x => CleanGroup(x, "Unknown"))
-                .GroupBy(x => x, StringComparer.OrdinalIgnoreCase)
-                .Select(g => (Label: g.Key, Value: (double)g.Count()))
-                .OrderByDescending(x => x.Value)
-                .ThenBy(x => x.Label)
-                .Take(take)
-                .ToList();
-
+            var items = groups.Select(x => CleanGroup(x, "Unknown")).GroupBy(x => x, StringComparer.OrdinalIgnoreCase).Select(g => (Label: g.Key, Value: (double)g.Count())).OrderByDescending(x => x.Value).ThenBy(x => x.Label).Take(take).ToList();
             return new BarChartData { Title = title, Items = items };
         }
 
@@ -763,36 +895,22 @@ namespace SignalTracker.Controllers
         {
             var counts = ranges.ToDictionary(x => x.Display, _ => 0.0);
             var unknown = 0.0;
-
             foreach (var value in values.Where(x => x.HasValue).Select(x => x!.Value))
             {
                 var match = ranges.FirstOrDefault(x => x.Contains(value));
                 if (match == null) unknown++;
                 else counts[match.Display] += 1;
             }
-
-            var items = counts
-                .Select(x => (Label: x.Key, Value: x.Value))
-                .Where(x => x.Value > 0)
-                .ToList();
-
+            var items = counts.Select(x => (Label: x.Key, Value: x.Value)).Where(x => x.Value > 0).ToList();
             if (unknown > 0) items.Add(("Outside configured ranges", unknown));
             return new BarChartData { Title = title, Items = items };
         }
 
         private static BarChartData BuildHandoverChart(List<UnifiedMapReportRow> rows)
         {
-            var ordered = rows
-                .Where(x => x.Timestamp.HasValue)
-                .OrderBy(x => x.Timestamp)
-                .ThenBy(x => x.Id)
-                .ToList();
-
-            var tech = 0;
-            var band = 0;
-            var pci = 0;
+            var ordered = rows.Where(x => x.Timestamp.HasValue).OrderBy(x => x.Timestamp).ThenBy(x => x.Id).ToList();
+            var tech = 0; var band = 0; var pci = 0;
             UnifiedMapReportRow? previous = null;
-
             foreach (var row in ordered)
             {
                 if (previous != null)
@@ -803,17 +921,7 @@ namespace SignalTracker.Controllers
                 }
                 previous = row;
             }
-
-            return new BarChartData
-            {
-                Title = "Handover / Change Summary",
-                Items = new List<(string Label, double Value)>
-                {
-                    ("Technology changes", tech),
-                    ("Band changes", band),
-                    ("PCI changes", pci)
-                }
-            };
+            return new BarChartData { Title = "Handover / Change Summary", Items = new List<(string Label, double Value)> { ("Technology changes", tech), ("Band changes", band), ("PCI changes", pci) } };
         }
 
         private static TableData BuildKpiTable(List<UnifiedMapReportRow> rows)
@@ -826,39 +934,24 @@ namespace SignalTracker.Controllers
                 ("MOS", rows.Select(x => x.Mos.HasValue ? (double?)x.Mos.Value : null), ""),
                 ("Latency", rows.Select(x => x.Latency.HasValue ? (double?)x.Latency.Value : null), "ms"),
                 ("Jitter", rows.Select(x => x.Jitter.HasValue ? (double?)x.Jitter.Value : null), "ms"),
-                ("Packet Loss", rows.Select(x => x.PacketLoss.HasValue ? (double?)x.PacketLoss.Value : null), "%")
+                ("Packet Loss", rows.Select(x => x.PacketLoss.HasValue ? (double?)x.PacketLoss.Value : null), "%"),
+                ("Earfcn", rows.Select(x => x.Earfcn.HasValue ? (double?)x.Earfcn.Value : null), ""),
+                ("LTE BLER", rows.Select(x => ParseNumber(x.Bler)), "%"),
+                ("VoLTE Call", rows.Select(x => (double?)x.VolteCall), ""),
+                ("PUSCH TX", rows.Select(x => ParseNumber(x.PuschTx)), "dBm")
             };
-
-            var table = new TableData
-            {
-                Title = "KPI Statistics",
-                Headers = new List<string> { "Metric", "Average", "Minimum", "Maximum", "Samples" }
-            };
-
+            var table = new TableData { Title = "KPI Statistics", Headers = new List<string> { "Metric", "Average", "Minimum", "Maximum", "Samples" } };
             foreach (var metric in metrics)
             {
                 var values = metric.Values.Where(x => x.HasValue).Select(x => x!.Value).ToList();
-                table.Rows.Add(new List<string>
-                {
-                    metric.Name,
-                    values.Count == 0 ? "N/A" : $"{values.Average():0.##} {metric.Unit}".Trim(),
-                    values.Count == 0 ? "N/A" : $"{values.Min():0.##} {metric.Unit}".Trim(),
-                    values.Count == 0 ? "N/A" : $"{values.Max():0.##} {metric.Unit}".Trim(),
-                    values.Count.ToString("N0", CultureInfo.InvariantCulture)
-                });
+                table.Rows.Add(new List<string> { metric.Name, values.Count == 0 ? "N/A" : $"{values.Average():0.##} {metric.Unit}".Trim(), values.Count == 0 ? "N/A" : $"{values.Min():0.##} {metric.Unit}".Trim(), values.Count == 0 ? "N/A" : $"{values.Max():0.##} {metric.Unit}".Trim(), values.Count.ToString("N0", CultureInfo.InvariantCulture) });
             }
-
             return table;
         }
 
         private static TableData BuildThresholdTable(ReportThresholdConfig thresholds)
         {
-            var table = new TableData
-            {
-                Title = "Configured KPI Ranges",
-                Headers = new List<string> { "Metric", "Label", "Minimum", "Maximum", "Source" }
-            };
-
+            var table = new TableData { Title = "Configured KPI Ranges", Headers = new List<string> { "Metric", "Label", "Minimum", "Maximum", "Source" } };
             AddRanges(table, "RSRP", thresholds.Rsrp, thresholds.Source);
             AddRanges(table, "RSRQ", thresholds.Rsrq, thresholds.Source);
             AddRanges(table, "SINR", thresholds.Sinr, thresholds.Source);
@@ -869,80 +962,21 @@ namespace SignalTracker.Controllers
 
         private static void AddRanges(TableData table, string metric, List<ThresholdRange> ranges, string source)
         {
-            foreach (var range in ranges)
-            {
-                table.Rows.Add(new List<string>
-                {
-                    metric,
-                    range.Label,
-                    range.Min.ToString("0.##", CultureInfo.InvariantCulture),
-                    range.Max.ToString("0.##", CultureInfo.InvariantCulture),
-                    source
-                });
-            }
+            foreach (var range in ranges) table.Rows.Add(new List<string> { metric, range.Label, range.Min.ToString("0.##", CultureInfo.InvariantCulture), range.Max.ToString("0.##", CultureInfo.InvariantCulture), source });
         }
 
         private static TableData BuildDriveLogTable(List<UnifiedMapReportRow> rows)
         {
-            var table = new TableData
-            {
-                Title = "Drive Log Sample",
-                Headers = new List<string> { "Time", "Session", "Lat", "Lon", "Tech", "Operator", "Band", "PCI", "RSRP", "SINR" }
-            };
-
-            foreach (var row in rows.Take(42))
-            {
-                table.Rows.Add(new List<string>
-                {
-                    row.Timestamp?.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) ?? "",
-                    row.SessionId?.ToString(CultureInfo.InvariantCulture) ?? "",
-                    row.Lat?.ToString("0.000000", CultureInfo.InvariantCulture) ?? "",
-                    row.Lon?.ToString("0.000000", CultureInfo.InvariantCulture) ?? "",
-                    ClassifyTechnology(row.Network),
-                    CleanGroup(row.Provider, ""),
-                    CleanGroup(row.Band, ""),
-                    CleanGroup(row.Pci, ""),
-                    row.Rsrp?.ToString("0.#", CultureInfo.InvariantCulture) ?? "",
-                    row.Sinr?.ToString("0.#", CultureInfo.InvariantCulture) ?? ""
-                });
-            }
-
+            var table = new TableData { Title = "Drive Log Sample", Headers = new List<string> { "Time", "Session", "Lat", "Lon", "Tech", "Operator", "Band", "PCI", "RSRP", "SINR" } };
+            foreach (var row in rows.Take(42)) table.Rows.Add(new List<string> { row.Timestamp?.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) ?? "", row.SessionId?.ToString(CultureInfo.InvariantCulture) ?? "", row.Lat?.ToString("0.000000", CultureInfo.InvariantCulture) ?? "", row.Lon?.ToString("0.000000", CultureInfo.InvariantCulture) ?? "", ClassifyTechnology(row.Network), CleanGroup(row.Provider, ""), CleanGroup(row.Band, ""), CleanGroup(row.Pci, ""), row.Rsrp?.ToString("0.#", CultureInfo.InvariantCulture) ?? "", row.Sinr?.ToString("0.#", CultureInfo.InvariantCulture) ?? "" });
             return table;
         }
 
         private static TableData BuildNetworkSiteTable(List<UnifiedMapReportRow> rows)
         {
-            var table = new TableData
-            {
-                Title = "Network Site Summary",
-                Headers = new List<string> { "Band", "Operator", "NodeB ID", "Cell ID", "Samples" }
-            };
-
-            var grouped = rows
-                .GroupBy(x => new
-                {
-                    Band = CleanGroup(x.Band, "Unknown"),
-                    Operator = CleanGroup(x.Provider, "Unknown"),
-                    Nodeb = CleanGroup(x.NodebId, "Unknown"),
-                    Cell = CleanGroup(x.CellId, CleanGroup(x.Pci, "Unknown"))
-                })
-                .Select(g => new { g.Key.Band, g.Key.Operator, g.Key.Nodeb, g.Key.Cell, Count = g.Count() })
-                .OrderByDescending(x => x.Count)
-                .ThenBy(x => x.Operator)
-                .Take(32);
-
-            foreach (var item in grouped)
-            {
-                table.Rows.Add(new List<string>
-                {
-                    item.Band,
-                    item.Operator,
-                    item.Nodeb,
-                    item.Cell,
-                    item.Count.ToString("N0", CultureInfo.InvariantCulture)
-                });
-            }
-
+            var table = new TableData { Title = "Network Site Summary", Headers = new List<string> { "Band", "Operator", "NodeB ID", "Cell ID", "Samples" } };
+            var grouped = rows.GroupBy(x => new { Band = CleanGroup(x.Band, "Unknown"), Operator = CleanGroup(x.Provider, "Unknown"), Nodeb = CleanGroup(x.NodebId, "Unknown"), Cell = CleanGroup(x.CellId, CleanGroup(x.Pci, "Unknown")) }).Select(g => new { g.Key.Band, g.Key.Operator, g.Key.Nodeb, g.Key.Cell, Count = g.Count() }).OrderByDescending(x => x.Count).ThenBy(x => x.Operator).Take(32);
+            foreach (var item in grouped) table.Rows.Add(new List<string> { item.Band, item.Operator, item.Nodeb, item.Cell, item.Count.ToString("N0", CultureInfo.InvariantCulture) });
             return table;
         }
 
@@ -950,24 +984,11 @@ namespace SignalTracker.Controllers
         {
             if (values.Count <= max) return values;
             var sampled = new List<double>(max);
-            for (var i = 0; i < max; i++)
-            {
-                var index = (int)Math.Round(i * (values.Count - 1) / (double)(max - 1));
-                sampled.Add(values[index]);
-            }
+            for (var i = 0; i < max; i++) sampled.Add(values[(int)Math.Round(i * (values.Count - 1) / (double)(max - 1))]);
             return sampled;
         }
 
-        private static IEnumerable<string> SplitApps(string? apps, string? appName)
-        {
-            var value = string.IsNullOrWhiteSpace(apps) ? appName : apps;
-            if (string.IsNullOrWhiteSpace(value))
-                return new[] { "Unknown" };
-
-            return Regex.Split(value, @"[,;|]+")
-                .Select(x => CleanGroup(x, "Unknown"))
-                .Where(x => !string.IsNullOrWhiteSpace(x));
-        }
+        private static IEnumerable<string> SplitApps(string? apps, string? appName) => Regex.Split(string.IsNullOrWhiteSpace(apps) ? appName ?? "" : apps, @"[,;|]+").Select(x => CleanGroup(x, "Unknown")).Where(x => !string.IsNullOrWhiteSpace(x));
 
         private static string ClassifyTechnology(string? value)
         {
@@ -980,37 +1001,30 @@ namespace SignalTracker.Controllers
             return value?.Trim() ?? "Unknown";
         }
 
-        private static string CleanGroup(string? value, string fallback)
-        {
-            var text = (value ?? "").Trim();
-            return string.IsNullOrWhiteSpace(text) ? fallback : text;
-        }
+        private static string CleanGroup(string? value, string fallback) => string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
 
-        private static bool Same(string? left, string? right)
-        {
-            return string.Equals(CleanGroup(left, ""), CleanGroup(right, ""), StringComparison.OrdinalIgnoreCase);
-        }
+        private static bool Same(string? left, string? right) => string.Equals(CleanGroup(left, ""), CleanGroup(right, ""), StringComparison.OrdinalIgnoreCase);
 
         private static double? ParseNumber(string? value)
         {
             if (string.IsNullOrWhiteSpace(value)) return null;
             var match = Regex.Match(value, @"-?\d+(\.\d+)?");
-            if (!match.Success) return null;
-            return double.TryParse(match.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var number)
-                ? number
-                : null;
+            return match.Success && double.TryParse(match.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var number) ? number : null;
         }
 
-        private static string FormatAverage(IEnumerable<float?> values, string unit)
-        {
-            return FormatAverage(values.Select(x => x.HasValue ? (double?)x.Value : null), unit);
-        }
-
+        private static string FormatAverage(IEnumerable<float?> values, string unit) => FormatAverage(values.Select(x => x.HasValue ? (double?)x.Value : null), unit);
         private static string FormatAverage(IEnumerable<double?> values, string unit)
         {
             var list = values.Where(x => x.HasValue).Select(x => x!.Value).ToList();
             return list.Count == 0 ? "N/A" : $"{list.Average():0.##} {unit}".Trim();
         }
+    }
+
+    internal sealed class LegendStatistics
+    {
+        public ThresholdRange Range { get; set; } = null!;
+        public int Count { get; set; }
+        public double Percentage { get; set; }
     }
 
     internal static class UnifiedMapRawPdfBuilder
@@ -1028,12 +1042,25 @@ namespace SignalTracker.Controllers
                 BuildIntroductionPage(report),
                 BuildAreaSummaryPage(report),
                 BuildDriveAndKpiSummaryPage(report),
-                BuildMapViewPage(report, "a) Band", BuildBandNarrative(report), FindBarChart(report, "Band Distribution")),
-                BuildMapViewPage(report, "b) RSRP", BuildMetricNarrative(report, "RSRP", "Reference Signal Received Power", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Rsrp))), "dBm", -105, "falling below -105 dBm")),
-                BuildMapViewPage(report, "c) RSRQ", BuildMetricNarrative(report, "RSRQ", "Reference Signal Received Quality", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Rsrq))), "dB", -14, "falling below -14 dB")),
-                BuildMapViewPage(report, "d) SINR", BuildMetricNarrative(report, "SINR", "Signal-to-Interference Noise Ratio", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Sinr))), "dB", 5, "falling below 5 dB")),
-                BuildMapViewPage(report, "e) DL Throughput", BuildMetricNarrative(report, "DL throughput", "Downlink throughput", MetricStats(report.Rows.Select(x => ParseNumber(x.DlTpt))), "Mbps", 10, "falling below 10 Mbps")),
-                BuildMapViewPage(report, "f) UL Throughput", BuildMetricNarrative(report, "UL throughput", "Uplink throughput", MetricStats(report.Rows.Select(x => ParseNumber(x.UlTpt))), "Mbps", 5, "falling below 5 Mbps")),
+
+                BuildMapViewPage(report, "a) Band", BuildBandNarrative(report), FindBarChart(report, "Band Distribution"), "BAND"),
+                BuildMapViewPage(report, "b) RSRP", BuildMetricNarrative(report, "RSRP", "Reference Signal Received Power", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Rsrp))), "dBm", -105, "falling below -105 dBm"), null, "RSRP", report.Thresholds?.Rsrp),
+                BuildMapViewPage(report, "c) RSRQ", BuildMetricNarrative(report, "RSRQ", "Reference Signal Received Quality", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Rsrq))), "dB", -14, "falling below -14 dB"), null, "RSRQ", report.Thresholds?.Rsrq),
+                BuildMapViewPage(report, "d) SINR", BuildMetricNarrative(report, "SINR", "Signal-to-Interference Noise Ratio", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Sinr))), "dB", 5, "falling below 5 dB"), null, "SINR", report.Thresholds?.Sinr),
+                BuildMapViewPage(report, "e) DL_THPT", BuildMetricNarrative(report, "DL throughput", "Downlink throughput", MetricStats(report.Rows.Select(x => ParseNumber(x.DlTpt))), "Mbps", 10, "falling below 10 Mbps"), null, "DL_THPT", report.Thresholds?.DlTpt),
+                BuildMapViewPage(report, "f) UL_THPT", BuildMetricNarrative(report, "UL throughput", "Uplink throughput", MetricStats(report.Rows.Select(x => ParseNumber(x.UlTpt))), "Mbps", 5, "falling below 5 Mbps"), null, "UL_THPT", report.Thresholds?.UlTpt),
+                BuildMapViewPage(report, "g) EARFCN", BuildMetricNarrative(report, "EARFCN", "E-UTRA Absolute Radio Frequency Channel Number", MetricStats(report.Rows.Select(x => (double?)x.Earfcn)), ""), null, "EARFCN", report.Thresholds?.Earfcn),
+                BuildMapViewPage(report, "h) LTE BLER", BuildMetricNarrative(report, "LTE BLER", "Block Error Rate", MetricStats(report.Rows.Select(x => ParseNumber(x.Bler))), "%", 10, "exceeding 10%", true), null, "LTE_BLER", report.Thresholds?.Bler),
+                
+                // REVERTED: VoLTE Call passed back as an integer (double?)
+                BuildMapViewPage(report, "i) VoLTE Call", BuildMetricNarrative(report, "VoLTE Call", "Voice over LTE Call Status", MetricStats(report.Rows.Select(x => (double?)x.VolteCall)), "", 1, "failing or dropping", false), null, "VOLTE_CALL", report.Thresholds?.VolteCall),
+                
+                BuildMapViewPage(report, "j) PUSCH TX", BuildMetricNarrative(report, "PUSCH TX", "Physical Uplink Shared Channel Transmit Power", MetricStats(report.Rows.Select(x => ParseNumber(x.PuschTx))), "dBm", 10, "exceeding optimal power", true), null, "PUSCH_TX", report.Thresholds?.PuschTx),
+                
+                BuildMapViewPage(report, "k) NodeB ID", "NodeB ID identifies the physical site (base station) serving the drive route.", null, "NODEB_ID"),
+                BuildMapViewPage(report, "l) Cell ID", "Cell ID identifies the specific cell / sector serving the drive route.", null, "CI"),
+                BuildMapViewPage(report, "m) PCI", "PCI (Physical Cell Identity) is used to distinguish between neighbouring cells on the same frequency.", FindBarChart(report, "PCI Distribution"), "PCI"),
+
                 BuildPciSummaryPage(report),
                 BuildPciDetailsPage(report),
                 BuildPerformanceSummaryPage(report)
@@ -1063,7 +1090,7 @@ namespace SignalTracker.Controllers
             lines.Add("Q");
             return Ascii(string.Join("\n", lines) + "\n");
         }
-
+            
         private static byte[] BuildTableOfContentsPage(UnifiedMapReport report)
         {
             var lines = Header(report, "Table of Contents");
@@ -1081,18 +1108,25 @@ namespace SignalTracker.Controllers
                 ("   d) SINR", "9"),
                 ("   e) DL Throughput", "10"),
                 ("   f) UL Throughput", "11"),
-                ("6. PCI Summary", "12"),
-                ("   a) Top PCI Values", "13"),
-                ("   b) PCI with Poor RSRP", "13"),
-                ("   c) PCI with Poor RSRQ", "13"),
-                ("7. Performance Summary", "14")
+                ("   g) Earfcn", "12"),
+                ("   h) LTE BLER", "13"),
+                ("   i) VoLTE Call", "14"),
+                ("   j) PUSCH TX", "15"),
+                ("   k) NodeB ID", "16"),
+                ("   l) Cell ID", "17"),
+                ("   m) PCI", "18"),
+                ("6. PCI Summary", "19"),
+                ("   a) Top PCI Values", "20"),
+                ("   b) PCI with Poor RSRP", "20"),
+                ("   c) PCI with Poor RSRQ", "20"),
+                ("7. Performance Summary", "21")
             };
 
             foreach (var entry in entries)
             {
                 lines.Add(Text(Margin, y, 11, entry.Item1));
                 lines.Add(Text(PageWidth - Margin - 20, y, 11, entry.Item2));
-                y -= 28;
+                y -= 22; 
             }
             return Ascii(string.Join("\n", lines) + "\n");
         }
@@ -1106,7 +1140,6 @@ namespace SignalTracker.Controllers
             AddWrapped(lines, Margin, ref y, "The report highlights areas of strong and weak coverage, summarizes key radio and service KPIs, and presents PCI and performance summaries to support data-driven network improvement.", 11, 86);
             AddSectionTitle(lines, "2. Area Summary", ref y);
             AddWrapped(lines, Margin, ref y, "Drive route coverage is summarized from available session samples and spatial distribution. Use this section with the map layers in Unified Map to identify operational areas, dense sample clusters, and marked route segments.", 11, 86);
-
             return Ascii(string.Join("\n", lines) + "\n");
         }
 
@@ -1139,21 +1172,171 @@ namespace SignalTracker.Controllers
             AddSectionTitle(lines, "4. KPI Summary", ref y);
             AddWrapped(lines, Margin, ref y, "Network KPI metrics including coverage, quality, throughput, latency, jitter, and packet loss were analyzed across the drive route. Detailed KPI observations are provided in the Map View and Performance Summary sections.", 11, 86);
             y -= 12;
-            DrawTable(lines, Margin, ref y, new[] { "Metric", "Average", "Minimum", "Maximum", "Samples" }, BuildKpiRows(report).Take(8).ToList(), 10);
+            DrawTable(lines, Margin, ref y, new[] { "Metric", "Average", "Minimum", "Maximum", "Samples" }, BuildKpiRows(report).Take(12).ToList(), 10);
             return Ascii(string.Join("\n", lines) + "\n");
         }
 
-        private static byte[] BuildMapViewPage(UnifiedMapReport report, string subsection, string narrative, BarChartData? chart = null)
+        private static byte[] BuildMapViewPage(UnifiedMapReport report, string subsection, string narrative, BarChartData? chart = null, string imageKey = "", List<ThresholdRange>? legendRanges = null)
         {
             var lines = Header(report, $"5. Map View - {subsection}");
             var y = 710.0;
             AddWrapped(lines, Margin, ref y, narrative, 11, 86);
+            
+            if (!string.IsNullOrEmpty(imageKey) && report.MapImages.TryGetValue(imageKey, out var img))
+            {
+                y -= 20;
+                double imgWidth = PageWidth - (Margin * 2);
+                double imgHeight = imgWidth * img.Height / Math.Max(img.Width, 1);
+                
+                if (imgHeight > 320)
+                {
+                    imgHeight = 320;
+                    imgWidth = imgHeight * img.Width / Math.Max(img.Height, 1);
+                }
+                
+                y -= imgHeight;
+                lines.Add($"q {Fmt(imgWidth)} 0 0 {Fmt(imgHeight)} {Fmt(Margin)} {Fmt(y)} cm /Img_{imageKey} Do Q");
+            }
+
+            if (legendRanges != null && legendRanges.Count > 0)
+            {
+                List<LegendStatistics> legends = new List<LegendStatistics>();
+
+                switch (imageKey.ToUpper())
+                {
+                    case "RSRP": legends = CalculateLegendStatistics(report.Rows.Select(x => ToNullableDouble(x.Rsrp)), legendRanges); break;
+                    case "RSRQ": legends = CalculateLegendStatistics(report.Rows.Select(x => ToNullableDouble(x.Rsrq)), legendRanges); break;
+                    case "SINR": legends = CalculateLegendStatistics(report.Rows.Select(x => ToNullableDouble(x.Sinr)), legendRanges); break;
+                    case "DL_THPT": legends = CalculateLegendStatistics(report.Rows.Select(x => ParseNumber(x.DlTpt)), legendRanges); break;
+                    case "UL_THPT": legends = CalculateLegendStatistics(report.Rows.Select(x => ParseNumber(x.UlTpt)), legendRanges); break;
+                    case "EARFCN": legends = CalculateStringLegendStatistics(report.Rows.Select(x => x.Band), legendRanges); break;
+                    case "LTE_BLER": legends = CalculateStringLegendStatistics(report.Rows.Select(x => x.Bler), legendRanges); break;
+                    // REVERTED: VoLTE Call passed back as an integer (double?)
+                    case "VOLTE_CALL": legends = CalculateLegendStatistics(report.Rows.Select(x => (double?)x.VolteCall), legendRanges); break;
+                    case "PUSCH_TX": legends = CalculateLegendStatistics(report.Rows.Select(x => ParseNumber(x.PuschTx)), legendRanges); break;
+                }
+
+                y -= 20;
+                DrawLegendStatistics(lines, Margin, ref y, legends);
+            }
+
             if (chart != null)
             {
-                y -= 16;
+                y -= 40;
                 DrawBarChart(lines, chart, Margin, y - 20, PageWidth - (Margin * 2), 260);
             }
             return Ascii(string.Join("\n", lines) + "\n");
+        }
+
+        private static List<LegendStatistics> CalculateLegendStatistics(IEnumerable<double?> values, List<ThresholdRange> ranges)
+        {
+            var validValues = values.Where(v => v.HasValue).Select(v => v!.Value).ToList();
+            int total = validValues.Count;
+
+            var result = ranges.Select(r => new LegendStatistics { Range = r, Count = 0 }).ToList();
+
+            if (total > 0 && result.Count > 0)
+            {
+                foreach (var val in validValues)
+                {
+                    var match = result.FirstOrDefault(r => r.Range.Contains(val)) ?? 
+                                result.FirstOrDefault(r => r.Range.ContainsInclusive(val));
+
+                    if (match != null)
+                    {
+                        match.Count++;
+                    }
+                }
+
+                foreach (var item in result)
+                {
+                    item.Percentage = item.Count * 100.0 / total;
+                }
+            }
+
+            return result;
+        }
+        
+        private static List<LegendStatistics> CalculateStringLegendStatistics(IEnumerable<string?> values, List<ThresholdRange> ranges)
+        {
+            var validValues = values.Where(v => !string.IsNullOrWhiteSpace(v)).Select(v => v!.Trim().ToUpperInvariant()).ToList();
+            int total = validValues.Count;
+
+            var result = ranges.Select(r => new LegendStatistics { Range = r, Count = 0 }).ToList();
+
+            if (total > 0 && result.Count > 0)
+            {
+                foreach (var val in validValues)
+                {
+                    var match = result.FirstOrDefault(r => 
+                        !string.IsNullOrWhiteSpace(r.Range.ValueMatch) && 
+                        val.Contains(r.Range.ValueMatch.ToUpperInvariant()));
+
+                    if (match != null)
+                    {
+                        match.Count++;
+                    }
+                }
+
+                foreach (var item in result)
+                {
+                    item.Percentage = item.Count * 100.0 / total;
+                }
+            }
+
+            return result;
+        }
+
+        private static void DrawLegendStatistics(List<string> lines, double x, ref double y, List<LegendStatistics> legends)
+        {
+            lines.Add(FillColor(0,0,0));
+            lines.Add(Text(x, y, 11, "Legend"));
+
+            y -= 18;
+
+            foreach (var item in legends)
+            {
+                var color = ParseHexColor(item.Range.ColorHex);
+
+                lines.Add(FillColor(color.R, color.G, color.B));
+                lines.Add(Rect(x, y - 7, 10, 10, true));
+
+                lines.Add(FillColor(0,0,0));
+
+                string text;
+
+                if (!string.IsNullOrWhiteSpace(item.Range.ValueMatch))
+                {
+                    if (double.TryParse(item.Range.ValueMatch, out _))
+                        text = $"{item.Range.Label} ({item.Range.ValueMatch}) {item.Count}   {item.Percentage:0.00}%";
+                    else
+                        text = $"{item.Range.Label}  {item.Count}   {item.Percentage:0.00}%"; 
+                }
+                else
+                {
+                    text = $"{item.Range.Label} ({item.Range.Min:0} to {item.Range.Max:0})  {item.Count}   {item.Percentage:0.00}%";
+                }
+
+                lines.Add(Text(x + 18, y - 6, 8.5, text));
+                y -= 14;
+            }
+        }
+
+        private static (byte R, byte G, byte B) ParseHexColor(string hex)
+        {
+            if (string.IsNullOrWhiteSpace(hex)) return (128, 128, 128);
+            
+            hex = hex.TrimStart('#');
+            
+            if (hex.Length == 3) 
+                hex = new string(new[] { hex[0], hex[0], hex[1], hex[1], hex[2], hex[2] });
+                
+            if (hex.Length == 6 && int.TryParse(hex, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var c))
+            {
+                return ((byte)((c >> 16) & 0xFF), (byte)((c >> 8) & 0xFF), (byte)(c & 0xFF));
+            }
+            
+            return (128, 128, 128); 
         }
 
         private static byte[] BuildPciSummaryPage(UnifiedMapReport report)
@@ -1300,26 +1483,37 @@ namespace SignalTracker.Controllers
             return $"The network utilized various frequency bands during the drive test. The {top[0].Label} band accounted for {(report.TotalRows == 0 ? 0 : top[0].Value * 100.0 / report.TotalRows):0.##}% of samples, followed by {string.Join(", ", parts.Skip(1))}. These bands played a significant role in maintaining network coverage and capacity.";
         }
 
-        private static string BuildMetricNarrative(UnifiedMapReport report, string metric, string description, MetricSummary stats, string unit, double poorLimit, string poorText)
+        private static string BuildMetricNarrative(UnifiedMapReport report, string metric, string description, MetricSummary stats, string unit, double poorLimit = 0, string poorText = "", bool poorIsHigher = false)
         {
             if (stats.Count == 0)
                 return $"{metric} ({description}) was analyzed across the drive route, but no valid samples were available for this metric.";
 
             var poorCount = report.Rows.Count(x =>
             {
-                var value = metric.StartsWith("DL", StringComparison.OrdinalIgnoreCase) ? ParseNumber(x.DlTpt)
-                    : metric.StartsWith("UL", StringComparison.OrdinalIgnoreCase) ? ParseNumber(x.UlTpt)
+                var value = metric.Equals("DL throughput", StringComparison.OrdinalIgnoreCase) ? ParseNumber(x.DlTpt)
+                    : metric.Equals("UL throughput", StringComparison.OrdinalIgnoreCase) ? ParseNumber(x.UlTpt)
+                    : metric.Equals("LTE BLER", StringComparison.OrdinalIgnoreCase) ? ParseNumber(x.Bler)
+                    : metric.Equals("PUSCH TX", StringComparison.OrdinalIgnoreCase) ? ParseNumber(x.PuschTx)
+                    : metric.Equals("VoLTE Call", StringComparison.OrdinalIgnoreCase) ? (double?)x.VolteCall
                     : metric == "RSRP" ? ToNullableDouble(x.Rsrp)
                     : metric == "RSRQ" ? ToNullableDouble(x.Rsrq)
                     : metric == "SINR" ? ToNullableDouble(x.Sinr)
                     : null;
 
-                return value.HasValue && (metric == "RSRP" || metric == "RSRQ" ? value.Value < poorLimit : value.Value < poorLimit);
+                return value.HasValue && (poorIsHigher ? value.Value > poorLimit : value.Value < poorLimit);
             });
 
             var poorPercent = report.TotalRows == 0 ? 0 : poorCount * 100.0 / report.TotalRows;
             var performance = poorPercent >= 60 ? "poor" : poorPercent >= 25 ? "moderate" : "strong";
-            return $"{metric} ({description}) is a key indicator for network performance. The measured values show an average of {stats.Average:0.##} {unit}, ranging from {stats.Min:0.##} to {stats.Max:0.##} {unit}. The network demonstrates {performance} {metric} performance with {poorCount:N0} samples ({poorPercent:0.##}%) {poorText}.";
+            
+            var narrative = $"{metric} ({description}) is a key indicator for network performance. The measured values show an average of {stats.Average:0.##} {unit}, ranging from {stats.Min:0.##} to {stats.Max:0.##} {unit}.";
+            
+            if (poorLimit != 0 || !string.IsNullOrEmpty(poorText))
+            {
+                narrative += $" The network demonstrates {performance} {metric} performance with {poorCount:N0} samples ({poorPercent:0.##}%) {poorText}.";
+            }
+            
+            return narrative.Replace("  ", " ").Trim();
         }
 
         private static string BuildCoordinateSummary(UnifiedMapReport report)
@@ -1353,10 +1547,10 @@ namespace SignalTracker.Controllers
 
         private static void DrawBarChart(List<string> lines, BarChartData chart, double x, double y, double width, double height)
         {
-            var items = chart.Items.Where(x => x.Value > 0).Take(8).ToList();
+            var items = chart.Items.Where(item => item.Value > 0).Take(8).ToList();
             if (items.Count == 0) return;
 
-            var max = items.Max(x => x.Value);
+            var max = items.Max(item => item.Value);
             var labelWidth = 128.0;
             var barWidth = width - labelWidth - 70;
             var rowHeight = Math.Min(28, height / items.Count);
@@ -1418,7 +1612,10 @@ namespace SignalTracker.Controllers
                 ("DL Throughput", MetricStats(report.Rows.Select(x => ParseNumber(x.DlTpt))), "Mbps"),
                 ("UL Throughput", MetricStats(report.Rows.Select(x => ParseNumber(x.UlTpt))), "Mbps"),
                 ("Latency", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Latency))), "ms"),
-                ("Jitter", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Jitter))), "ms")
+                ("Jitter", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Jitter))), "ms"),
+                ("LTE BLER", MetricStats(report.Rows.Select(x => ParseNumber(x.Bler))), "%"),
+                ("VoLTE Call", MetricStats(report.Rows.Select(x => (double?)x.VolteCall)), ""), // Reverted
+                ("PUSCH TX", MetricStats(report.Rows.Select(x => ParseNumber(x.PuschTx))), "dBm")
             };
 
             return metrics.Select(x => new List<string>
@@ -1438,7 +1635,10 @@ namespace SignalTracker.Controllers
                 QualityRow("RSRP", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Rsrp))), "dBm", report.Rows.Count(x => x.Rsrp.HasValue && x.Rsrp.Value < -105)),
                 QualityRow("RSRQ", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Rsrq))), "dB", report.Rows.Count(x => x.Rsrq.HasValue && x.Rsrq.Value < -14)),
                 QualityRow("SINR", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Sinr))), "dB", report.Rows.Count(x => x.Sinr.HasValue && x.Sinr.Value < 5)),
-                QualityRow("MOS", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Mos))), "", report.Rows.Count(x => x.Mos.HasValue && x.Mos.Value < 3))
+                QualityRow("MOS", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Mos))), "", report.Rows.Count(x => x.Mos.HasValue && x.Mos.Value < 3)),
+                QualityRow("LTE BLER", MetricStats(report.Rows.Select(x => ParseNumber(x.Bler))), "%", report.Rows.Count(x => ParseNumber(x.Bler) > 10)),
+                QualityRow("VoLTE Call", MetricStats(report.Rows.Select(x => (double?)x.VolteCall)), "", report.Rows.Count(x => x.VolteCall < 1)), // Reverted
+                QualityRow("PUSCH TX", MetricStats(report.Rows.Select(x => ParseNumber(x.PuschTx))), "dBm", report.Rows.Count(x => ParseNumber(x.PuschTx) > 10))
             };
         }
 
@@ -1522,11 +1722,16 @@ namespace SignalTracker.Controllers
             using var stream = new MemoryStream();
             WriteAscii(stream, "%PDF-1.4\n%\u00E2\u00E3\u00CF\u00D3\n");
 
-            var hasLogo = report.Logo != null;
-            var logoId = hasLogo ? 4 : 0;
-            var firstPageObjectId = hasLogo ? 5 : 4;
-            var objectCount = 3 + (hasLogo ? 1 : 0) + (pageContents.Count * 2);
+            int nextObjId = 4;
+            var imageIds = new Dictionary<string, int>();
+            
+            if (report.Logo != null) imageIds["Logo"] = nextObjId++;
+            foreach (var key in report.MapImages.Keys) imageIds[$"Img_{key}"] = nextObjId++;
+
+            var firstPageObjectId = nextObjId;
+            var objectCount = 3 + imageIds.Count + (pageContents.Count * 2);
             var offsets = new long[objectCount + 1];
+            
             var pageIds = Enumerable.Range(0, pageContents.Count)
                 .Select(i => firstPageObjectId + (i * 2) + 1)
                 .ToList();
@@ -1535,14 +1740,31 @@ namespace SignalTracker.Controllers
             WriteObj(stream, offsets, 2, $"<< /Type /Pages /Kids [{string.Join(" ", pageIds.Select(id => $"{id} 0 R"))}] /Count {pageContents.Count} >>");
             WriteObj(stream, offsets, 3, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
 
-            if (hasLogo && report.Logo != null)
+            var xObjBuilder = new StringBuilder();
+            if (imageIds.Count > 0)
             {
-                WriteStreamObj(
-                    stream,
-                    offsets,
-                    logoId,
-                    $"<< /Type /XObject /Subtype /Image /Width {report.Logo.Width} /Height {report.Logo.Height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length {report.Logo.Bytes.Length} >>",
+                xObjBuilder.Append(" /XObject << ");
+                foreach(var kvp in imageIds)
+                {
+                    xObjBuilder.Append($"/{kvp.Key} {kvp.Value} 0 R ");
+                }
+                xObjBuilder.Append(">> ");
+            }
+            var xObjectResources = xObjBuilder.ToString();
+
+            if (report.Logo != null)
+            {
+                WriteStreamObj(stream, offsets, imageIds["Logo"], 
+                    $"<< /Type /XObject /Subtype /Image /Width {report.Logo.Width} /Height {report.Logo.Height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length {report.Logo.Bytes.Length} >>", 
                     report.Logo.Bytes);
+            }
+
+            foreach (var kvp in report.MapImages)
+            {
+                var imgId = imageIds[$"Img_{kvp.Key}"];
+                WriteStreamObj(stream, offsets, imgId, 
+                    $"<< /Type /XObject /Subtype /Image /Width {kvp.Value.Width} /Height {kvp.Value.Height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length {kvp.Value.Bytes.Length} >>", 
+                    kvp.Value.Bytes);
             }
 
             for (var i = 0; i < pageContents.Count; i++)
@@ -1550,13 +1772,9 @@ namespace SignalTracker.Controllers
                 var contentId = firstPageObjectId + (i * 2);
                 var pageId = contentId + 1;
                 var content = pageContents[i];
-                var xObjectResources = hasLogo ? $" /XObject << /Logo {logoId} 0 R >>" : "";
+                
                 WriteStreamObj(stream, offsets, contentId, $"<< /Length {content.Length} >>", content);
-                WriteObj(
-                    stream,
-                    offsets,
-                    pageId,
-                    $"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {Fmt(PageWidth)} {Fmt(PageHeight)}] /Resources << /Font << /F1 3 0 R >>{xObjectResources} >> /Contents {contentId} 0 R >>");
+                WriteObj(stream, offsets, pageId, $"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {Fmt(PageWidth)} {Fmt(PageHeight)}] /Resources << /Font << /F1 3 0 R >>{xObjectResources}>> /Contents {contentId} 0 R >>");
             }
 
             var xrefOffset = stream.Position;
@@ -1564,6 +1782,7 @@ namespace SignalTracker.Controllers
             WriteAscii(stream, "0000000000 65535 f \n");
             for (var i = 1; i < offsets.Length; i++)
                 WriteAscii(stream, $"{offsets[i]:0000000000} 00000 n \n");
+                
             WriteAscii(stream, $"trailer\n<< /Size {offsets.Length} /Root 1 0 R >>\nstartxref\n{xrefOffset}\n%%EOF");
             return stream.ToArray();
         }
