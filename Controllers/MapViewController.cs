@@ -5560,7 +5560,7 @@ public async Task<JsonResult> GetProviderWiseVolume([FromQuery] MapFilter filter
             await conn.OpenAsync();
 
         var cacheKey = BuildMapViewCacheKey(
-            "provider-wise-volume-v15",
+            "provider-wise-volume-v17",
             sessionIdsParam,
             filters?.StartDate,
             filters?.EndDate,
@@ -5638,6 +5638,13 @@ base_logs AS (
         l.session_id,
         COALESCE(NULLIF(LOWER(TRIM(l.m_alpha_long)), ''), sp.provider) AS provider,
         CASE
+            WHEN UPPER(TRIM(COALESCE(l.network, ''))) = '4G(LTE-ANCHOR NSA)'
+              OR UPPER(COALESCE(l.network, '')) LIKE '%LTE ANCHOR%'
+              OR UPPER(COALESCE(l.network, '')) LIKE '%LTE-ANCHOR%'
+              OR UPPER(COALESCE(l.network, '')) LIKE '%LTE_ANCHOR%'
+              OR UPPER(COALESCE(l.network, '')) LIKE '%LTE ANCHORE%'
+              OR UPPER(COALESCE(l.network, '')) LIKE '%LTE-ANCHORE%'
+              OR UPPER(COALESCE(l.network, '')) LIKE '%LTE_ANCHORE%' THEN '4G(LTE-ANCHOR NSA)'
             WHEN (
                     UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''))) LIKE '%5G%'
                  OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%NR NSA%'
@@ -5645,9 +5652,6 @@ base_logs AS (
                  OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%NR-CA%'
                  OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%NR-DC%'
                  OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%VONR%'
-                 OR UPPER(COALESCE(l.network, '')) LIKE '%LTE ANCHOR%'
-                 OR UPPER(COALESCE(l.network, '')) LIKE '%LTE-ANCHOR%'
-                 OR UPPER(COALESCE(l.network, '')) LIKE '%LTE_ANCHOR%'
                  OR UPPER(COALESCE(l.network, '')) LIKE '%ENDC%'
                  OR UPPER(COALESCE(l.network, '')) LIKE '%EN-DC%'
                  OR UPPER(COALESCE(l.network, '')) LIKE '%NSA%'
@@ -5712,18 +5716,10 @@ ordered_logs AS (
         total_tx_kb,
         dl_tpt_mbps,
         ul_tpt_mbps,
-        LAG(provider) OVER (
-            PARTITION BY session_id
-            ORDER BY timestamp
-        ) AS prev_provider,
-        LAG(tech) OVER (
-            PARTITION BY session_id
-            ORDER BY timestamp
-        ) AS prev_tech,
         UNIX_TIMESTAMP(timestamp)
         - UNIX_TIMESTAMP(
             LAG(timestamp) OVER (
-                PARTITION BY session_id
+                PARTITION BY session_id, provider, tech
                 ORDER BY timestamp
             )
         ) AS gap_sec
@@ -5739,14 +5735,12 @@ grouped_logs AS (
         filtered_logs.*,
         SUM(
             CASE
-                WHEN prev_tech IS NULL THEN 1
-                WHEN prev_provider <> provider THEN 1
-                WHEN prev_tech <> tech THEN 1
-                WHEN gap_sec IS NOT NULL AND gap_sec > 120 THEN 1
+                WHEN gap_sec IS NULL THEN 1
+                WHEN gap_sec > 120 THEN 1
                 ELSE 0
             END
         ) OVER (
-            PARTITION BY session_id
+            PARTITION BY session_id, provider, tech
             ORDER BY timestamp
         ) AS grp
     FROM filtered_logs
