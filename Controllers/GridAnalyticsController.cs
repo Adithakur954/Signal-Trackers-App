@@ -607,8 +607,12 @@ namespace SignalTracker.Controllers
 
         // =====================================================================
         // POST api/GridAnalytics/SetProjectLogGrid
+<<<<<<< HEAD
+        // Saves the log grid size preference to tbl_project.log_grid
+=======
         // Saves the log (drive-test) grid size preference to tbl_project.log_grid
         // This is separate from grid_size (used for the site/prediction grid).
+>>>>>>> a48b2f0d8491b2f38ec138618b2b94767117f7a9
         // =====================================================================
         [HttpPost("SetProjectLogGrid")]
         public async Task<IActionResult> SetProjectLogGrid(
@@ -616,6 +620,12 @@ namespace SignalTracker.Controllers
             [FromQuery] double gridSize,
             [FromQuery] int? company_id = null)
         {
+<<<<<<< HEAD
+            if (!await CanUseGridFeatureAsync())
+                return StatusCode(403, new { Status = 0, Message = "Feature disabled in license: grid_fetch", Code = "FEATURE_NOT_ENABLED" });
+
+=======
+>>>>>>> a48b2f0d8491b2f38ec138618b2b94767117f7a9
             int targetCompanyId = _userScope.GetTargetCompanyId(User, company_id);
             bool isSuperAdmin = _userScope.IsSuperAdmin(User);
             if (!isSuperAdmin && targetCompanyId == 0)
@@ -629,6 +639,17 @@ namespace SignalTracker.Controllers
 
             try
             {
+<<<<<<< HEAD
+                var project = await _db.tbl_project.FirstOrDefaultAsync(p => p.id == projectId);
+                if (project == null)
+                    return NotFound(new { Status = 0, Message = "Project not found." });
+
+                if (!isSuperAdmin && targetCompanyId > 0 && project.company_id != targetCompanyId)
+                    return Unauthorized(new { Status = 0, Message = "Project does not belong to your company." });
+
+                project.log_grid = gridSize.ToString(CultureInfo.InvariantCulture);
+                await _db.SaveChangesAsync();
+=======
                 var conn = _db.Database.GetDbConnection();
                 bool shouldClose = false;
                 if (conn.State != ConnectionState.Open)
@@ -683,6 +704,7 @@ namespace SignalTracker.Controllers
                     if (shouldClose && conn.State == ConnectionState.Open)
                         await conn.CloseAsync();
                 }
+>>>>>>> a48b2f0d8491b2f38ec138618b2b94767117f7a9
 
                 return Ok(new
                 {
@@ -701,7 +723,12 @@ namespace SignalTracker.Controllers
             }
         }
 
+<<<<<<< HEAD
+        // =====================================================================
+        // GET api/GridAnalytics/GetGridAnalytics
+=======
 
+>>>>>>> a48b2f0d8491b2f38ec138618b2b94767117f7a9
         // Fetches stored grid analytics for a project from the DB
         // =====================================================================
         [AllowAnonymous]
