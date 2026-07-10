@@ -1837,8 +1837,15 @@ public async Task<IActionResult> DeleteAvailablePolygon(
 
                 var setupSql = @"
     CASE
-        WHEN JSON_VALID(json_data) THEN
-            JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.setup_ms'))
+        WHEN JSON_VALID(json_data) THEN COALESCE(
+            NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.setup_ms'))), ''),
+            NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.setup_time'))), ''),
+            NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.setupTime'))), ''),
+            NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.call_setup_ms'))), ''),
+            NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.callSetupMs'))), ''),
+            NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.call_setup_time'))), ''),
+            NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(json_data, '$.callSetupTime'))), '')
+        )
         ELSE NULL
     END";
 
