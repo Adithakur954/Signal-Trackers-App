@@ -3139,6 +3139,7 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyEF(
             indoor_outdoor = log.indoor_outdoor ?? "",
             nodeb_id = log.nodeb_id ?? "",
             cell_id = log.cell_id ?? "",
+            primary_cell_info_1 = log.primary_cell_info_1 ?? "",
             connection_type = log.primary_cell_info_1 != null &&
                 (log.primary_cell_info_1.StartsWith("SSID:") || log.primary_cell_info_1.Contains("BSSID:"))
                     ? "wifi"
@@ -3248,12 +3249,7 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
             ) AS provider_name,
             bp.pci, bp.rssi, bp.rsrp, bp.rsrq, bp.sinr, bp.mos, bp.jitter, bp.latency, bp.tac,
             bp.packet_loss, bp.dl_tpt, bp.ul_tpt,
-            CASE
-                WHEN UPPER(TRIM(COALESCE(bp.network, ''))) LIKE '%5G%'
-                  AND (bp.band IS NULL OR TRIM(bp.band) = '' OR UPPER(TRIM(bp.band)) = 'NA')
-                THEN 'nr'
-                ELSE bp.band
-            END AS band,
+            bp.band,
             bp.image_path, bp.indoor_outdoor, bp.nodeb_id, bp.cell_id,
             CASE
                 WHEN bp.primary_cell_info_1 LIKE 'SSID:%'
@@ -3266,7 +3262,8 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
                   )
                 THEN 'wifi'
                 ELSE 'network'
-            END AS connection_type
+            END AS connection_type,
+            bp.primary_cell_info_1
         FROM base_page bp
         ORDER BY bp.timestamp;";
 
@@ -3310,10 +3307,12 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
             indoor_outdoor = rd.IsDBNull(26) ? "" : rd.GetString(26),
             nodeb_id = rd.IsDBNull(27) ? "" : rd.GetString(27),
             cell_id = rd.IsDBNull(28) ? "" : rd.GetString(28),
-            connection_type = rd.IsDBNull(29) ? "network" : rd.GetString(29)
+            connection_type = rd.IsDBNull(29) ? "network" : rd.GetString(29),
+            primary_cell_info_1 = rd.IsDBNull(30) ? "" : rd.GetString(30)
         });
     }
 
+    Backfill5GNetworkLogFields(rows);
     NormalizeNetworkLogRows(rows);
     return rows;
 }
@@ -3786,6 +3785,10 @@ private static string CleanProviderDisplayName(string value)
         : value.Trim().Trim('"', '\'');
 }
 
+private static readonly Regex NetworkLogPrimaryCellBandRegex = new Regex(
+    @"\bmBands?\s*=\s*\[?\s*(?:n|N)?(\d{1,3})",
+    RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
 private static void NormalizeNetworkLogRows(List<NetworkLogCacheRow> rows)
 {
     foreach (var row in rows)
@@ -3814,8 +3817,11 @@ private static void Backfill5GNetworkLogFields(List<NetworkLogCacheRow> rows)
         if (!Is5GNetworkLogTechnology(row.network))
             continue;
 
-        if (IsMissingNetworkLogValue(row.band))
-            row.band = "nr";
+        if (IsMissingNetworkLogValue(row.band) || IsGenericNrNetworkLogBand(row.band))
+        {
+            row.band = Resolve5GBandFromPrimaryCellInfo(row.primary_cell_info_1)
+                ?? (IsMissingNetworkLogValue(row.band) ? "nr" : row.band);
+        }
 
         var needsShort = IsMissingNetworkLogValue(row.m_alpha_short);
         var needsLong = IsMissingNetworkLogValue(row.m_alpha_long);
@@ -3887,10 +3893,30 @@ private static bool IsMissingNetworkLogValue(string? value)
            normalized.Equals("NULL", StringComparison.OrdinalIgnoreCase);
 }
 
+private static bool IsGenericNrNetworkLogBand(string? value)
+{
+    return string.Equals(CleanProviderDisplayName(value ?? ""), "nr", StringComparison.OrdinalIgnoreCase);
+}
+
+private static string? Resolve5GBandFromPrimaryCellInfo(string? primaryCellInfo)
+{
+    if (string.IsNullOrWhiteSpace(primaryCellInfo))
+        return null;
+
+    var match = NetworkLogPrimaryCellBandRegex.Match(primaryCellInfo);
+    if (!match.Success ||
+        !int.TryParse(match.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var bandNumber) ||
+        bandNumber <= 0)
+    {
+        return null;
+    }
+
+    return $"n{bandNumber}";
+}
+
 private static bool Is5GNetworkLogTechnology(string? network)
 {
-    return !string.IsNullOrWhiteSpace(network) &&
-           network.Trim().IndexOf("5G", StringComparison.OrdinalIgnoreCase) >= 0;
+    return string.Equals(NormalizeNetworkLogTechnology(network, ""), "5G", StringComparison.OrdinalIgnoreCase);
 }
 
 private static string GetNetworkLogTechKey(string? network)
@@ -4050,6 +4076,9 @@ public class NetworkLogCacheRow
     public string indoor_outdoor { get; set; } = "";
     public string nodeb_id { get; set; } = "";
     public string cell_id { get; set; } = "";
+    [Newtonsoft.Json.JsonIgnore]
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string primary_cell_info_1 { get; set; } = "";
     public string connection_type { get; set; } = "network";
     public string log_type { get; set; } = "network";
     public bool is_wifi { get; set; }
