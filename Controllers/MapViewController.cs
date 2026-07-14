@@ -2754,8 +2754,9 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
         await InvalidateObsoleteNetworkLogCachesAsync();
         await EnsureNetworkLogUpdatedAtColumnAsync(connString);
 
-        // Fast path: return the latest cached page immediately. Refresh happens
-        // in the background so Redis hits do not wait for DB count/version work.
+        // Keep the latest key only as a write-through convenience. Reads must use
+        // the data-versioned key below; otherwise a newly inserted log can leave
+        // the map showing the previous count until a second request is made.
         string latestCacheKey = BuildNetworkLogCacheKey(
             sessionIds,
             providerNormalized,
@@ -2766,61 +2767,6 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
             "latest"
         );
         string latestPageCacheKey = $"{latestCacheKey}:page:{page}:limit:{limit}";
-
-        if (_redis != null && _redis.IsConnected && !forceRefresh)
-        {
-            var cacheWatch = Stopwatch.StartNew();
-            try 
-            {
-                var cachedPage = await _redis.GetObjectAsync<NetworkLogFullResponse>(latestPageCacheKey);
-                cacheWatch.Stop();
-                Response.Headers["X-Cache-Lookup-Ms"] = cacheWatch.ElapsedMilliseconds.ToString();
-                if (cachedPage != null)
-                {
-                    const string cacheState = "HIT_REFRESHING";
-                    Response.Headers["X-Cache"] = cacheState;
-                    Response.Headers["X-Cached-Version"] = cachedPage.DataVersion ?? "unknown";
-                    Response.Headers["X-Total-Ms"] = totalStopwatch.ElapsedMilliseconds.ToString();
-
-                    _ = Task.Run(async () =>
-                    {
-                        try
-                        {
-                            await RefreshNetworkLogLatestPageCacheAsync(
-                                connString,
-                                sessionIds,
-                                providerNormalized,
-                                filters,
-                                limit,
-                                pageOffset,
-                                latestPageCacheKey);
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($" Network log cache refresh failed: {SafeException.Get(ex)}");
-                        }
-                    });
-
-                    return Json(new { 
-                        data = cachedPage.data, 
-                        app_summary = cachedPage.app_summary, 
-                        io_summary = cachedPage.io_summary, 
-                        tpt_volume = cachedPage.tpt_volume,
-                        total_count = cachedPage.TotalCount, 
-                        session_count = sessionIds.Count,
-                        sessions = cachedPage.Sessions, 
-                        cachedAt = cachedPage.CachedAt,
-                        cache_state = cacheState,
-                        data_version = cachedPage.DataVersion
-                    });
-                }
-            }
-            catch
-            {
-                cacheWatch.Stop();
-                Response.Headers["X-Cache-Lookup-Ms"] = cacheWatch.ElapsedMilliseconds.ToString();
-            }
-        }
         Response.Headers["X-Cache"] = forceRefresh ? "BYPASS" : "MISS";
 
         string dataVersion = await GetNetworkLogDataVersionAsync(
@@ -2840,6 +2786,34 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
             dataVersion
         );
         string pageCacheKey = $"{cacheKey}:page:{page}:limit:{limit}";
+
+        // A cache hit is valid only when its key contains the current DB version.
+        // This makes inserts visible on the first request after they are committed.
+        if (_redis != null && _redis.IsConnected && !forceRefresh)
+        {
+            var cacheWatch = Stopwatch.StartNew();
+            try
+            {
+                var cachedPage = await _redis.GetObjectAsync<NetworkLogFullResponse>(pageCacheKey);
+                cacheWatch.Stop();
+                Response.Headers["X-Cache-Lookup-Ms"] = cacheWatch.ElapsedMilliseconds.ToString();
+                if (cachedPage != null)
+                {
+                    const string cacheState = "HIT";
+                    Response.Headers["X-Cache"] = cacheState;
+                    Response.Headers["X-Cached-Version"] = cachedPage.DataVersion ?? "unknown";
+                    Response.Headers["X-Data-Version"] = dataVersion;
+                    totalStopwatch.Stop();
+                    Response.Headers["X-Total-Ms"] = totalStopwatch.ElapsedMilliseconds.ToString();
+                    return Json(ToNetworkLogResponseObject(cachedPage, sessionIds.Count, cacheState));
+                }
+            }
+            catch
+            {
+                cacheWatch.Stop();
+                Response.Headers["X-Cache-Lookup-Ms"] = cacheWatch.ElapsedMilliseconds.ToString();
+            }
+        }
 
         var cacheModel = await BuildNetworkLogPageCacheAsync(
             connString,
@@ -3186,7 +3160,7 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
                 network, m_alpha_short, m_alpha_long,
                 pci, rssi, rsrp, rsrq, sinr, mos, jitter, latency, tac,
                 packet_loss, dl_tpt, ul_tpt, band, image_path, indoor_outdoor, nodeb_id, cell_id,
-                primary_cell_info_1
+                primary_cell_info_1, earfcn
             FROM tbl_network_log
             WHERE {whereClause}
             ORDER BY timestamp
@@ -3263,7 +3237,7 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
                 THEN 'wifi'
                 ELSE 'network'
             END AS connection_type,
-            bp.primary_cell_info_1
+            bp.primary_cell_info_1, bp.earfcn
         FROM base_page bp
         ORDER BY bp.timestamp;";
 
@@ -3308,7 +3282,8 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
             nodeb_id = rd.IsDBNull(27) ? "" : rd.GetString(27),
             cell_id = rd.IsDBNull(28) ? "" : rd.GetString(28),
             connection_type = rd.IsDBNull(29) ? "network" : rd.GetString(29),
-            primary_cell_info_1 = rd.IsDBNull(30) ? "" : rd.GetString(30)
+            primary_cell_info_1 = rd.IsDBNull(30) ? "" : rd.GetString(30),
+            earfcn = rd.IsDBNull(31) ? "" : Convert.ToString(rd.GetValue(31), CultureInfo.InvariantCulture) ?? ""
         });
     }
 
@@ -3775,7 +3750,7 @@ private string BuildNetworkLogCacheKey(
         : "no_project";
     string versionKey = NormalizeCacheKeyPart(dataVersion);
 
-    return $"networklog:v11:{sortedSessionIds}:{providerKey}:{networkTypeKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
+    return $"networklog:v12:{sortedSessionIds}:{providerKey}:{networkTypeKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
 }
 
 private static string CleanProviderDisplayName(string value)
@@ -4076,6 +4051,7 @@ public class NetworkLogCacheRow
     public string indoor_outdoor { get; set; } = "";
     public string nodeb_id { get; set; } = "";
     public string cell_id { get; set; } = "";
+    public string earfcn { get; set; } = "";
     [Newtonsoft.Json.JsonIgnore]
     [System.Text.Json.Serialization.JsonIgnore]
     public string primary_cell_info_1 { get; set; } = "";
