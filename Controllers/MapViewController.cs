@@ -2968,6 +2968,10 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyEF(
         .Where(log => sessionIds.Contains((long)log.session_id));
 
     query = query.Where(log =>
+        log.primary_cell_info_1 != null &&
+        log.primary_cell_info_1.Trim() != "");
+
+    query = query.Where(log =>
         (log.m_alpha_short != null && log.m_alpha_short.Trim() != "") ||
         (log.m_alpha_long != null && log.m_alpha_long.Trim() != "") ||
         ((log.network ?? "").ToUpper().Contains("5G")));
@@ -3538,6 +3542,7 @@ private (string Clause, Dictionary<string, object> Params) BuildSqlWhere(
     var clauses = new List<string>();
     if (idParams.Any()) clauses.Add($"session_id IN ({string.Join(",", idParams)})");
     else clauses.Add("1 = 0"); 
+    clauses.Add("primary_cell_info_1 IS NOT NULL AND TRIM(primary_cell_info_1) <> ''");
     // clauses.Add(@"(
     //     COALESCE(
     //         NULLIF(TRIM(m_alpha_short), ''),

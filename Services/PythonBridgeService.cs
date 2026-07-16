@@ -3,6 +3,7 @@ using System.Data.Common;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore;
 using SignalTracker.DTO.PythonBridge;
 using SignalTracker.Helper;
@@ -222,6 +223,200 @@ namespace SignalTracker.Services
             return DateTime.TryParse(Convert.ToString(value), out var parsed) ? parsed : null;
         }
 
+        private static readonly Regex PrimaryCellBandRegex = new(
+            @"\bmBands?\s*=\s*\[?\s*(?:n|N)?(\d{1,3})",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        private static readonly Regex NrBandRegex = new(
+            @"\bn\d{1,3}\b",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        private static readonly Regex FiveGHintRegex = new(
+            @"\b(5G|NR|NRARFCN|NSA|EN-?DC|ENDC|MNR|NCI|N\d{1,3})\b",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        private static readonly Regex LteBandHintRegex = new(
+            @"\b(LTE|4G|B\d{1,3}|Band\s*\d{1,3})\b",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        private static readonly HashSet<int> NrCommonBands = new()
+        {
+            1, 3, 5, 7, 8, 20, 28, 38, 40, 41, 77, 78, 79
+        };
+        private static readonly HashSet<int> NrExclusiveBands = new()
+        {
+            77, 78, 79, 257, 258, 260, 261
+        };
+
+        private static string ReadRowString(IDictionary<string, object?> row, params string[] keys)
+        {
+            foreach (var key in keys)
+            {
+                var value = RowValue(row, key);
+                if (value == null || value == DBNull.Value)
+                {
+                    continue;
+                }
+
+                var text = Convert.ToString(value, CultureInfo.InvariantCulture);
+                if (!string.IsNullOrWhiteSpace(text))
+                {
+                    return text.Trim();
+                }
+            }
+
+            return string.Empty;
+        }
+
+        private static bool IsMissingBandValue(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return true;
+            }
+
+            var normalized = value.Trim();
+            return normalized.Equals("NA", StringComparison.OrdinalIgnoreCase) ||
+                   normalized.Equals("N/A", StringComparison.OrdinalIgnoreCase) ||
+                   normalized.Equals("NULL", StringComparison.OrdinalIgnoreCase) ||
+                   normalized.Equals("-1", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string CleanBandValue(string? value)
+        {
+            var text = (value ?? string.Empty).Trim().Trim('"', '\'');
+            return IsMissingBandValue(text) ? string.Empty : text;
+        }
+
+        private static int? ParseBandNumber(string? band)
+        {
+            if (string.IsNullOrWhiteSpace(band))
+            {
+                return null;
+            }
+
+            var text = CleanBandValue(band);
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return null;
+            }
+
+            var nrMatch = NrBandRegex.Match(text);
+            if (nrMatch.Success &&
+                int.TryParse(nrMatch.Value.TrimStart('n', 'N'), NumberStyles.Integer, CultureInfo.InvariantCulture, out var nrBand))
+            {
+                return nrBand;
+            }
+
+            var numberMatch = Regex.Match(text, @"(?<![A-Za-z])(\d{1,3})(?![A-Za-z])");
+            return numberMatch.Success &&
+                int.TryParse(numberMatch.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var bandNumber)
+                    ? bandNumber
+                    : null;
+        }
+
+        private static bool LooksLikeNrBand(string? band, string? network)
+        {
+            var cleanBand = CleanBandValue(band);
+            if (string.IsNullOrWhiteSpace(cleanBand))
+            {
+                return false;
+            }
+
+            if (NrBandRegex.IsMatch(cleanBand))
+            {
+                return true;
+            }
+
+            var bandNumber = ParseBandNumber(cleanBand);
+            if (!bandNumber.HasValue)
+            {
+                return false;
+            }
+
+            if (NrExclusiveBands.Contains(bandNumber.Value))
+            {
+                return true;
+            }
+
+            var hasLteHint =
+                LteBandHintRegex.IsMatch(cleanBand) ||
+                (network ?? string.Empty).Contains("LTE", StringComparison.OrdinalIgnoreCase) ||
+                (network ?? string.Empty).Contains("4G", StringComparison.OrdinalIgnoreCase);
+
+            return !hasLteHint &&
+                int.TryParse(cleanBand, NumberStyles.Integer, CultureInfo.InvariantCulture, out _) &&
+                NrCommonBands.Contains(bandNumber.Value);
+        }
+
+        private static string? ResolveNrBandFromCellInfo(string? primaryCellInfo, string? neighbourCellInfo = null)
+        {
+            var source = $"{primaryCellInfo ?? string.Empty} {neighbourCellInfo ?? string.Empty}";
+            if (string.IsNullOrWhiteSpace(source))
+            {
+                return null;
+            }
+
+            var match = PrimaryCellBandRegex.Match(source);
+            if (!match.Success ||
+                !int.TryParse(match.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var bandNumber) ||
+                bandNumber <= 0)
+            {
+                return null;
+            }
+
+            return $"n{bandNumber}";
+        }
+
+        private static string GetDriveTestTechnology(
+            string? network,
+            string? band,
+            string? primaryCellInfo = null,
+            string? neighbourCellInfo = null)
+        {
+            var networkText = (network ?? string.Empty).Trim();
+            var combined = $"{networkText} {band ?? string.Empty} {primaryCellInfo ?? string.Empty} {neighbourCellInfo ?? string.Empty}";
+            var upperCombined = combined.ToUpperInvariant();
+            if (upperCombined.Contains("WIFI") || upperCombined.Contains("WI-FI")) return "WiFi";
+            if (LooksLikeNrBand(band, network) ||
+                FiveGHintRegex.IsMatch(combined) ||
+                upperCombined.Contains("NR-CA") ||
+                upperCombined.Contains("NR-DC") ||
+                upperCombined.Contains("VONR") ||
+                upperCombined.Contains("LTE ANCHOR") ||
+                upperCombined.Contains("LTE-ANCHOR") ||
+                upperCombined.Contains("LTE_ANCHOR") ||
+                Regex.IsMatch(upperCombined, @"(^|[^A-Z0-9])NR([^A-Z0-9]|$)") ||
+                Regex.IsMatch(upperCombined, @"(^|[^A-Z0-9])N[0-9]{1,3}([^A-Z0-9]|$)"))
+            {
+                return "5G";
+            }
+            if (upperCombined.Contains("4G") || upperCombined.Contains("LTE") || upperCombined.Contains("VOLTE")) return "4G";
+            if (upperCombined.Contains("3G") || upperCombined.Contains("WCDMA") || upperCombined.Contains("UMTS") || upperCombined.Contains("HSPA")) return "3G";
+            if (upperCombined.Contains("2G") || upperCombined.Contains("GSM") || upperCombined.Contains("EDGE") || upperCombined.Contains("GPRS")) return "2G";
+            return string.IsNullOrWhiteSpace(networkText) ? "Unknown" : networkText;
+        }
+
+        private static void NormalizeDriveTestRows(List<Dictionary<string, object?>> rows)
+        {
+            foreach (var row in rows)
+            {
+                var network = ReadRowString(row, "network");
+                var band = CleanBandValue(ReadRowString(row, "band"));
+                var primaryCellInfo = ReadRowString(row, "__primary_cell_info_1", "primary_cell_info_1");
+                var neighbourCellInfo = ReadRowString(row, "__all_neigbor_cell_info", "all_neigbor_cell_info");
+                var technology = GetDriveTestTechnology(network, band, primaryCellInfo, neighbourCellInfo);
+
+                if (technology.Equals("5G", StringComparison.OrdinalIgnoreCase) &&
+                    (IsMissingBandValue(band) || band.Equals("nr", StringComparison.OrdinalIgnoreCase)))
+                {
+                    band = ResolveNrBandFromCellInfo(primaryCellInfo, neighbourCellInfo)
+                        ?? (IsMissingBandValue(band) ? "nr" : band);
+                }
+
+                row["band"] = CleanBandValue(band);
+                row["technology"] = GetDriveTestTechnology(network, band, primaryCellInfo, neighbourCellInfo);
+                row.Remove("__primary_cell_info_1");
+                row.Remove("__all_neigbor_cell_info");
+            }
+        }
+
         private static bool LooksLikeDroppedDbConnection(Exception exception)
         {
             for (var current = exception; current != null; current = current.InnerException)
@@ -319,7 +514,7 @@ namespace SignalTracker.Services
             }
         }
 
-        private static async Task EnsureOptimisedResultsPublicScenarioIdColumnAsync(
+        private static async Task EnsureOptimisedResultsBridgeColumnsAsync(
             DbConnection conn,
             DbTransaction? transaction,
             CancellationToken cancellationToken)
@@ -327,25 +522,39 @@ namespace SignalTracker.Services
             await using var checkCommand = conn.CreateCommand();
             checkCommand.Transaction = transaction;
             checkCommand.CommandText = @"
-                SELECT COUNT(*)
+                SELECT COLUMN_NAME
                 FROM INFORMATION_SCHEMA.COLUMNS
                 WHERE TABLE_SCHEMA = DATABASE()
-                  AND TABLE_NAME = 'lte_prediction_optimised_results'
-                  AND COLUMN_NAME = 'public_scenario_id';";
+                  AND TABLE_NAME = 'lte_prediction_optimised_results';";
 
-            var existsValue = await checkCommand.ExecuteScalarAsync(cancellationToken);
-            var exists = existsValue != null && existsValue != DBNull.Value && Convert.ToInt32(existsValue) > 0;
-            if (exists)
+            var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            await using (var reader = await checkCommand.ExecuteReaderAsync(cancellationToken))
             {
-                return;
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    existing.Add(Convert.ToString(reader.GetValue(0)) ?? string.Empty);
+                }
             }
 
-            await using var alterCommand = conn.CreateCommand();
-            alterCommand.Transaction = transaction;
-            alterCommand.CommandText = @"
-                ALTER TABLE lte_prediction_optimised_results
-                ADD COLUMN public_scenario_id INT NULL AFTER scenario_id;";
-            await alterCommand.ExecuteNonQueryAsync(cancellationToken);
+            var requiredColumns = new List<(string Name, string Definition)>
+            {
+                ("band", "VARCHAR(100) NULL"),
+                ("Technology", "VARCHAR(50) NULL"),
+                ("public_scenario_id", "INT NULL")
+            };
+
+            foreach (var column in requiredColumns)
+            {
+                if (existing.Contains(column.Name))
+                {
+                    continue;
+                }
+
+                await using var alterCommand = conn.CreateCommand();
+                alterCommand.Transaction = transaction;
+                alterCommand.CommandText = $"ALTER TABLE lte_prediction_optimised_results ADD COLUMN `{column.Name}` {column.Definition};";
+                await alterCommand.ExecuteNonQueryAsync(cancellationToken);
+            }
         }
 
         public async Task<(int Limit, int Offset, List<Dictionary<string, object?>> Rows)> GetDriveTestRowsAsync(
@@ -368,25 +577,46 @@ namespace SignalTracker.Services
             var operatorFilter = request.Operator?.Trim();
             var hasOperatorFilter = !string.IsNullOrWhiteSpace(operatorFilter);
             var primaryOnly = request.PrimaryOnly;
+            const string validBandPredicate = @"
+                    band IS NOT NULL
+                    AND TRIM(band) <> ''
+                    AND UPPER(TRIM(band)) NOT IN ('N/A', 'NA', 'NULL', '-1')";
+            const string primaryCellInfoPredicate = @"
+                    primary_cell_info_1 IS NOT NULL
+                    AND TRIM(primary_cell_info_1) <> ''";
+            const string fiveGPredicate = @"
+                    UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''), COALESCE(primary_cell_info_1, ''), COALESCE(all_neigbor_cell_info, ''))) LIKE '%5G%'
+                    OR UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''), COALESCE(primary_cell_info_1, ''), COALESCE(all_neigbor_cell_info, ''))) LIKE '%NRARFCN%'
+                    OR UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''), COALESCE(primary_cell_info_1, ''), COALESCE(all_neigbor_cell_info, ''))) LIKE '%MNR%'
+                    OR UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''), COALESCE(primary_cell_info_1, ''), COALESCE(all_neigbor_cell_info, ''))) LIKE '%NCI%'
+                    OR UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''), COALESCE(primary_cell_info_1, ''), COALESCE(all_neigbor_cell_info, ''))) REGEXP '(^|[^A-Z0-9])NR([^A-Z0-9]|$)'
+                    OR UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''), COALESCE(primary_cell_info_1, ''), COALESCE(all_neigbor_cell_info, ''))) REGEXP '(^|[^A-Z0-9])N[0-9]{1,3}([^A-Z0-9]|$)'";
 
             var servingSql = @"
                 SELECT
                     lat, lon, rsrp, rsrq, sinr, cell_id, nodeb_id, band, network, pci, earfcn,
-                    m_alpha_long, m_alpha_short, `primary`, session_id
+                    m_alpha_long, m_alpha_short, `primary`, session_id,
+                    primary_cell_info_1 AS __primary_cell_info_1,
+                    all_neigbor_cell_info AS __all_neigbor_cell_info
                 FROM tbl_network_log
                 WHERE session_id IN ({0})
-                  {1}
-                  {2}";
-
+                  AND (({1}) OR ({2}))
+                  {3}
+                  {4}
+                  {5} ";
             var neighbourSql = @"
                 SELECT
                     lat, lon, rsrp, rsrq, sinr, cell_id, nodeb_id, band, network, pci, earfcn,
                     m_alpha_long, m_alpha_short, `primary`,
-                    session_id
+                    session_id,
+                    primary_cell_info_1 AS __primary_cell_info_1,
+                    all_neigbor_cell_info AS __all_neigbor_cell_info
                 FROM tbl_network_log_neighbour
                 WHERE session_id IN ({0})
-                  {1}
-                  {2}";
+                  AND (({1}) OR ({2}))
+                  {3}
+                  {4}
+                  {5} ";
 
             var conn = _db.Database.GetDbConnection();
             if (conn.State != ConnectionState.Open)
@@ -402,8 +632,8 @@ namespace SignalTracker.Services
             var primaryClause = primaryOnly
                 ? "AND LOWER(COALESCE(`primary`, '')) = 'yes'"
                 : string.Empty;
-            var servingQuery = string.Format(servingSql, inClause, operatorClause, primaryClause);
-            var neighbourQuery = string.Format(neighbourSql, inClause, operatorClause, primaryClause);
+            var servingQuery = string.Format(servingSql, inClause, validBandPredicate, fiveGPredicate, $"AND ({primaryCellInfoPredicate})", operatorClause, primaryClause);
+            var neighbourQuery = string.Format(neighbourSql, inClause, validBandPredicate, fiveGPredicate, $"AND ({primaryCellInfoPredicate})", operatorClause, primaryClause);
 
             command.CommandText = request.IncludeNeighbour
                 ? $"{servingQuery} UNION ALL {neighbourQuery} LIMIT @lim OFFSET @off;"
@@ -414,6 +644,7 @@ namespace SignalTracker.Services
 
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             var rows = await PythonBridgeDbTool.ReadRowsAsync(reader, cancellationToken);
+            NormalizeDriveTestRows(rows);
 
             return (limit, offset, rows);
         }
@@ -1171,7 +1402,7 @@ namespace SignalTracker.Services
                 await conn.OpenAsync(cancellationToken);
             }
 
-            await EnsureOptimisedResultsPublicScenarioIdColumnAsync(conn, transaction: null, cancellationToken);
+            await EnsureOptimisedResultsBridgeColumnsAsync(conn, transaction: null, cancellationToken);
             await using var transaction = await BeginTransactionWithReconnectAsync(
                 conn,
                 nameof(SaveLtePredictionOptimisedResultsAsync),
@@ -1200,9 +1431,13 @@ namespace SignalTracker.Services
                 for (var i = 0; i < batch.Length; i++)
                 {
                     var row = batch[i];
+                    var band = CleanBandValue(row.band);
+                    var technology = string.IsNullOrWhiteSpace(row.Technology)
+                        ? (LooksLikeNrBand(band, null) ? "5G" : "4G")
+                        : row.Technology.Trim();
                     valuesSql.Add($@"(@project_id{i}, @job_id{i}, @lat{i}, @lon{i},
                         @pred_rsrp{i}, @pred_rsrq{i}, @pred_sinr{i},
-                        @node_b_id{i}, @cell_id{i}, @technology{i}, @operator{i},
+                        @node_b_id{i}, @cell_id{i}, @band{i}, @technology{i}, @operator{i},
                         @created_at{i}, @site_id{i}, @nodeb_id_cell_id{i},
                         @scenario_id{i}, @public_scenario_id{i})");
 
@@ -1215,7 +1450,8 @@ namespace SignalTracker.Services
                     PythonBridgeDbTool.AddParam(command, $"@pred_sinr{i}", row.pred_sinr);
                     PythonBridgeDbTool.AddParam(command, $"@node_b_id{i}", row.node_b_id);
                     PythonBridgeDbTool.AddParam(command, $"@cell_id{i}", row.cell_id);
-                    PythonBridgeDbTool.AddParam(command, $"@technology{i}", row.Technology ?? "4G");
+                    PythonBridgeDbTool.AddParam(command, $"@band{i}", band);
+                    PythonBridgeDbTool.AddParam(command, $"@technology{i}", technology);
                     PythonBridgeDbTool.AddParam(command, $"@operator{i}", row.@operator ?? row.operator_name);
                     PythonBridgeDbTool.AddParam(command, $"@created_at{i}", row.created_at ?? DateTime.UtcNow);
                     PythonBridgeDbTool.AddParam(command, $"@site_id{i}", row.site_id);
@@ -1227,7 +1463,7 @@ namespace SignalTracker.Services
                 command.CommandText = $@"
                     INSERT INTO lte_prediction_optimised_results
                     (project_id, job_id, lat, lon, pred_rsrp, pred_rsrq, pred_sinr,
-                     node_b_id, cell_id, Technology, `operator`, created_at, site_id,
+                     node_b_id, cell_id, band, Technology, `operator`, created_at, site_id,
                      nodeb_id_cell_id, scenario_id, public_scenario_id)
                     VALUES {string.Join(", ", valuesSql)};";
 
@@ -1308,6 +1544,13 @@ namespace SignalTracker.Services
                 for (var i = 0; i < batch.Length; i++)
                 {
                     var row = batch[i];
+                    var band = CleanBandValue(ReadRowString(row, "band", "Band"));
+                    var technology = ReadRowString(row, "Technology", "technology");
+                    if (string.IsNullOrWhiteSpace(technology))
+                    {
+                        technology = LooksLikeNrBand(band, null) ? "5G" : "4G";
+                    }
+
                     valuesSql.Add($@"(@project_id{i}, @job_id{i}, @lat{i}, @lat_6dp{i}, @lon{i}, @lon_6dp{i},
                      @pred_rsrp{i}, @pred_rsrq{i}, @pred_sinr{i},
                      @pred_rsrp_smoothed{i}, @pred_rsrq_smoothed{i}, @pred_sinr_smoothed{i},
@@ -1336,11 +1579,11 @@ namespace SignalTracker.Services
                     PythonBridgeDbTool.AddParam(command, $"@nodeb_id_cell_id{i}", RowValue(row, "nodeb_id_cell_id"));
                     PythonBridgeDbTool.AddParam(command, $"@legacy_nodeb_id_cell_id{i}", RowValue(row, "legacy_nodeb_id_cell_id"));
                     PythonBridgeDbTool.AddParam(command, $"@sector{i}", RowValue(row, "sector"));
-                    PythonBridgeDbTool.AddParam(command, $"@band{i}", RowValue(row, "band"));
+                    PythonBridgeDbTool.AddParam(command, $"@band{i}", band);
                     PythonBridgeDbTool.AddParam(command, $"@rf_identity_key{i}", RowValue(row, "rf_identity_key"));
                     PythonBridgeDbTool.AddParam(command, $"@sector_identity_key{i}", RowValue(row, "sector_identity_key"));
                     PythonBridgeDbTool.AddParam(command, $"@site_sector_band_key{i}", RowValue(row, "site_sector_band_key"));
-                    PythonBridgeDbTool.AddParam(command, $"@technology{i}", RowValue(row, "Technology") ?? RowValue(row, "technology") ?? "4G");
+                    PythonBridgeDbTool.AddParam(command, $"@technology{i}", technology);
                 }
 
                 command.CommandText = $@"
@@ -2262,7 +2505,12 @@ namespace SignalTracker.Services
 
             await using var command = conn.CreateCommand();
             var inClause = PythonBridgeDbTool.BuildInClause(command, sessionIds, "sid");
-            var whereParts = new List<string> { $"session_id IN ({inClause})" };
+            var whereParts = new List<string>
+            {
+                $"session_id IN ({inClause})",
+                "primary_cell_info_1 IS NOT NULL",
+                "TRIM(primary_cell_info_1) <> ''"
+            };
 
             if (!string.IsNullOrWhiteSpace(request.Provider))
             {
@@ -2293,6 +2541,7 @@ namespace SignalTracker.Services
 
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             var rows = await PythonBridgeDbTool.ReadRowsAsync(reader, cancellationToken);
+            NormalizeDriveTestRows(rows);
             _logger.LogInformation(
                 "[ReportBridge] GetReportNetworkLogs received rows={RowCount}, sessions={SessionCount}, projectId={ProjectId}, provider={Provider}, startDate={StartDate}, endDate={EndDate}, limit={Limit}, offset={Offset}",
                 rows.Count,

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Data;
 using System.Data.Common;
@@ -11,6 +12,7 @@ using SignalTracker.Helper;
 using SignalTracker.Models;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Formats.Jpeg;
+using SixLabors.ImageSharp.PixelFormats;
 using NetTopologySuite.GeometriesGraph;
 
 namespace SignalTracker.Controllers
@@ -181,29 +183,7 @@ namespace SignalTracker.Controllers
 
         private ReportLogo? LoadCompanyLogo()
         {
-            var candidates = new[]
-            {
-                Path.Combine(_env.ContentRootPath, "wwwroot", "comp.jpeg"),
-                Path.Combine(_env.ContentRootPath, "..", "StraceExeFron", "public", "comp.jpeg"),
-                Path.Combine(_env.ContentRootPath, "..", "StraceExeFron", "src", "assets", "vinfocom.png")
-            };
-
-            foreach (var path in candidates)
-            {
-                try
-                {
-                    var fullPath = Path.GetFullPath(path);
-                    if (!System.IO.File.Exists(fullPath)) continue;
-
-                    var bytes = System.IO.File.ReadAllBytes(fullPath);
-                    var (width, height) = UnifiedMapRawPdfBuilder.GetJpegDimensions(bytes);
-                    if (width <= 0 || height <= 0) continue;
-                    return new ReportLogo(bytes, width, height);
-                }
-                catch { }
-            }
-
-            return null;
+            return ReportImageHelper.LoadCompanyLogo(_env);
         }
 
         private async Task<List<UnifiedMapReportRow>> QueryReportRowsAsync(UnifiedMapPdfRequest request, List<int> sessionIds)
@@ -231,7 +211,8 @@ namespace SignalTracker.Controllers
                         TRIM(BOTH CHAR(39) FROM TRIM(BOTH '""' FROM TRIM(m_alpha_long)))
                     ) AS provider_name,
                     band, pci, rssi, rsrp, rsrq, sinr, mos, jitter, latency,
-                    packet_loss, dl_tpt, ul_tpt, apps, app_name, indoor_outdoor, nodeb_id, cell_id,earfcn,bler,volte_call
+                    packet_loss, dl_tpt, ul_tpt, apps, app_name, indoor_outdoor, nodeb_id, cell_id, earfcn, bler, volte_call,
+                    primary_cell_info_1
                 FROM tbl_network_log
                 WHERE {whereClause}
                 ORDER BY timestamp, id
@@ -247,6 +228,9 @@ namespace SignalTracker.Controllers
             await using var reader = await command.ExecuteReaderAsync(HttpContext.RequestAborted);
             while (await reader.ReadAsync(HttpContext.RequestAborted))
             {
+                var primaryCellInfo = ReadString(reader, "primary_cell_info_1");
+                var earfcnValues = ExtractEarfcnValues(ReadString(reader, "earfcn"), primaryCellInfo);
+
                 rows.Add(new UnifiedMapReportRow
                 {
                     Id = ReadInt(reader, "id") ?? 0,
@@ -262,7 +246,8 @@ namespace SignalTracker.Controllers
                     Rsrp = ClampKpi(ReadFloat(reader, "rsrp"), -140, -44),
                     Rsrq = ClampKpi(ReadFloat(reader, "rsrq"), -34, 3),
                     Sinr = ClampKpi(ReadFloat(reader, "sinr"), -23, 40),
-                    Earfcn = ReadInt(reader, "earfcn"),
+                    Earfcn = earfcnValues.Count > 0 ? earfcnValues[0] : null,
+                    EarfcnValues = earfcnValues,
                     Bler = ReadString(reader, "bler"), // Kept as string 
                     VolteCall = ReadInt(reader,"volte_call"), // Reverted to int?
                     DlTpt = ReadString(reader, "dl_tpt"),
@@ -270,7 +255,8 @@ namespace SignalTracker.Controllers
                     UlTpt = ReadString(reader, "ul_tpt"),
                     Apps = ReadString(reader, "apps"),
                     IndoorOutdoor = ReadString(reader, "indoor_outdoor"),
-                    CellId = ReadString(reader, "cell_id")
+                    CellId = ReadString(reader, "cell_id"),
+                    PuschTx = ExtractPuschTx(primaryCellInfo)
                 });
             }
 
@@ -462,6 +448,51 @@ namespace SignalTracker.Controllers
             return reader.IsDBNull(ordinal) ? null : Convert.ToDateTime(reader.GetValue(ordinal), CultureInfo.InvariantCulture);
         }
 
+        private static string? ExtractPuschTx(string? primaryCellInfo)
+        {
+            if (string.IsNullOrWhiteSpace(primaryCellInfo)) return null;
+
+            var match = Regex.Match(
+                primaryCellInfo,
+                @"\bPUSCH[_\s-]*TX\s*=\s*(?<value>-?\d+(?:\.\d+)?)\s*(?<unit>dBm)?",
+                RegexOptions.IgnoreCase);
+
+            if (!match.Success) return null;
+
+            var value = match.Groups["value"].Value;
+            return match.Groups["unit"].Success ? $"{value} dBm" : value;
+        }
+
+        private static List<int> ExtractEarfcnValues(string? earfcnText, string? primaryCellInfo)
+        {
+            var values = new List<int>();
+            values.AddRange(ParseEarfcnTextValues(earfcnText));
+            values.AddRange(ParseNamedEarfcnValues(primaryCellInfo));
+            return values.Distinct().ToList();
+        }
+
+        private static IEnumerable<int> ParseEarfcnTextValues(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) yield break;
+
+            foreach (Match match in Regex.Matches(value, @"\d+"))
+            {
+                if (int.TryParse(match.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var number))
+                    yield return number;
+            }
+        }
+
+        private static IEnumerable<int> ParseNamedEarfcnValues(string? primaryCellInfo)
+        {
+            if (string.IsNullOrWhiteSpace(primaryCellInfo)) yield break;
+
+            foreach (Match match in Regex.Matches(primaryCellInfo, @"\b(?:mEarfcn|earfcn)\s*=\s*(?<value>\d+)", RegexOptions.IgnoreCase))
+            {
+                if (int.TryParse(match.Groups["value"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var number))
+                    yield return number;
+            }
+        }
+
         private static List<long> ResolveSessionIds(IEnumerable<long>? requestSessionIds, string? projectSessionIds)
         {
             var ids = new List<long>();
@@ -523,6 +554,7 @@ namespace SignalTracker.Controllers
         public string? NodebId { get; set; }
         public string? CellId { get; set; }
         public int? Earfcn { get; set; }
+        public List<int> EarfcnValues { get; set; } = new();
         public string? Bler { get; set; }
         public int? VolteCall { get; set; } // Kept as int?
         public string? PuschTx { get; set; } 
@@ -531,7 +563,6 @@ namespace SignalTracker.Controllers
     internal sealed class UnifiedMapReport
     {
         public string Title { get; set; } = "Unified Map Detail Report";
-        public string CompanyName { get; set; } = "Vinfocom";
         public ReportLogo? Logo { get; set; }
         public int ProjectId { get; set; }
         public string ProjectName { get; set; } = "";
@@ -551,6 +582,128 @@ namespace SignalTracker.Controllers
     }
 
     internal sealed record ReportLogo(byte[] Bytes, int Width, int Height);
+
+    internal static class ReportImageHelper
+    {
+        private static readonly Rgba32 PdfBackground = new(255, 255, 255);
+
+        public static ReportLogo? LoadCompanyLogo(IWebHostEnvironment env)
+        {
+            var candidates = new[]
+            {
+                Path.Combine(env.ContentRootPath, "wwwroot", "comp.jpeg"),
+                Path.Combine(env.ContentRootPath, "wwwroot", "comp.jpg"),
+                Path.Combine(env.ContentRootPath, "wwwroot", "vinfocom-logo.jpeg"),
+                Path.Combine(env.ContentRootPath, "wwwroot", "vinfocom-logo.jpg"),
+                Path.Combine(env.ContentRootPath, "wwwroot", "vinfocom-logo.png"),
+                Path.Combine(env.ContentRootPath, "..", "StraceExeFron", "public", "comp.jpeg"),
+                Path.Combine(env.ContentRootPath, "..", "StraceExeFron", "src", "assets", "vinfocom.png")
+            };
+
+            foreach (var path in candidates)
+            {
+                try
+                {
+                    var fullPath = Path.GetFullPath(path);
+                    if (!System.IO.File.Exists(fullPath)) continue;
+
+                    var bytes = System.IO.File.ReadAllBytes(fullPath);
+                    var logo = PrepareLogo(bytes);
+                    if (logo != null) return logo;
+                }
+                catch
+                {
+                    // Try the next candidate.
+                }
+            }
+
+            return null;
+        }
+
+        private static ReportLogo? PrepareLogo(byte[] bytes)
+        {
+            try
+            {
+                using var image = Image.Load<Rgba32>(bytes);
+                var detectedBackground = EstimateLightBackground(image);
+
+                image.ProcessPixelRows(accessor =>
+                {
+                    for (var y = 0; y < accessor.Height; y++)
+                    {
+                        var row = accessor.GetRowSpan(y);
+                        for (var x = 0; x < row.Length; x++)
+                        {
+                            var pixel = BlendWithPdfBackground(row[x]);
+                            row[x] = IsLightBackgroundPixel(pixel, detectedBackground)
+                                ? PdfBackground
+                                : pixel;
+                        }
+                    }
+                });
+
+                using var ms = new MemoryStream();
+                image.Save(ms, new JpegEncoder { Quality = 95 });
+                return new ReportLogo(ms.ToArray(), image.Width, image.Height);
+            }
+            catch
+            {
+                var (width, height) = UnifiedMapRawPdfBuilder.GetJpegDimensions(bytes);
+                return width > 0 && height > 0 ? new ReportLogo(bytes, width, height) : null;
+            }
+        }
+
+        private static Rgba32 EstimateLightBackground(Image<Rgba32> image)
+        {
+            var samples = new List<Rgba32>();
+            AddSample(0, 0);
+            AddSample(image.Width - 1, 0);
+            AddSample(0, image.Height - 1);
+            AddSample(image.Width - 1, image.Height - 1);
+            AddSample(image.Width / 2, 0);
+            AddSample(image.Width / 2, image.Height - 1);
+            AddSample(0, image.Height / 2);
+            AddSample(image.Width - 1, image.Height / 2);
+
+            var lightSamples = samples
+                .Select(BlendWithPdfBackground)
+                .Where(p => p.R >= 200 && p.G >= 200 && p.B >= 200)
+                .ToList();
+
+            if (lightSamples.Count == 0) return PdfBackground;
+
+            return new Rgba32(
+                (byte)Math.Round(lightSamples.Average(p => p.R)),
+                (byte)Math.Round(lightSamples.Average(p => p.G)),
+                (byte)Math.Round(lightSamples.Average(p => p.B)));
+
+            void AddSample(int x, int y)
+            {
+                if (image.Width <= 0 || image.Height <= 0) return;
+                samples.Add(image[Math.Clamp(x, 0, image.Width - 1), Math.Clamp(y, 0, image.Height - 1)]);
+            }
+        }
+
+        private static Rgba32 BlendWithPdfBackground(Rgba32 pixel)
+        {
+            if (pixel.A == 255) return new Rgba32(pixel.R, pixel.G, pixel.B);
+
+            var alpha = pixel.A / 255.0;
+            return new Rgba32(
+                (byte)Math.Round((pixel.R * alpha) + (PdfBackground.R * (1 - alpha))),
+                (byte)Math.Round((pixel.G * alpha) + (PdfBackground.G * (1 - alpha))),
+                (byte)Math.Round((pixel.B * alpha) + (PdfBackground.B * (1 - alpha))));
+        }
+
+        private static bool IsLightBackgroundPixel(Rgba32 pixel, Rgba32 background)
+        {
+            if (pixel.R < 205 || pixel.G < 205 || pixel.B < 205) return false;
+
+            return Math.Abs(pixel.R - background.R) <= 30 &&
+                   Math.Abs(pixel.G - background.G) <= 30 &&
+                   Math.Abs(pixel.B - background.B) <= 30;
+        }
+    }
 
     internal sealed class ReportThresholdConfig
     {
@@ -597,57 +750,59 @@ namespace SignalTracker.Controllers
 
                 Rsrp = new List<ThresholdRange>
                 {
-                    new("Excellent",-75,0,"#008000"),
-                    new("Very Good",-85,-75,"#66CC66"),
-                    new("Good",-95,-85,"#ADD8E6"),
-                    new("Fair",-105,-95,"#0000FF"),
-                    new("Poor",-115,-105,"#FFFF00"),
-                    new("Very Poor",-140,-115,"#FF0000")
+                    new("",-75,0,"#008000"),
+                    new("",-85,-75,"#66CC66"),
+                    new("",-95,-85,"#ADD8E6"),
+                    new("",-105,-95,"#0000FF"),
+                    new("",-115,-105,"#FFFF00"),
+                    new("",-140,-115,"#FF0000")
                 },
                 Rsrq = new List<ThresholdRange>
                 {
-                    new("Good",-14,0,"#008000"),
-                    new("Fair",-16,-14,"#66CC66"),
-                    new("Poor",-18,-16,"#FFFF00"),
-                    new("Very Poor",-30,-18,"#FF0000")
+                    new("",-14,0,"#008000"),
+                    new("",-16,-14,"#66CC66"),
+                    new("",-18,-16,"#FFFF00"),
+                    new("",-30,-18,"#FF0000")
                 },
                 Sinr = new List<ThresholdRange>
                 {
-                    new("Excellent",15,40,"#008000"),
-                    new("Good",10,15,"#66CC66"),
-                    new("Fair",5,10,"#0000FF"),
-                    new("Poor",0,5,"#FFFF00"),
-                    new("Very Poor",-20,0,"#FF0000")
+                    new("",15,40,"#008000"),
+                    new("",10,15,"#66CC66"),
+                    new("",5,10,"#0000FF"),
+                    new("",0,5,"#FFFF00"),
+                    new("",-20,0,"#FF0000")
                 },
                 DlTpt = new List<ThresholdRange>
                 {
-                    new("Excellent",4,1000,"#008000"),
-                    new("Good",3,4,"#66CC66"),
-                    new("Fair",2,3,"#FFFF00"),
-                    new("Poor",1,2,"#0000FF"),
-                    new("Very Poor",0,1,"#FF0000")
+                    new("",4,1000,"#008000"),
+                    new("",3,4,"#66CC66"),
+                    new("",2,3,"#FFFF00"),
+                    new("",1,2,"#0000FF"),
+                    new("",0,1,"#FF0000")
                 },
                 UlTpt = new List<ThresholdRange>
                 {
-                    new("Excellent",4,1000,"#008000"),
-                    new("Good",3,4,"#66CC66"),
-                    new("Fair",2,3,"#FFFF00"),
-                    new("Poor",1,2,"#0000FF"),
-                    new("Very Poor",0,1,"#FF0000")
+                    new("",4,1000,"#008000"),
+                    new("",3,4,"#66CC66"),
+                    new("",2,3,"#FFFF00"),
+                    new("",1,2,"#0000FF"),
+                    new("",0,1,"#FF0000")
                 },
                 Earfcn = new List<ThresholdRange>
                 {
                     new("B3 1800MHz",0,0,"#4AA3FF") { ValueMatch="B3" },
                     new("B5 850MHz",0,0,"#00AA00") { ValueMatch="B5" },
                     new("B40 2300MHz",0,0,"#FFA500") { ValueMatch="B40" },
-                    new("B41 2500MHz",0,0,"#FF1493") { ValueMatch="B41" }
+                    new("B41 2500MHz",0,0,"#FF1493") { ValueMatch="B41" },
+                    new("B8 900MHz",0,0,"#4A148C") { ValueMatch="B8" },
+                    // new("n28 7000MHz",0,0, "#FFFF00") { ValueMatch="n28" },
                 },
                 Bler = new List<ThresholdRange>
                 {
-                    new("No Errors",0,0,"#008000") { ValueMatch="No Errors" },
-                    new("Low",0,0,"#FFFF00") { ValueMatch="Low" },
-                    new("Medium",0,0,"#FFA500") { ValueMatch="Medium" },
-                    new("High",0,0,"#FF0000") { ValueMatch="High" }
+                    new("",0,0,"#008000") { ValueMatch="No Errors" },
+                    new("",0,0,"#FFFF00") { ValueMatch="Low" },
+                    new("",0,0,"#FFA500") { ValueMatch="Medium" },
+                    new("",0,0,"#FF0000") { ValueMatch="High" }
                 },
                 VolteCall = new List<ThresholdRange>
                 {
@@ -656,11 +811,11 @@ namespace SignalTracker.Controllers
                 },
                 PuschTx = new List<ThresholdRange>
                 {
-                    new("Excellent",23,30,"#008000"),
-                    new("Good",18,23,"#66CC66"),
-                    new("Fair",13,18,"#FFFF00"),
-                    new("Poor",8,13,"#0000FF"),
-                    new("Very Poor",0,8,"#FF0000")
+                    new("",21,31,"#FF0000"),
+                    new("",16,21,"#FFFF00"),
+                    new("",9,16,"#0000FF"),
+                    new("",1,9,"#90EE90"),
+                    new("",-50,1,"#006400")
                 }
             };
         }
@@ -683,7 +838,7 @@ namespace SignalTracker.Controllers
 
                     if (!min.HasValue && !max.HasValue && string.IsNullOrWhiteSpace(val)) continue;
 
-                    var label = GetStringFallback(item, "label", "range", "name");
+                    var label = GetStringFallback(item, "range", "name");
                     var color = GetStringFallback(item, "color", "hex", "colorCode") ?? "#808080";
 
                     ranges.Add(new ThresholdRange(label ?? "", min ?? 0, max ?? 0, color) 
@@ -798,6 +953,46 @@ namespace SignalTracker.Controllers
         public List<List<string>> Rows { get; set; } = new();
     }
 
+    internal static class UnifiedMapReportEarfcnHelper
+    {
+        public static IEnumerable<int> RowValues(UnifiedMapReportRow row)
+        {
+            if (row.EarfcnValues.Count > 0)
+                return row.EarfcnValues;
+
+            return row.Earfcn.HasValue
+                ? new[] { row.Earfcn.Value }
+                : Enumerable.Empty<int>();
+        }
+
+        public static List<int> DistinctValues(IEnumerable<UnifiedMapReportRow> rows)
+        {
+            var seen = new HashSet<int>();
+            var values = new List<int>();
+
+            foreach (var row in rows)
+            {
+                foreach (var value in RowValues(row))
+                {
+                    if (seen.Add(value))
+                        values.Add(value);
+                }
+            }
+
+            return values;
+        }
+
+        public static int CountSamples(IEnumerable<UnifiedMapReportRow> rows)
+        {
+            return rows.Count(row => RowValues(row).Any());
+        }
+
+        public static string FormatValues(IEnumerable<int> values)
+        {
+            return string.Join(", ", values.Select(x => x.ToString(CultureInfo.InvariantCulture)));
+        }
+    }
+
     internal static class UnifiedMapReportFactory
     {
         public static UnifiedMapReport Create(
@@ -813,7 +1008,6 @@ namespace SignalTracker.Controllers
             var report = new UnifiedMapReport
             {
                 Title = string.IsNullOrWhiteSpace(request.Title) ? "Drive Test Analytics Report" : request.Title.Trim(),
-                CompanyName = "Vinfocom",
                 Logo = logo,
                 ProjectId = request.ProjectId,
                 ProjectName = string.IsNullOrWhiteSpace(projectName) ? $"Project {request.ProjectId}" : projectName.Trim(),
@@ -837,7 +1031,9 @@ namespace SignalTracker.Controllers
             report.BarCharts.Add(BuildBarChart("Technology Distribution", orderedRows.Select(x => ClassifyTechnology(x.Network)), 10));
             report.BarCharts.Add(BuildBarChart("Operator Distribution", orderedRows.Select(x => CleanGroup(x.Provider, "Unknown")), 10));
             report.BarCharts.Add(BuildBarChart("Band Distribution", orderedRows.Select(x => CleanGroup(x.Band, "Unknown")), 12));
-            report.BarCharts.Add(BuildBarChart("PCI Distribution", orderedRows.Select(x => CleanGroup(x.Pci, "Unknown")), 12));
+            report.BarCharts.Add(BuildBarChart("PCI Distribution", orderedRows.Select(x => CleanGroup(x.Pci, "Unknown")), 5));
+            report.BarCharts.Add(BuildBarChart("NodeB ID Distribution", orderedRows.Select(x => CleanGroup(x.NodebId, "Unknown")), 8));
+            report.BarCharts.Add(BuildBarChart("Cell ID Distribution", orderedRows.Select(x => CleanGroup(x.CellId, "Unknown")), 8));
             report.BarCharts.Add(BuildBarChart("Indoor / Outdoor Distribution", orderedRows.Select(x => CleanGroup(x.IndoorOutdoor, "Unknown")), 6));
             report.BarCharts.Add(BuildBarChart("Application Distribution", orderedRows.SelectMany(x => SplitApps(x.Apps, x.AppName)), 12));
             report.BarCharts.Add(BuildHandoverChart(orderedRows));
@@ -935,7 +1131,6 @@ namespace SignalTracker.Controllers
                 ("Latency", rows.Select(x => x.Latency.HasValue ? (double?)x.Latency.Value : null), "ms"),
                 ("Jitter", rows.Select(x => x.Jitter.HasValue ? (double?)x.Jitter.Value : null), "ms"),
                 ("Packet Loss", rows.Select(x => x.PacketLoss.HasValue ? (double?)x.PacketLoss.Value : null), "%"),
-                ("Earfcn", rows.Select(x => x.Earfcn.HasValue ? (double?)x.Earfcn.Value : null), ""),
                 ("LTE BLER", rows.Select(x => ParseNumber(x.Bler)), "%"),
                 ("VoLTE Call", rows.Select(x => (double?)x.VolteCall), ""),
                 ("PUSCH TX", rows.Select(x => ParseNumber(x.PuschTx)), "dBm")
@@ -944,14 +1139,20 @@ namespace SignalTracker.Controllers
             foreach (var metric in metrics)
             {
                 var values = metric.Values.Where(x => x.HasValue).Select(x => x!.Value).ToList();
-                table.Rows.Add(new List<string> { metric.Name, values.Count == 0 ? "N/A" : $"{values.Average():0.##} {metric.Unit}".Trim(), values.Count == 0 ? "N/A" : $"{values.Min():0.##} {metric.Unit}".Trim(), values.Count == 0 ? "N/A" : $"{values.Max():0.##} {metric.Unit}".Trim(), values.Count.ToString("N0", CultureInfo.InvariantCulture) });
+                if (values.Count == 0) continue;
+                table.Rows.Add(new List<string> { metric.Name, $"{values.Average():0.##} {metric.Unit}".Trim(), $"{values.Min():0.##} {metric.Unit}".Trim(), $"{values.Max():0.##} {metric.Unit}".Trim(), values.Count.ToString("N0", CultureInfo.InvariantCulture) });
             }
+
+            var earfcnValues = UnifiedMapReportEarfcnHelper.DistinctValues(rows);
+            if (earfcnValues.Count > 0)
+                table.Rows.Add(new List<string> { "EARFCN", "N/A", UnifiedMapReportEarfcnHelper.FormatValues(earfcnValues), "N/A", UnifiedMapReportEarfcnHelper.CountSamples(rows).ToString("N0", CultureInfo.InvariantCulture) });
+
             return table;
         }
 
         private static TableData BuildThresholdTable(ReportThresholdConfig thresholds)
         {
-            var table = new TableData { Title = "Configured KPI Ranges", Headers = new List<string> { "Metric", "Label", "Minimum", "Maximum", "Source" } };
+            var table = new TableData { Title = "Configured KPI Ranges", Headers = new List<string> { "Metric","Minimum", "Maximum", "Source" } };
             AddRanges(table, "RSRP", thresholds.Rsrp, thresholds.Source);
             AddRanges(table, "RSRQ", thresholds.Rsrq, thresholds.Source);
             AddRanges(table, "SINR", thresholds.Sinr, thresholds.Source);
@@ -1032,61 +1233,554 @@ namespace SignalTracker.Controllers
         private const double PageWidth = 596;
         private const double PageHeight = 842;
         private const double Margin = 40;
+        private const double HeaderLogoBoxWidth = 58;
+        private const double HeaderLogoBoxHeight = 38;
+        private const double HeaderLogoBoxY = 764;
+        private const int TopPciLimit = 5;
+        private const double PoorRsrpLimit = -105;
+        private const double PoorRsrqLimit = -14;
+        private const string GpsOpenStreetImageKey = "GPS_OPENSTREET";
+        private const string GpsSatelliteImageKey = "GPS_SATELLITE";
+        private const double GpsPreviewBoundsPaddingRatio = 0.01;
+        private const int GpsTileSize = 256;
+        private const int GpsPreviewMinTileZoom = 14;
+        private const int GpsPreviewMaxTileZoom = 20;
+        private const int GpsPreviewMaxSatelliteTileZoom = 20;
+        private const int GpsOpenStreetSourceMaxTileZoom = 19;
+        private const int GpsSatelliteSourceMaxTileZoom = 18;
+        private const double GpsPreviewTileFitRatio = 1.00;
+        private static readonly ConcurrentDictionary<string, byte[]> MapTileCache = new();
+        private static readonly HttpClient MapHttpClient = CreateMapHttpClient();
+
+        private static HttpClient CreateMapHttpClient()
+        {
+            var client = new HttpClient { Timeout = TimeSpan.FromSeconds(4) };
+            client.DefaultRequestHeaders.UserAgent.ParseAdd("SignalTrackerReport/1.0");
+            return client;
+        }
 
         public static byte[] Build(UnifiedMapReport report)
         {
-            var contents = new List<byte[]>
-            {
-                BuildCoverPage(report),
-                BuildTableOfContentsPage(report),
-                BuildIntroductionPage(report),
-                BuildAreaSummaryPage(report),
-                BuildDriveAndKpiSummaryPage(report),
+            EnsureGpsPreviewImages(report);
 
-                BuildMapViewPage(report, "a) Band", BuildBandNarrative(report), FindBarChart(report, "Band Distribution"), "BAND"),
-                BuildMapViewPage(report, "b) RSRP", BuildMetricNarrative(report, "RSRP", "Reference Signal Received Power", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Rsrp))), "dBm", -105, "falling below -105 dBm"), null, "RSRP", report.Thresholds?.Rsrp),
-                BuildMapViewPage(report, "c) RSRQ", BuildMetricNarrative(report, "RSRQ", "Reference Signal Received Quality", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Rsrq))), "dB", -14, "falling below -14 dB"), null, "RSRQ", report.Thresholds?.Rsrq),
-                BuildMapViewPage(report, "d) SINR", BuildMetricNarrative(report, "SINR", "Signal-to-Interference Noise Ratio", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Sinr))), "dB", 5, "falling below 5 dB"), null, "SINR", report.Thresholds?.Sinr),
-                BuildMapViewPage(report, "e) DL_THPT", BuildMetricNarrative(report, "DL throughput", "Downlink throughput", MetricStats(report.Rows.Select(x => ParseNumber(x.DlTpt))), "Mbps", 10, "falling below 10 Mbps"), null, "DL_THPT", report.Thresholds?.DlTpt),
-                BuildMapViewPage(report, "f) UL_THPT", BuildMetricNarrative(report, "UL throughput", "Uplink throughput", MetricStats(report.Rows.Select(x => ParseNumber(x.UlTpt))), "Mbps", 5, "falling below 5 Mbps"), null, "UL_THPT", report.Thresholds?.UlTpt),
-                BuildMapViewPage(report, "g) EARFCN", BuildMetricNarrative(report, "EARFCN", "E-UTRA Absolute Radio Frequency Channel Number", MetricStats(report.Rows.Select(x => (double?)x.Earfcn)), ""), null, "EARFCN", report.Thresholds?.Earfcn),
-                BuildMapViewPage(report, "h) LTE BLER", BuildMetricNarrative(report, "LTE BLER", "Block Error Rate", MetricStats(report.Rows.Select(x => ParseNumber(x.Bler))), "%", 10, "exceeding 10%", true), null, "LTE_BLER", report.Thresholds?.Bler),
-                
-                // REVERTED: VoLTE Call passed back as an integer (double?)
-                BuildMapViewPage(report, "i) VoLTE Call", BuildMetricNarrative(report, "VoLTE Call", "Voice over LTE Call Status", MetricStats(report.Rows.Select(x => (double?)x.VolteCall)), "", 1, "failing or dropping", false), null, "VOLTE_CALL", report.Thresholds?.VolteCall),
-                
-                BuildMapViewPage(report, "j) PUSCH TX", BuildMetricNarrative(report, "PUSCH TX", "Physical Uplink Shared Channel Transmit Power", MetricStats(report.Rows.Select(x => ParseNumber(x.PuschTx))), "dBm", 10, "exceeding optimal power", true), null, "PUSCH_TX", report.Thresholds?.PuschTx),
-                
-                BuildMapViewPage(report, "k) NodeB ID", "NodeB ID identifies the physical site (base station) serving the drive route.", null, "NODEB_ID"),
-                BuildMapViewPage(report, "l) Cell ID", "Cell ID identifies the specific cell / sector serving the drive route.", null, "CI"),
-                BuildMapViewPage(report, "m) PCI", "PCI (Physical Cell Identity) is used to distinguish between neighbouring cells on the same frequency.", FindBarChart(report, "PCI Distribution"), "PCI"),
+            var contents = new List<byte[]>();
+            contents.Add(BuildCoverPage(report));
+            contents.Add(BuildTableOfContentsPage(report));
+            contents.Add(BuildIntroductionPage(report));
+            contents.Add(BuildAreaSummaryPage(report));
+            contents.Add(BuildDriveAndKpiSummaryPage(report));
 
-                BuildPciSummaryPage(report),
-                BuildPciDetailsPage(report),
-                BuildPerformanceSummaryPage(report)
-            };
+            contents.Add(BuildMapViewPage(report, "a) Band", BuildBandNarrative(report), FindBarChart(report, "Band Distribution"), "BAND"));
+            contents.Add(BuildMapViewPage(report, "b) RSRP", BuildMetricNarrative(report, "RSRP", "Reference Signal Received Power", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Rsrp))), "dBm", PoorRsrpLimit, "falling below -105 dBm"), null, "RSRP", report.Thresholds?.Rsrp));
+            contents.Add(BuildMapViewPage(report, "c) RSRQ", BuildMetricNarrative(report, "RSRQ", "Reference Signal Received Quality", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Rsrq))), "dB", PoorRsrqLimit, "falling below -14 dB"), null, "RSRQ", report.Thresholds?.Rsrq));
+            contents.Add(BuildMapViewPage(report, "d) SINR", BuildMetricNarrative(report, "SINR", "Signal-to-Interference Noise Ratio", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Sinr))), "dB", 5, "falling below 5 dB"), null, "SINR", report.Thresholds?.Sinr));
+            contents.Add(BuildMapViewPage(report, "e) DL_THPT", BuildMetricNarrative(report, "DL throughput", "Downlink throughput", MetricStats(report.Rows.Select(x => ParseNumber(x.DlTpt))), "Mbps", 10, "falling below 10 Mbps"), null, "DL_THPT", report.Thresholds?.DlTpt));
+            contents.Add(BuildMapViewPage(report, "f) UL_THPT", BuildMetricNarrative(report, "UL throughput", "Uplink throughput", MetricStats(report.Rows.Select(x => ParseNumber(x.UlTpt))), "Mbps", 5, "falling below 5 Mbps"), null, "UL_THPT", report.Thresholds?.UlTpt));
+            contents.Add(BuildMapViewPage(report, "g) EARFCN", BuildMetricNarrative(report, "EARFCN", "E-UTRA Absolute Radio Frequency Channel Number", new MetricSummary(0, 0, 0, 0), ""), null, "EARFCN", report.Thresholds?.Earfcn));
+
+            if (HasLteBlerData(report))
+                contents.Add(BuildMapViewPage(report, "h) LTE BLER", BuildMetricNarrative(report, "LTE BLER", "Block Error Rate", MetricStats(report.Rows.Select(x => ParseNumber(x.Bler))), "%", 10, "exceeding 10%", true), null, "LTE_BLER", report.Thresholds?.Bler));
+
+            if (HasVolteCallData(report))
+                contents.Add(BuildMapViewPage(report, "i) VoLTE Call", BuildMetricNarrative(report, "VoLTE Call", "Voice over LTE Call Status", MetricStats(report.Rows.Select(x => (double?)x.VolteCall)), "", 1, "failing or dropping", false), null, "VOLTE_CALL", report.Thresholds?.VolteCall));
+
+            contents.Add(BuildMapViewPage(report, "j) PUSCH TX", BuildMetricNarrative(report, "PUSCH TX", "Physical Uplink Shared Channel Transmit Power", MetricStats(report.Rows.Select(x => ParseNumber(x.PuschTx))), "dBm", 10, "exceeding optimal power", true), null, "PUSCH_TX", report.Thresholds?.PuschTx));
+            contents.Add(BuildMapViewPage(report, "k) NodeB ID", "NodeB ID identifies the physical site (base station) serving the drive route.", FindBarChart(report, "NodeB ID Distribution"), "NODEB_ID"));
+            contents.Add(BuildMapViewPage(report, "l) Cell ID", "Cell ID identifies the specific cell / sector serving the drive route.", FindBarChart(report, "Cell ID Distribution"), "CI"));
+            contents.Add(BuildMapViewPage(report, "m) PCI", "PCI (Physical Cell Identity) is used to distinguish between neighbouring cells on the same frequency.", FindBarChart(report, "PCI Distribution"), "PCI"));
+
+            contents.Add(BuildPciSummaryPage(report));
+            contents.Add(BuildPciDetailsPage(report));
+            contents.Add(BuildPerformanceSummaryPage(report));
 
             return WritePdf(contents, report);
+        }
+
+        private static bool HasLteBlerData(UnifiedMapReport report) =>
+            report.Rows.Any(x => ParseNumber(x.Bler).HasValue);
+
+        private static bool HasVolteCallData(UnifiedMapReport report) =>
+            report.Rows.Any(x => x.VolteCall.HasValue);
+
+        private static void EnsureGpsPreviewImages(UnifiedMapReport report)
+        {
+            var points = GetGpsPoints(report);
+            if (points.Count == 0) return;
+
+            if (!report.MapImages.ContainsKey(GpsOpenStreetImageKey))
+            {
+                var openStreet = BuildGpsPreviewImage(points, satellite: false);
+                if (openStreet != null) report.MapImages[GpsOpenStreetImageKey] = openStreet;
+            }
+
+            if (!report.MapImages.ContainsKey(GpsSatelliteImageKey))
+            {
+                var satellite = BuildGpsPreviewImage(points, satellite: true);
+                if (satellite != null) report.MapImages[GpsSatelliteImageKey] = satellite;
+            }
+        }
+
+        private static List<(double Lat, double Lon)> GetGpsPoints(UnifiedMapReport report)
+        {
+            return report.Rows
+                .Where(x => x.Lat.HasValue && x.Lon.HasValue && x.Lat.Value is >= -90 and <= 90 && x.Lon.Value is >= -180 and <= 180)
+                .Select(x => ((double)x.Lat!.Value, (double)x.Lon!.Value))
+                .ToList();
+        }
+
+        private static ReportLogo? BuildGpsPreviewImage(List<(double Lat, double Lon)> points, bool satellite)
+        {
+            const int width = 520;
+            const int height = 244;
+
+            return BuildGpsTilePreviewImage(points, satellite, width, height) ??
+                   BuildGpsSketchPreviewImage(points, satellite, width, height);
+        }
+
+        private static ReportLogo? BuildGpsTilePreviewImage(List<(double Lat, double Lon)> points, bool satellite, int width, int height)
+        {
+            var maxZoom = satellite
+                ? Math.Min(GpsPreviewMaxTileZoom, GpsPreviewMaxSatelliteTileZoom)
+                : GpsPreviewMaxTileZoom;
+
+            for (var candidateMaxZoom = maxZoom; candidateMaxZoom >= GpsPreviewMinTileZoom;)
+            {
+                var viewport = ChooseGpsTileViewport(points, width, height, candidateMaxZoom);
+                var image = TryBuildGpsTilePreviewImage(points, satellite, width, height, viewport);
+                if (image != null) return image;
+
+                candidateMaxZoom = viewport.Zoom - 1;
+            }
+
+            return null;
+        }
+
+        private static ReportLogo? TryBuildGpsTilePreviewImage(
+            List<(double Lat, double Lon)> points,
+            bool satellite,
+            int width,
+            int height,
+            (int Zoom, double CenterX, double CenterY) viewport)
+        {
+            try
+            {
+                using var image = new Image<Rgb24>(width, height);
+                FillRect(image, 0, 0, width, height, satellite ? new Rgb24(39, 55, 44) : new Rgb24(238, 235, 226));
+
+                var sourceZoom = GetGpsTileSourceZoom(viewport.Zoom, satellite);
+                var scale = 1 << (viewport.Zoom - sourceZoom);
+                var topLeftX = viewport.CenterX - (width / 2.0);
+                var topLeftY = viewport.CenterY - (height / 2.0);
+                var sourceTopLeftX = topLeftX / scale;
+                var sourceTopLeftY = topLeftY / scale;
+                var sourceWidth = width / (double)scale;
+                var sourceHeight = height / (double)scale;
+                var minTileX = (int)Math.Floor(sourceTopLeftX / GpsTileSize);
+                var maxTileX = (int)Math.Floor((sourceTopLeftX + sourceWidth - 1) / GpsTileSize);
+                var minTileY = (int)Math.Floor(sourceTopLeftY / GpsTileSize);
+                var maxTileY = (int)Math.Floor((sourceTopLeftY + sourceHeight - 1) / GpsTileSize);
+                var downloadedTiles = 0;
+
+                for (var tileY = minTileY; tileY <= maxTileY; tileY++)
+                {
+                    if (tileY < 0 || tileY >= (1 << sourceZoom)) continue;
+
+                    for (var tileX = minTileX; tileX <= maxTileX; tileX++)
+                    {
+                        var tileBytes = TryDownloadMapTile(sourceZoom, WrapTileX(tileX, sourceZoom), tileY, satellite);
+                        if (tileBytes == null) continue;
+
+                        try
+                        {
+                            using var tile = Image.Load<Rgb24>(tileBytes);
+                            var destX = ((tileX * GpsTileSize) - sourceTopLeftX) * scale;
+                            var destY = ((tileY * GpsTileSize) - sourceTopLeftY) * scale;
+                            CopyImageScaled(tile, image, destX, destY, scale);
+                            downloadedTiles++;
+                        }
+                        catch
+                        {
+                            // Leave this tile blank and keep the rest of the map usable.
+                        }
+                    }
+                }
+
+                if (downloadedTiles == 0) return null;
+
+                var projected = ProjectGpsPointsToTileViewport(points, viewport.Zoom, topLeftX, topLeftY);
+                DrawGpsRoute(image, projected, satellite);
+
+                using var ms = new MemoryStream();
+                image.Save(ms, new JpegEncoder { Quality = 90 });
+                return new ReportLogo(ms.ToArray(), width, height);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static ReportLogo? BuildGpsSketchPreviewImage(List<(double Lat, double Lon)> points, bool satellite, int width, int height)
+        {
+            try
+            {
+                using var image = new Image<Rgb24>(width, height);
+                DrawMapBase(image, satellite);
+
+                var projected = ProjectGpsPoints(points, width, height);
+                DrawGpsRoute(image, projected, satellite);
+
+                using var ms = new MemoryStream();
+                image.Save(ms, new JpegEncoder { Quality = 88 });
+                return new ReportLogo(ms.ToArray(), width, height);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static (int Zoom, double CenterX, double CenterY) ChooseGpsTileViewport(List<(double Lat, double Lon)> points, int width, int height, int maxZoom)
+        {
+            for (var zoom = maxZoom; zoom >= GpsPreviewMinTileZoom; zoom--)
+            {
+                var projected = points.Select(p => LatLonToGlobalPixel(p.Lat, p.Lon, zoom)).ToList();
+                var minX = projected.Min(p => p.X);
+                var maxX = projected.Max(p => p.X);
+                var minY = projected.Min(p => p.Y);
+                var maxY = projected.Max(p => p.Y);
+                var routeWidth = maxX - minX;
+                var routeHeight = maxY - minY;
+
+                if ((routeWidth <= width * GpsPreviewTileFitRatio && routeHeight <= height * GpsPreviewTileFitRatio) ||
+                    zoom == GpsPreviewMinTileZoom)
+                {
+                    return (zoom, (minX + maxX) / 2.0, (minY + maxY) / 2.0);
+                }
+            }
+
+            var center = LatLonToGlobalPixel(points.Average(p => p.Lat), points.Average(p => p.Lon), GpsPreviewMinTileZoom);
+            return (GpsPreviewMinTileZoom, center.X, center.Y);
+        }
+
+        private static (double X, double Y) LatLonToGlobalPixel(double lat, double lon, int zoom)
+        {
+            lat = Math.Clamp(lat, -85.05112878, 85.05112878);
+            lon = Math.Clamp(lon, -180, 180);
+
+            var sinLat = Math.Sin(lat * Math.PI / 180.0);
+            var scale = GpsTileSize * Math.Pow(2, zoom);
+            var x = (lon + 180.0) / 360.0 * scale;
+            var y = (0.5 - Math.Log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI)) * scale;
+            return (x, y);
+        }
+
+        private static List<(int X, int Y)> ProjectGpsPointsToTileViewport(List<(double Lat, double Lon)> points, int zoom, double topLeftX, double topLeftY)
+        {
+            return points
+                .Select(p =>
+                {
+                    var projected = LatLonToGlobalPixel(p.Lat, p.Lon, zoom);
+                    return ((int)Math.Round(projected.X - topLeftX), (int)Math.Round(projected.Y - topLeftY));
+                })
+                .ToList();
+        }
+
+        private static int WrapTileX(int tileX, int zoom)
+        {
+            var tiles = 1 << zoom;
+            return ((tileX % tiles) + tiles) % tiles;
+        }
+
+        private static int GetGpsTileSourceZoom(int displayZoom, bool satellite)
+        {
+            var sourceMaxZoom = satellite ? GpsSatelliteSourceMaxTileZoom : GpsOpenStreetSourceMaxTileZoom;
+            return Math.Min(displayZoom, sourceMaxZoom);
+        }
+
+        private static byte[]? TryDownloadMapTile(int zoom, int tileX, int tileY, bool satellite)
+        {
+            var key = $"{(satellite ? "sat" : "osm")}:{zoom}:{tileX}:{tileY}";
+            if (MapTileCache.TryGetValue(key, out var cachedBytes))
+                return cachedBytes;
+
+            var url = satellite
+                ? $"https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{zoom}/{tileY}/{tileX}"
+                : $"https://tile.openstreetmap.org/{zoom}/{tileX}/{tileY}.png";
+
+            try
+            {
+                using var response = MapHttpClient.GetAsync(url).GetAwaiter().GetResult();
+                if (!response.IsSuccessStatusCode) return null;
+
+                var contentType = response.Content.Headers.ContentType?.MediaType;
+                if (contentType != null && !contentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+                    return null;
+
+                var bytes = response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult();
+                if (bytes.Length == 0) return null;
+                if (satellite && IsUnavailableSatelliteTile(bytes)) return null;
+
+                MapTileCache.TryAdd(key, bytes);
+                return bytes;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static bool IsUnavailableSatelliteTile(byte[] bytes)
+        {
+            try
+            {
+                using var image = Image.Load<Rgb24>(bytes);
+                var samples = 0;
+                var saturationSum = 0.0;
+                var luminanceSum = 0.0;
+                var luminanceSquaredSum = 0.0;
+
+                for (var y = 8; y < image.Height; y += 16)
+                {
+                    for (var x = 8; x < image.Width; x += 16)
+                    {
+                        var pixel = image[x, y];
+                        var max = Math.Max(pixel.R, Math.Max(pixel.G, pixel.B));
+                        var min = Math.Min(pixel.R, Math.Min(pixel.G, pixel.B));
+                        var saturation = max == 0 ? 0 : (max - min) / (double)max;
+                        var luminance = (pixel.R + pixel.G + pixel.B) / 3.0;
+
+                        saturationSum += saturation;
+                        luminanceSum += luminance;
+                        luminanceSquaredSum += luminance * luminance;
+                        samples++;
+                    }
+                }
+
+                if (samples == 0) return false;
+
+                var averageSaturation = saturationSum / samples;
+                var averageLuminance = luminanceSum / samples;
+                var luminanceVariance = (luminanceSquaredSum / samples) - (averageLuminance * averageLuminance);
+                var luminanceStdDev = Math.Sqrt(Math.Max(0, luminanceVariance));
+
+                return averageSaturation < 0.045 && luminanceStdDev < 16;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static void CopyImageScaled(Image<Rgb24> source, Image<Rgb24> target, double destX, double destY, int scale)
+        {
+            scale = Math.Max(1, scale);
+            var destWidth = source.Width * scale;
+            var destHeight = source.Height * scale;
+            var startX = Math.Max(0, (int)Math.Floor(destX));
+            var endX = Math.Min(target.Width, (int)Math.Ceiling(destX + destWidth));
+            var startY = Math.Max(0, (int)Math.Floor(destY));
+            var endY = Math.Min(target.Height, (int)Math.Ceiling(destY + destHeight));
+
+            for (var y = startY; y < endY; y++)
+            {
+                var sourceY = (int)Math.Floor((y - destY) / scale);
+                sourceY = Math.Clamp(sourceY, 0, source.Height - 1);
+
+                for (var x = startX; x < endX; x++)
+                {
+                    var sourceX = (int)Math.Floor((x - destX) / scale);
+                    sourceX = Math.Clamp(sourceX, 0, source.Width - 1);
+                    target[x, y] = source[sourceX, sourceY];
+                }
+            }
+        }
+
+        private static void CopyImage(Image<Rgb24> source, Image<Rgb24> target, int destX, int destY)
+        {
+            for (var y = 0; y < source.Height; y++)
+            {
+                var targetY = destY + y;
+                if (targetY < 0 || targetY >= target.Height) continue;
+
+                for (var x = 0; x < source.Width; x++)
+                {
+                    var targetX = destX + x;
+                    if (targetX < 0 || targetX >= target.Width) continue;
+                    target[targetX, targetY] = source[x, y];
+                }
+            }
+        }
+
+        private static void DrawGpsRoute(Image<Rgb24> image, List<(int X, int Y)> projected, bool satellite)
+        {
+            if (projected.Count > 1)
+            {
+                var shadow = satellite ? new Rgb24(16, 24, 39) : new Rgb24(255, 255, 255);
+                var route = satellite ? new Rgb24(255, 221, 72) : new Rgb24(29, 91, 191);
+                DrawPolyline(image, projected, shadow, 7);
+                DrawPolyline(image, projected, route, 3);
+            }
+
+            if (projected.Count > 0)
+            {
+                DrawCircle(image, projected.First().X, projected.First().Y, 6, new Rgb24(46, 160, 67));
+                DrawCircle(image, projected.Last().X, projected.Last().Y, 6, new Rgb24(220, 38, 38));
+            }
+        }
+
+        private static List<(int X, int Y)> ProjectGpsPoints(List<(double Lat, double Lon)> points, int width, int height)
+        {
+            var minLat = points.Min(x => x.Lat);
+            var maxLat = points.Max(x => x.Lat);
+            var minLon = points.Min(x => x.Lon);
+            var maxLon = points.Max(x => x.Lon);
+
+            if (Math.Abs(maxLat - minLat) < 0.000001)
+            {
+                minLat -= 0.0005;
+                maxLat += 0.0005;
+            }
+
+            if (Math.Abs(maxLon - minLon) < 0.000001)
+            {
+                minLon -= 0.0005;
+                maxLon += 0.0005;
+            }
+
+            var latPadding = (maxLat - minLat) * GpsPreviewBoundsPaddingRatio;
+            var lonPadding = (maxLon - minLon) * GpsPreviewBoundsPaddingRatio;
+            minLat -= latPadding;
+            maxLat += latPadding;
+            minLon -= lonPadding;
+            maxLon += lonPadding;
+
+            const int padding = 22;
+            return points.Select(p =>
+            {
+                var x = padding + (p.Lon - minLon) / (maxLon - minLon) * (width - (padding * 2));
+                var y = padding + (maxLat - p.Lat) / (maxLat - minLat) * (height - (padding * 2));
+                return ((int)Math.Round(x), (int)Math.Round(y));
+            }).ToList();
+        }
+
+        private static void DrawMapBase(Image<Rgb24> image, bool satellite)
+        {
+            if (satellite)
+            {
+                for (var y = 0; y < image.Height; y++)
+                {
+                    for (var x = 0; x < image.Width; x++)
+                    {
+                        var noise = (x * 31 + y * 17 + ((x * y) % 43)) % 38;
+                        image[x, y] = new Rgb24((byte)(39 + noise / 4), (byte)(73 + noise), (byte)(45 + noise / 3));
+                    }
+                }
+
+                FillRect(image, 30, 25, 150, 70, new Rgb24(71, 101, 48));
+                FillRect(image, 335, 42, 150, 80, new Rgb24(87, 91, 55));
+                FillRect(image, 210, 135, 230, 75, new Rgb24(61, 92, 70));
+                DrawLine(image, 0, 205, image.Width, 160, new Rgb24(92, 84, 72), 7);
+                DrawLine(image, 10, 18, image.Width - 30, 82, new Rgb24(84, 91, 76), 5);
+                return;
+            }
+
+            FillRect(image, 0, 0, image.Width, image.Height, new Rgb24(244, 241, 232));
+            FillRect(image, 0, image.Height - 48, image.Width, 48, new Rgb24(207, 232, 241));
+
+            for (var x = 32; x < image.Width; x += 70)
+                DrawLine(image, x, 0, x + 30, image.Height, new Rgb24(218, 214, 204), 1);
+
+            for (var y = 28; y < image.Height; y += 58)
+                DrawLine(image, 0, y, image.Width, y + 12, new Rgb24(218, 214, 204), 1);
+
+            DrawLine(image, 0, 190, image.Width, 122, new Rgb24(255, 255, 255), 8);
+            DrawLine(image, 0, 190, image.Width, 122, new Rgb24(230, 170, 92), 3);
+            DrawLine(image, 40, 0, 430, image.Height, new Rgb24(255, 255, 255), 6);
+            DrawLine(image, 40, 0, 430, image.Height, new Rgb24(190, 190, 184), 2);
+            DrawLine(image, 0, 88, image.Width, 75, new Rgb24(255, 255, 255), 5);
+            DrawLine(image, 0, 88, image.Width, 75, new Rgb24(190, 190, 184), 2);
+        }
+
+        private static void FillRect(Image<Rgb24> image, int x, int y, int width, int height, Rgb24 color)
+        {
+            var minX = Math.Clamp(x, 0, image.Width);
+            var maxX = Math.Clamp(x + width, 0, image.Width);
+            var minY = Math.Clamp(y, 0, image.Height);
+            var maxY = Math.Clamp(y + height, 0, image.Height);
+
+            for (var yy = minY; yy < maxY; yy++)
+            {
+                for (var xx = minX; xx < maxX; xx++)
+                    image[xx, yy] = color;
+            }
+        }
+
+        private static void DrawPolyline(Image<Rgb24> image, List<(int X, int Y)> points, Rgb24 color, int thickness)
+        {
+            for (var i = 1; i < points.Count; i++)
+                DrawLine(image, points[i - 1].X, points[i - 1].Y, points[i].X, points[i].Y, color, thickness);
+        }
+
+        private static void DrawLine(Image<Rgb24> image, int x0, int y0, int x1, int y1, Rgb24 color, int thickness)
+        {
+            var dx = Math.Abs(x1 - x0);
+            var sx = x0 < x1 ? 1 : -1;
+            var dy = -Math.Abs(y1 - y0);
+            var sy = y0 < y1 ? 1 : -1;
+            var err = dx + dy;
+
+            while (true)
+            {
+                DrawCircle(image, x0, y0, Math.Max(1, thickness / 2), color);
+                if (x0 == x1 && y0 == y1) break;
+
+                var e2 = 2 * err;
+                if (e2 >= dy)
+                {
+                    err += dy;
+                    x0 += sx;
+                }
+                if (e2 <= dx)
+                {
+                    err += dx;
+                    y0 += sy;
+                }
+            }
+        }
+
+        private static void DrawCircle(Image<Rgb24> image, int cx, int cy, int radius, Rgb24 color)
+        {
+            var radiusSquared = radius * radius;
+            for (var y = cy - radius; y <= cy + radius; y++)
+            {
+                for (var x = cx - radius; x <= cx + radius; x++)
+                {
+                    if (x < 0 || y < 0 || x >= image.Width || y >= image.Height) continue;
+                    var dx = x - cx;
+                    var dy = y - cy;
+                    if ((dx * dx) + (dy * dy) <= radiusSquared)
+                        image[x, y] = color;
+                }
+            }
         }
 
         private static byte[] BuildCoverPage(UnifiedMapReport report)
         {
             var lines = PageBackground();
             lines.Add(FillColor(15, 23, 42));
-            lines.Add(Text(178, 520, 24, "Drive Test Report"));
-            lines.Add(Text(210, 490, 13, report.ProjectName));
-            lines.Add(Text(202, 452, 11, $"Generated on {report.GeneratedAt:MMMM dd, yyyy}"));
+            lines.Add(TextCenter(PageWidth / 2, 520, 24, "Drive Test Report"));
+            lines.Add(TextCenter(PageWidth / 2, 490, 13, report.ProjectName));
+            lines.Add(TextCenter(PageWidth / 2, 452, 11, $"Generated on {report.GeneratedAt:MMMM dd, yyyy}"));
             lines.Add(StrokeColor(37, 99, 235));
             lines.Add("2 w");
             lines.Add($"{Fmt(170)} {Fmt(475)} m {Fmt(426)} {Fmt(475)} l S");
             if (report.Logo != null)
             {
-                var logoWidth = 82.0;
-                var logoHeight = logoWidth * report.Logo.Height / Math.Max(report.Logo.Width, 1);
-                lines.Add($"q {Fmt(logoWidth)} 0 0 {Fmt(logoHeight)} {Fmt((PageWidth - logoWidth) / 2)} {Fmt(610)} cm /Logo Do Q");
+                DrawImageFit(lines, "Logo", report.Logo, (PageWidth - 130) / 2, 600, 130, 76);
             }
             lines.Add(FillColor(71, 85, 105));
-            lines.Add(Text(185, 95, 9, report.CompanyName));
+        
             lines.Add("Q");
             return Ascii(string.Join("\n", lines) + "\n");
         }
@@ -1095,37 +1789,50 @@ namespace SignalTracker.Controllers
         {
             var lines = Header(report, "Table of Contents");
             var y = 710.0;
-            var entries = new[]
+            var entries = new List<(string Title, string Page)>
             {
                 ("1. Introduction", "3"),
                 ("2. Area Summary", "4"),
                 ("3. Drive Summary", "5"),
                 ("4. KPI Summary", "5"),
-                ("5. Map View", "6"),
-                ("   a) Band", "6"),
-                ("   b) RSRP", "7"),
-                ("   c) RSRQ", "8"),
-                ("   d) SINR", "9"),
-                ("   e) DL Throughput", "10"),
-                ("   f) UL Throughput", "11"),
-                ("   g) Earfcn", "12"),
-                ("   h) LTE BLER", "13"),
-                ("   i) VoLTE Call", "14"),
-                ("   j) PUSCH TX", "15"),
-                ("   k) NodeB ID", "16"),
-                ("   l) Cell ID", "17"),
-                ("   m) PCI", "18"),
-                ("6. PCI Summary", "19"),
-                ("   a) Top PCI Values", "20"),
-                ("   b) PCI with Poor RSRP", "20"),
-                ("   c) PCI with Poor RSRQ", "20"),
-                ("7. Performance Summary", "21")
+                ("5. Map View", "6")
             };
+
+            var page = 6;
+            void AddMapEntry(string title, bool include = true)
+            {
+                if (!include) return;
+                entries.Add((title, page.ToString(CultureInfo.InvariantCulture)));
+                page++;
+            }
+
+            AddMapEntry("   a) Band");
+            AddMapEntry("   b) RSRP");
+            AddMapEntry("   c) RSRQ");
+            AddMapEntry("   d) SINR");
+            AddMapEntry("   e) DL Throughput");
+            AddMapEntry("   f) UL Throughput");
+            AddMapEntry("   g) Earfcn");
+            AddMapEntry("   h) LTE BLER", HasLteBlerData(report));
+            AddMapEntry("   i) VoLTE Call", HasVolteCallData(report));
+            AddMapEntry("   j) PUSCH TX");
+            AddMapEntry("   k) NodeB ID");
+            AddMapEntry("   l) Cell ID");
+            AddMapEntry("   m) PCI");
+
+            var pciSummaryPage = page++;
+            var pciDetailsPage = page++;
+            var performancePage = page;
+            entries.Add(("6. PCI Summary", pciSummaryPage.ToString(CultureInfo.InvariantCulture)));
+            entries.Add(("   a) Top PCI Values", pciDetailsPage.ToString(CultureInfo.InvariantCulture)));
+            entries.Add(("   b) PCI with Poor RSRP", pciDetailsPage.ToString(CultureInfo.InvariantCulture)));
+            entries.Add(("   c) PCI with Poor RSRQ", pciDetailsPage.ToString(CultureInfo.InvariantCulture)));
+            entries.Add(("7. Performance Summary", performancePage.ToString(CultureInfo.InvariantCulture)));
 
             foreach (var entry in entries)
             {
-                lines.Add(Text(Margin, y, 11, entry.Item1));
-                lines.Add(Text(PageWidth - Margin - 20, y, 11, entry.Item2));
+                lines.Add(Text(Margin, y, 11, entry.Title));
+                lines.Add(TextRight(PageWidth - Margin, y, 11, entry.Page));
                 y -= 22; 
             }
             return Ascii(string.Join("\n", lines) + "\n");
@@ -1145,11 +1852,11 @@ namespace SignalTracker.Controllers
 
         private static byte[] BuildAreaSummaryPage(UnifiedMapReport report)
         {
-            var lines = Header(report, "2. Area Summary");
+            var lines = Header(report, "");
             var y = 710.0;
-            AddWrapped(lines, Margin, ref y, "Drive route covers key operational areas identified from collected GPS samples and session density.", 11, 86);
-            y -= 10;
-            AddSectionTitle(lines, "Hotspots & Marked Locations", ref y, 13);
+            // AddWrapped(lines, Margin, ref y, "Drive route covers key operational areas identified from collected GPS samples and session density.", 11, 86);
+            // y -= 10;
+            AddSectionTitle(lines, "Marked Locations", ref y, 13);
             AddWrapped(lines, Margin, ref y, BuildCoordinateSummary(report), 11, 86);
             y -= 8;
             AddSectionTitle(lines, "Major Areas Covered", ref y, 13);
@@ -1209,15 +1916,26 @@ namespace SignalTracker.Controllers
                     case "SINR": legends = CalculateLegendStatistics(report.Rows.Select(x => ToNullableDouble(x.Sinr)), legendRanges); break;
                     case "DL_THPT": legends = CalculateLegendStatistics(report.Rows.Select(x => ParseNumber(x.DlTpt)), legendRanges); break;
                     case "UL_THPT": legends = CalculateLegendStatistics(report.Rows.Select(x => ParseNumber(x.UlTpt)), legendRanges); break;
-                    case "EARFCN": legends = CalculateStringLegendStatistics(report.Rows.Select(x => x.Band), legendRanges); break;
-                    case "LTE_BLER": legends = CalculateStringLegendStatistics(report.Rows.Select(x => x.Bler), legendRanges); break;
+                    case "EARFCN":
+                        legends = UsesNumericLegend(legendRanges)
+                            ? CalculateLegendStatistics(report.Rows.SelectMany(x => UnifiedMapReportEarfcnHelper.RowValues(x).Select(value => (double?)value)), legendRanges)
+                            : CalculateStringLegendStatistics(report.Rows.Select(x => x.Band), legendRanges);
+                        break;
+                    case "LTE_BLER":
+                        legends = UsesNumericLegend(legendRanges)
+                            ? CalculateLegendStatistics(report.Rows.Select(x => ParseNumber(x.Bler)), legendRanges)
+                            : CalculateStringLegendStatistics(report.Rows.Select(x => x.Bler), legendRanges);
+                        break;
                     // REVERTED: VoLTE Call passed back as an integer (double?)
                     case "VOLTE_CALL": legends = CalculateLegendStatistics(report.Rows.Select(x => (double?)x.VolteCall), legendRanges); break;
                     case "PUSCH_TX": legends = CalculateLegendStatistics(report.Rows.Select(x => ParseNumber(x.PuschTx)), legendRanges); break;
                 }
 
-                y -= 20;
-                DrawLegendStatistics(lines, Margin, ref y, legends);
+                if (legends.Count > 0)
+                {
+                    y -= 20;
+                    DrawLegendStatistics(lines, Margin, ref y, legends);
+                }
             }
 
             if (chart != null)
@@ -1256,6 +1974,15 @@ namespace SignalTracker.Controllers
 
             return result;
         }
+
+        private static bool UsesNumericLegend(List<ThresholdRange> ranges)
+        {
+            return ranges.Any(range =>
+            {
+                if (string.IsNullOrWhiteSpace(range.ValueMatch)) return true;
+                return double.TryParse(range.ValueMatch, NumberStyles.Any, CultureInfo.InvariantCulture, out _);
+            });
+        }
         
         private static List<LegendStatistics> CalculateStringLegendStatistics(IEnumerable<string?> values, List<ThresholdRange> ranges)
         {
@@ -1289,6 +2016,8 @@ namespace SignalTracker.Controllers
 
         private static void DrawLegendStatistics(List<string> lines, double x, ref double y, List<LegendStatistics> legends)
         {
+            if (legends.Count == 0) return;
+
             lines.Add(FillColor(0,0,0));
             lines.Add(Text(x, y, 11, "Legend"));
 
@@ -1303,23 +2032,26 @@ namespace SignalTracker.Controllers
 
                 lines.Add(FillColor(0,0,0));
 
-                string text;
-
-                if (!string.IsNullOrWhiteSpace(item.Range.ValueMatch))
-                {
-                    if (double.TryParse(item.Range.ValueMatch, out _))
-                        text = $"{item.Range.Label} ({item.Range.ValueMatch}) {item.Count}   {item.Percentage:0.00}%";
-                    else
-                        text = $"{item.Range.Label}  {item.Count}   {item.Percentage:0.00}%"; 
-                }
-                else
-                {
-                    text = $"{item.Range.Label} ({item.Range.Min:0} to {item.Range.Max:0})  {item.Count}   {item.Percentage:0.00}%";
-                }
-
-                lines.Add(Text(x + 18, y - 6, 8.5, text));
+                lines.Add(Text(x + 18, y - 6, 8.5, BuildLegendText(item)));
                 y -= 14;
             }
+        }
+
+        private static string BuildLegendText(LegendStatistics item)
+        {
+            var range = !string.IsNullOrWhiteSpace(item.Range.ValueMatch)
+                ? item.Range.ValueMatch.Trim()
+                : FormatLegendRange(item.Range);
+
+            return $"{range}  {item.Count}   {item.Percentage:0.00}%";
+        }
+
+        private static string FormatLegendRange(ThresholdRange range)
+        {
+            if (Math.Abs(range.Min - range.Max) < 0.0001)
+                return $"{range.Min:0.##}";
+
+            return $"{range.Min:0.##} to {range.Max:0.##}";
         }
 
         private static (byte R, byte G, byte B) ParseHexColor(string hex)
@@ -1330,6 +2062,9 @@ namespace SignalTracker.Controllers
             
             if (hex.Length == 3) 
                 hex = new string(new[] { hex[0], hex[0], hex[1], hex[1], hex[2], hex[2] });
+
+            if (hex.Length == 8)
+                hex = hex[2..];
                 
             if (hex.Length == 6 && int.TryParse(hex, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var c))
             {
@@ -1345,11 +2080,11 @@ namespace SignalTracker.Controllers
             var y = 710.0;
             var pciGroups = PciGroups(report).ToList();
             var unique = pciGroups.Count;
-            var top30 = pciGroups.Take(30).Sum(x => x.Count);
-            var percent = report.TotalRows == 0 ? 0 : top30 * 100.0 / report.TotalRows;
-            AddWrapped(lines, Margin, ref y, $"The network utilized a total of {unique:N0} unique PCI values during the drive test. The top 30 PCI values accounted for {percent:0.##}% of samples, indicating the concentration of PCI distribution across the measured route.", 11, 86);
+            var topPciSamples = pciGroups.Take(TopPciLimit).Sum(x => x.Count);
+            var percent = report.TotalRows == 0 ? 0 : topPciSamples * 100.0 / report.TotalRows;
+            AddWrapped(lines, Margin, ref y, $"The network utilized a total of {unique:N0} unique PCI values during the drive test. The top {TopPciLimit} PCI values accounted for {percent:0.##}% of samples, indicating the concentration of PCI distribution across the measured route.", 11, 86);
             y -= 20;
-            DrawTable(lines, Margin, ref y, new[] { "PCI", "Samples", "Share" }, pciGroups.Take(12).Select(x => new List<string> { x.Pci, x.Count.ToString("N0", CultureInfo.InvariantCulture), $"{(report.TotalRows == 0 ? 0 : x.Count * 100.0 / report.TotalRows):0.##}%" }).ToList(), 10);
+            DrawTable(lines, Margin, ref y, new[] { "PCI", "Samples", "Share" }, pciGroups.Take(TopPciLimit).Select(x => new List<string> { x.Pci, x.Count.ToString("N0", CultureInfo.InvariantCulture), $"{(report.TotalRows == 0 ? 0 : x.Count * 100.0 / report.TotalRows):0.##}%" }).ToList(), 10);
             return Ascii(string.Join("\n", lines) + "\n");
         }
 
@@ -1357,14 +2092,14 @@ namespace SignalTracker.Controllers
         {
             var lines = Header(report, "6. PCI Summary - Details");
             var y = 710.0;
-            AddSectionTitle(lines, "a) Top 30 PCI Values", ref y, 13);
-            DrawTable(lines, Margin, ref y, new[] { "PCI", "Samples" }, PciGroups(report).Take(10).Select(x => new List<string> { x.Pci, x.Count.ToString("N0", CultureInfo.InvariantCulture) }).ToList(), 9);
+            AddSectionTitle(lines, $"a) Top {TopPciLimit} PCI Values", ref y, 13);
+            DrawTable(lines, Margin, ref y, new[] { "PCI", "Samples" }, PciGroups(report).Take(TopPciLimit).Select(x => new List<string> { x.Pci, x.Count.ToString("N0", CultureInfo.InvariantCulture) }).ToList(), 9);
             y -= 14;
-            AddSectionTitle(lines, "b) PCI with Poor RSRP", ref y, 13);
-            DrawTable(lines, Margin, ref y, new[] { "PCI", "Poor RSRP Samples" }, PoorPciGroups(report, x => x.Rsrp.HasValue && x.Rsrp.Value < -105).Take(8).Select(x => new List<string> { x.Pci, x.Count.ToString("N0", CultureInfo.InvariantCulture) }).ToList(), 9);
+            AddSectionTitle(lines, $"b) PCI with Poor RSRP (< {PoorRsrpLimit:0.#} dBm)", ref y, 13);
+            DrawTable(lines, Margin, ref y, new[] { "PCI", "Threshold", "Poor RSRP Samples" }, PoorPciGroups(report, x => x.Rsrp.HasValue && x.Rsrp.Value < PoorRsrpLimit).Take(8).Select(x => new List<string> { x.Pci, $"< {PoorRsrpLimit:0.#} dBm", x.Count.ToString("N0", CultureInfo.InvariantCulture) }).ToList(), 9);
             y -= 14;
-            AddSectionTitle(lines, "c) PCI with Poor RSRQ", ref y, 13);
-            DrawTable(lines, Margin, ref y, new[] { "PCI", "Poor RSRQ Samples" }, PoorPciGroups(report, x => x.Rsrq.HasValue && x.Rsrq.Value < -14).Take(8).Select(x => new List<string> { x.Pci, x.Count.ToString("N0", CultureInfo.InvariantCulture) }).ToList(), 9);
+            AddSectionTitle(lines, $"c) PCI with Poor RSRQ (< {PoorRsrqLimit:0.#} dB)", ref y, 13);
+            DrawTable(lines, Margin, ref y, new[] { "PCI", "Threshold", "Poor RSRQ Samples" }, PoorPciGroups(report, x => x.Rsrq.HasValue && x.Rsrq.Value < PoorRsrqLimit).Take(8).Select(x => new List<string> { x.Pci, $"< {PoorRsrqLimit:0.#} dB", x.Count.ToString("N0", CultureInfo.InvariantCulture) }).ToList(), 9);
             return Ascii(string.Join("\n", lines) + "\n");
         }
 
@@ -1373,7 +2108,7 @@ namespace SignalTracker.Controllers
             var lines = Header(report, "7. Performance Summary");
             var y = 710.0;
             AddSectionTitle(lines, "a) Network Quality Metrics", ref y, 13);
-            DrawTable(lines, Margin, ref y, new[] { "Metric", "Average", "Poor Samples" }, BuildQualityRows(report), 9);
+            DrawTable(lines, Margin, ref y, new[] { "Metric", "Average", "Threshold", "Poor Samples" }, BuildQualityRows(report), 9);
             y -= 16;
             AddSectionTitle(lines, "b) Speed Metrics", ref y, 13);
             DrawTable(lines, Margin, ref y, new[] { "Metric", "Average", "Slow Samples" }, BuildSpeedRows(report), 9);
@@ -1399,19 +2134,19 @@ namespace SignalTracker.Controllers
         private static List<string> Header(UnifiedMapReport report, string pageTitle)
         {
             var lines = PageBackground();
+            var headerTextX = Margin;
             if (report.Logo != null)
             {
-                var logoWidth = 52.0;
-                var logoHeight = logoWidth * report.Logo.Height / Math.Max(report.Logo.Width, 1);
-                lines.Add($"q {Fmt(logoWidth)} 0 0 {Fmt(logoHeight)} {Fmt(Margin)} {Fmt(764)} cm /Logo Do Q");
+                DrawImageFit(lines, "Logo", report.Logo, Margin, HeaderLogoBoxY, HeaderLogoBoxWidth, HeaderLogoBoxHeight);
+                headerTextX = Margin + HeaderLogoBoxWidth + 14;
             }
 
             lines.AddRange(new[]
             {
                 FillColor(15, 23, 42),
-                Text(report.Logo == null ? Margin : 105, 792, 13, "Drive Test Report"),
+                Text(headerTextX, 792, 13, "Drive Test Report"),
                 FillColor(71, 85, 105),
-                Text(report.Logo == null ? Margin : 105, 775, 8.5, report.ProjectName),
+                Text(headerTextX, 775, 8.5, report.ProjectName),
                 StrokeColor(203, 213, 225),
                 $"{Fmt(Margin)} 748 m {Fmt(PageWidth - Margin)} 748 l S",
                 FillColor(15, 23, 42),
@@ -1485,6 +2220,9 @@ namespace SignalTracker.Controllers
 
         private static string BuildMetricNarrative(UnifiedMapReport report, string metric, string description, MetricSummary stats, string unit, double poorLimit = 0, string poorText = "", bool poorIsHigher = false)
         {
+            if (metric.Equals("EARFCN", StringComparison.OrdinalIgnoreCase))
+                return BuildEarfcnNarrative(report, description);
+
             if (stats.Count == 0)
                 return $"{metric} ({description}) was analyzed across the drive route, but no valid samples were available for this metric.";
 
@@ -1516,6 +2254,17 @@ namespace SignalTracker.Controllers
             return narrative.Replace("  ", " ").Trim();
         }
 
+        private static string BuildEarfcnNarrative(UnifiedMapReport report, string description)
+        {
+            var values = UnifiedMapReportEarfcnHelper.DistinctValues(report.Rows);
+            var sampleCount = UnifiedMapReportEarfcnHelper.CountSamples(report.Rows);
+
+            if (values.Count == 0)
+                return $"EARFCN ({description}) was analyzed across the drive route, but no valid EARFCN values were available.";
+
+            return $"EARFCN ({description}) identifies the serving channel number. Observed EARFCN values: {UnifiedMapReportEarfcnHelper.FormatValues(values)}. Valid EARFCN samples: {sampleCount:N0}.";
+        }
+
         private static string BuildCoordinateSummary(UnifiedMapReport report)
         {
             var points = report.Rows
@@ -1526,7 +2275,7 @@ namespace SignalTracker.Controllers
             if (points.Count == 0)
                 return "No valid GPS coordinates were available in the selected drive samples.";
 
-            return $"Crowded and high-traffic locations should be reviewed around the densest measured route segments. Valid GPS samples span approximately {points.Min(x => x.Lat):0.000000} to {points.Max(x => x.Lat):0.000000} latitude and {points.Min(x => x.Lon):0.000000} to {points.Max(x => x.Lon):0.000000} longitude.";
+            return $"Valid GPS samples span approximately {points.Min(x => x.Lat):0.000000} to {points.Max(x => x.Lat):0.000000} latitude and {points.Min(x => x.Lon):0.000000} to {points.Max(x => x.Lon):0.000000} longitude.";
         }
 
         private static void AddGpsRange(List<string> lines, UnifiedMapReport report, ref double y)
@@ -1537,12 +2286,146 @@ namespace SignalTracker.Controllers
             if (points.Count == 0) return;
 
             y -= 14;
+            var gpsPoints = points.Select(x => ((double)x.Lat!.Value, (double)x.Lon!.Value)).ToList();
+            var detectedArea = ResolveGpsArea(gpsPoints);
+            if (!string.IsNullOrWhiteSpace(detectedArea))
+            {
+                AddWrapped(lines, Margin, ref y, $"Detected drive area: {detectedArea}", 10, 92);
+                y -= 4;
+            }
+
             DrawTable(lines, Margin, ref y, new[] { "GPS Summary", "Value" }, new List<List<string>>
             {
                 new() { "Valid GPS samples", points.Count.ToString("N0", CultureInfo.InvariantCulture) },
                 new() { "Latitude range", $"{points.Min(x => x.Lat):0.000000} to {points.Max(x => x.Lat):0.000000}" },
                 new() { "Longitude range", $"{points.Min(x => x.Lon):0.000000} to {points.Max(x => x.Lon):0.000000}" }
             }, 10);
+
+            DrawGpsPreviewImages(lines, report, ref y);
+        }
+
+        private static string ResolveGpsArea(List<(double Lat, double Lon)> points)
+        {
+            if (points.Count == 0) return "";
+
+            var centerLat = points.Average(x => x.Lat);
+            var centerLon = points.Average(x => x.Lon);
+            var fallback = $"route center {centerLat:0.000000}, {centerLon:0.000000}";
+
+            try
+            {
+                var lat = centerLat.ToString("0.000000", CultureInfo.InvariantCulture);
+                var lon = centerLon.ToString("0.000000", CultureInfo.InvariantCulture);
+                var url = $"https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat={lat}&lon={lon}&zoom=14&addressdetails=1";
+
+                using var response = MapHttpClient.GetAsync(url).GetAwaiter().GetResult();
+                if (!response.IsSuccessStatusCode) return fallback;
+
+                var json = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+                using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
+
+                if (root.TryGetProperty("address", out var address))
+                {
+                    var parts = new List<string>();
+                    AddAddressPart(address, parts, "neighbourhood");
+                    AddAddressPart(address, parts, "suburb");
+                    AddAddressPart(address, parts, "city_district");
+                    AddAddressPart(address, parts, "city");
+                    AddAddressPart(address, parts, "town");
+                    AddAddressPart(address, parts, "village");
+                    AddAddressPart(address, parts, "county");
+                    AddAddressPart(address, parts, "state");
+                    AddAddressPart(address, parts, "country");
+
+                    if (parts.Count > 0)
+                        return string.Join(", ", parts.Take(4));
+                }
+
+                if (root.TryGetProperty("display_name", out var displayName) && displayName.ValueKind == JsonValueKind.String)
+                {
+                    var parts = (displayName.GetString() ?? "")
+                        .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                        .Take(4)
+                        .ToList();
+
+                    if (parts.Count > 0)
+                        return string.Join(", ", parts);
+                }
+            }
+            catch
+            {
+                return fallback;
+            }
+
+            return fallback;
+        }
+
+        private static void AddAddressPart(JsonElement address, List<string> parts, string key)
+        {
+            if (!address.TryGetProperty(key, out var value) || value.ValueKind != JsonValueKind.String)
+                return;
+
+            var text = value.GetString()?.Trim();
+            if (string.IsNullOrWhiteSpace(text)) return;
+
+            if (!parts.Any(x => x.Equals(text, StringComparison.OrdinalIgnoreCase)))
+                parts.Add(text);
+        }
+
+        private static void DrawGpsPreviewImages(List<string> lines, UnifiedMapReport report, ref double y)
+        {
+            var hasOpenStreet = report.MapImages.TryGetValue(GpsOpenStreetImageKey, out var openStreet);
+            var hasSatellite = report.MapImages.TryGetValue(GpsSatelliteImageKey, out var satellite);
+            if (!hasOpenStreet && !hasSatellite) return;
+
+            y -= 18;
+            lines.Add(FillColor(15, 23, 42));
+            lines.Add(Text(Margin, y, 11, "GPS Map Preview"));
+            y -= 16;
+
+            var gap = 16.0;
+            var previewWidth = (PageWidth - (Margin * 2) - gap) / 2;
+            var previewHeight = 122.0;
+            var imageY = y - previewHeight;
+
+            if (hasOpenStreet && openStreet != null)
+            {
+                DrawImage(lines, GpsOpenStreetImageKey, openStreet, Margin, imageY, previewWidth, previewHeight);
+                lines.Add(FillColor(30, 41, 59));
+                lines.Add(Text(Margin, imageY - 13, 8.5, "OpenStreetMap view"));
+            }
+
+            if (hasSatellite && satellite != null)
+            {
+                var x = Margin + previewWidth + gap;
+                DrawImage(lines, GpsSatelliteImageKey, satellite, x, imageY, previewWidth, previewHeight);
+                lines.Add(FillColor(30, 41, 59));
+                lines.Add(Text(x, imageY - 13, 8.5, "Satellite view (Esri imagery)"));
+            }
+
+            y = imageY - 28;
+        }
+
+        private static void DrawImage(List<string> lines, string imageKey, ReportLogo image, double x, double y, double maxWidth, double maxHeight)
+        {
+            DrawImageFit(lines, $"Img_{imageKey}", image, x, y, maxWidth, maxHeight);
+        }
+
+        private static void DrawImageFit(List<string> lines, string resourceName, ReportLogo image, double x, double y, double maxWidth, double maxHeight)
+        {
+            var width = maxWidth;
+            var height = width * image.Height / Math.Max(image.Width, 1);
+
+            if (height > maxHeight)
+            {
+                height = maxHeight;
+                width = height * image.Width / Math.Max(image.Height, 1);
+            }
+
+            var drawX = x + ((maxWidth - width) / 2);
+            var drawY = y + ((maxHeight - height) / 2);
+            lines.Add($"q {Fmt(width)} 0 0 {Fmt(height)} {Fmt(drawX)} {Fmt(drawY)} cm /{resourceName} Do Q");
         }
 
         private static void DrawBarChart(List<string> lines, BarChartData chart, double x, double y, double width, double height)
@@ -1577,11 +2460,12 @@ namespace SignalTracker.Controllers
             var rowHeight = size + 10;
             var tableWidth = PageWidth - (Margin * 2);
             var colWidth = tableWidth / headers.Count;
+            var rightAlignedColumns = GetRightAlignedColumns(headers, rows);
             lines.Add(FillColor(226, 232, 240));
             lines.Add(Rect(x, y - 6, tableWidth, rowHeight, true));
             lines.Add(FillColor(15, 23, 42));
             for (var i = 0; i < headers.Count; i++)
-                lines.Add(Text(x + (i * colWidth) + 5, y, size, Truncate(headers[i], 18)));
+                lines.Add(TableText(x + (i * colWidth), colWidth, y, size, Truncate(headers[i], 18), rightAlignedColumns.Contains(i)));
 
             y -= rowHeight;
             foreach (var row in rows)
@@ -1590,7 +2474,7 @@ namespace SignalTracker.Controllers
                 lines.Add($"{Fmt(x)} {Fmt(y - 7)} m {Fmt(x + tableWidth)} {Fmt(y - 7)} l S");
                 lines.Add(FillColor(30, 41, 59));
                 for (var i = 0; i < headers.Count && i < row.Count; i++)
-                    lines.Add(Text(x + (i * colWidth) + 5, y, size - 1, Truncate(row[i], 22)));
+                    lines.Add(TableText(x + (i * colWidth), colWidth, y, size - 1, Truncate(row[i], 22), rightAlignedColumns.Contains(i)));
                 y -= rowHeight;
                 if (y < 70) break;
             }
@@ -1618,33 +2502,47 @@ namespace SignalTracker.Controllers
                 ("PUSCH TX", MetricStats(report.Rows.Select(x => ParseNumber(x.PuschTx))), "dBm")
             };
 
-            return metrics.Select(x => new List<string>
-            {
-                x.Name,
-                FormatStat(x.Stats.Average, x.Stats.Count, x.Unit),
-                FormatStat(x.Stats.Min, x.Stats.Count, x.Unit),
-                FormatStat(x.Stats.Max, x.Stats.Count, x.Unit),
-                x.Stats.Count.ToString("N0", CultureInfo.InvariantCulture)
-            }).ToList();
+            var rows = metrics
+                .Where(x => x.Stats.Count > 0)
+                .Select(x => new List<string>
+                {
+                    x.Name,
+                    FormatStat(x.Stats.Average, x.Stats.Count, x.Unit),
+                    FormatStat(x.Stats.Min, x.Stats.Count, x.Unit),
+                    FormatStat(x.Stats.Max, x.Stats.Count, x.Unit),
+                    x.Stats.Count.ToString("N0", CultureInfo.InvariantCulture)
+                })
+                .ToList();
+
+            var earfcnValues = UnifiedMapReportEarfcnHelper.DistinctValues(report.Rows);
+            if (earfcnValues.Count > 0)
+                rows.Add(new List<string> { "EARFCN", "N/A", UnifiedMapReportEarfcnHelper.FormatValues(earfcnValues), "N/A", UnifiedMapReportEarfcnHelper.CountSamples(report.Rows).ToString("N0", CultureInfo.InvariantCulture) });
+
+            return rows;
         }
 
         private static List<List<string>> BuildQualityRows(UnifiedMapReport report)
         {
-            return new List<List<string>>
+            var metrics = new List<(string Metric, MetricSummary Stats, string Unit, string Threshold, int PoorCount)>
             {
-                QualityRow("RSRP", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Rsrp))), "dBm", report.Rows.Count(x => x.Rsrp.HasValue && x.Rsrp.Value < -105)),
-                QualityRow("RSRQ", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Rsrq))), "dB", report.Rows.Count(x => x.Rsrq.HasValue && x.Rsrq.Value < -14)),
-                QualityRow("SINR", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Sinr))), "dB", report.Rows.Count(x => x.Sinr.HasValue && x.Sinr.Value < 5)),
-                QualityRow("MOS", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Mos))), "", report.Rows.Count(x => x.Mos.HasValue && x.Mos.Value < 3)),
-                QualityRow("LTE BLER", MetricStats(report.Rows.Select(x => ParseNumber(x.Bler))), "%", report.Rows.Count(x => ParseNumber(x.Bler) > 10)),
-                QualityRow("VoLTE Call", MetricStats(report.Rows.Select(x => (double?)x.VolteCall)), "", report.Rows.Count(x => x.VolteCall < 1)), // Reverted
-                QualityRow("PUSCH TX", MetricStats(report.Rows.Select(x => ParseNumber(x.PuschTx))), "dBm", report.Rows.Count(x => ParseNumber(x.PuschTx) > 10))
+                ("RSRP", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Rsrp))), "dBm", $"< {PoorRsrpLimit:0.#} dBm", report.Rows.Count(x => x.Rsrp.HasValue && x.Rsrp.Value < PoorRsrpLimit)),
+                ("RSRQ", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Rsrq))), "dB", $"< {PoorRsrqLimit:0.#} dB", report.Rows.Count(x => x.Rsrq.HasValue && x.Rsrq.Value < PoorRsrqLimit)),
+                ("SINR", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Sinr))), "dB", "< 5 dB", report.Rows.Count(x => x.Sinr.HasValue && x.Sinr.Value < 5)),
+                ("MOS", MetricStats(report.Rows.Select(x => ToNullableDouble(x.Mos))), "", "< 3", report.Rows.Count(x => x.Mos.HasValue && x.Mos.Value < 3)),
+                ("LTE BLER", MetricStats(report.Rows.Select(x => ParseNumber(x.Bler))), "%", "> 10%", report.Rows.Count(x => ParseNumber(x.Bler) > 10)),
+                ("VoLTE Call", MetricStats(report.Rows.Select(x => (double?)x.VolteCall)), "", "< 1", report.Rows.Count(x => x.VolteCall.HasValue && x.VolteCall.Value < 1)),
+                ("PUSCH TX", MetricStats(report.Rows.Select(x => ParseNumber(x.PuschTx))), "dBm", "> 10 dBm", report.Rows.Count(x => ParseNumber(x.PuschTx) > 10))
             };
+
+            return metrics
+                .Where(x => x.Stats.Count > 0)
+                .Select(x => QualityRow(x.Metric, x.Stats, x.Unit, x.Threshold, x.PoorCount))
+                .ToList();
         }
 
-        private static List<string> QualityRow(string metric, MetricSummary stats, string unit, int poorCount)
+        private static List<string> QualityRow(string metric, MetricSummary stats, string unit, string threshold, int poorCount)
         {
-            return new List<string> { metric, FormatStat(stats.Average, stats.Count, unit), poorCount.ToString("N0", CultureInfo.InvariantCulture) };
+            return new List<string> { metric, FormatStat(stats.Average, stats.Count, unit), threshold, poorCount.ToString("N0", CultureInfo.InvariantCulture) };
         }
 
         private static List<List<string>> BuildSpeedRows(UnifiedMapReport report)
@@ -1804,6 +2702,75 @@ namespace SignalTracker.Controllers
         private static string Text(double x, double y, double size, string value)
         {
             return $"BT /F1 {Fmt(size)} Tf {Fmt(x)} {Fmt(y)} Td {PdfText(value)} Tj ET";
+        }
+
+        private static string TextCenter(double centerX, double y, double size, string value)
+        {
+            return Text(centerX - (EstimateTextWidth(value, size) / 2), y, size, value);
+        }
+
+        private static string TextRight(double rightX, double y, double size, string value)
+        {
+            return Text(rightX - EstimateTextWidth(value, size), y, size, value);
+        }
+
+        private static string TableText(double cellX, double cellWidth, double y, double size, string value, bool rightAlign)
+        {
+            const double cellPadding = 5;
+            return rightAlign
+                ? TextRight(cellX + cellWidth - cellPadding, y, size, value)
+                : Text(cellX + cellPadding, y, size, value);
+        }
+
+        private static HashSet<int> GetRightAlignedColumns(IReadOnlyList<string> headers, IReadOnlyList<List<string>> rows)
+        {
+            var result = new HashSet<int>();
+            for (var i = 1; i < headers.Count; i++)
+            {
+                var header = headers[i];
+                var hasNumericHeader = Regex.IsMatch(header, @"average|minimum|maximum|samples|share|threshold|poor|slow", RegexOptions.IgnoreCase);
+                var hasNumericValues = rows.Any(row => row.Count > i && LooksNumeric(row[i]));
+                if (hasNumericHeader || hasNumericValues)
+                    result.Add(i);
+            }
+
+            return result;
+        }
+
+        private static bool LooksNumeric(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return false;
+
+            var text = value.Trim()
+                .Replace(",", "", StringComparison.Ordinal)
+                .Replace("%", "", StringComparison.Ordinal);
+
+            if (text.StartsWith("< ", StringComparison.Ordinal) || text.StartsWith("> ", StringComparison.Ordinal))
+                text = text[2..].Trim();
+
+            var firstPart = Regex.Split(text, @"\s+").FirstOrDefault() ?? "";
+            return double.TryParse(firstPart, NumberStyles.Any, CultureInfo.InvariantCulture, out _);
+        }
+
+        private static double EstimateTextWidth(string? value, double size)
+        {
+            if (string.IsNullOrEmpty(value)) return 0;
+
+            var width = 0.0;
+            foreach (var ch in value)
+            {
+                width += ch switch
+                {
+                    ' ' => 0.28,
+                    'i' or 'l' or 'I' or '.' or ',' or ':' or ';' or '\'' => 0.25,
+                    'm' or 'w' or 'M' or 'W' => 0.82,
+                    >= '0' and <= '9' => 0.56,
+                    >= 'A' and <= 'Z' => 0.64,
+                    _ => 0.52
+                };
+            }
+
+            return width * size;
         }
 
         private static string Rect(double x, double y, double width, double height, bool fill)
