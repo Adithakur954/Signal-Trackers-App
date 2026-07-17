@@ -677,6 +677,17 @@ namespace SignalTracker.Controllers
             return Ok(new { Status = 1, Data = project });
         }
 
+        [HttpGet("GetThresholds")]
+        public async Task<IActionResult> GetThresholds()
+        {
+            var authResult = EnsureAuthorized();
+            if (authResult is not null) return authResult;
+
+            var rows = await _pythonBridgeService.GetThresoldsAsync(HttpContext.RequestAborted);
+
+            return Ok(new { Status = 1, Count = rows.Count, Data = rows });
+        }
+
         [HttpGet("GetProjectRegions")]
         public async Task<IActionResult> GetProjectRegions([FromQuery] long projectId)
         {

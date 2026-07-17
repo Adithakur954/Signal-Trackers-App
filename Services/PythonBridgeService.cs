@@ -2369,6 +2369,26 @@ namespace SignalTracker.Services
                 .FirstOrDefaultAsync(p => p.id == projectId, cancellationToken);
         }
 
+        public async Task<List<Dictionary<string, object?>>> GetThresoldsAsync(
+            CancellationToken cancellationToken = default
+        )
+        {
+            var conn = _db.Database.GetDbConnection();
+            if (conn.State != ConnectionState.Open)
+            {
+                await conn.OpenAsync(cancellationToken);
+            }
+
+            await using var command = conn.CreateCommand();
+            command.CommandText = @"
+                SELECT *
+                FROM thresholds
+                ORDER BY id;";
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            return await PythonBridgeDbTool.ReadRowsAsync(reader, cancellationToken);
+        }
+
         public async Task<List<Dictionary<string, object?>>> GetProjectRegionsAsync(
             long projectId,
             CancellationToken cancellationToken = default
