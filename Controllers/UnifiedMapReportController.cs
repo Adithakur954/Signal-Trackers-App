@@ -62,7 +62,8 @@ namespace SignalTracker.Controllers
                 .ToList();
 
             var thresholds = ReportThresholdConfig.Hardcoded();
-            var logo = LoadCompanyLogo();
+            var companyLogo = LoadCompanyLogo();
+            var productLogo = LoadProductLogo();
             var primarySessionId = sessionIds.FirstOrDefault();
 
             var rowsTask = QueryReportRowsAsync(request, sessionIdInts);
@@ -82,7 +83,8 @@ namespace SignalTracker.Controllers
                 sessionIds,
                 rows,
                 thresholds,
-                logo);
+                companyLogo,
+                productLogo);
                 
             report.MapImages = mapImages;
 
@@ -186,7 +188,15 @@ namespace SignalTracker.Controllers
             return ReportImageHelper.LoadCompanyLogo(_env);
         }
 
-        private async Task<List<UnifiedMapReportRow>> QueryReportRowsAsync(UnifiedMapPdfRequest request, List<int> sessionIds)
+        private ReportLogo? LoadProductLogo()
+        {
+            return ReportImageHelper.LoadProductLogo(_env);
+        }
+
+        private async Task<List<UnifiedMapReportRow>> QueryReportRowsAsync(
+            UnifiedMapPdfRequest request,
+            List<int> sessionIds,
+            bool applyProjectPolygon = true)
         {
             if (sessionIds.Count == 0)
                 return new List<UnifiedMapReportRow>();
@@ -202,7 +212,7 @@ namespace SignalTracker.Controllers
                 await conn.OpenAsync(HttpContext.RequestAborted);
 
             await using var command = conn.CreateCommand();
-            var (whereClause, parameters) = await BuildReportSqlWhereAsync(request, sessionIds, command);
+            var (whereClause, parameters) = await BuildReportSqlWhereAsync(request, sessionIds, command, applyProjectPolygon);
             command.CommandText = $@"
                 SELECT
                     id, session_id, timestamp, lat, lon, network,
@@ -225,40 +235,45 @@ namespace SignalTracker.Controllers
             AddParam(command, "@offset", offset);
 
             var rows = new List<UnifiedMapReportRow>();
-            await using var reader = await command.ExecuteReaderAsync(HttpContext.RequestAborted);
-            while (await reader.ReadAsync(HttpContext.RequestAborted))
+            await using (var reader = await command.ExecuteReaderAsync(HttpContext.RequestAborted))
             {
-                var primaryCellInfo = ReadString(reader, "primary_cell_info_1");
-                var earfcnValues = ExtractEarfcnValues(ReadString(reader, "earfcn"), primaryCellInfo);
-
-                rows.Add(new UnifiedMapReportRow
+                while (await reader.ReadAsync(HttpContext.RequestAborted))
                 {
-                    Id = ReadInt(reader, "id") ?? 0,
-                    SessionId = ReadInt(reader, "session_id"),
-                    Timestamp = ReadDateTime(reader, "timestamp"),
-                    Lat = ReadFloat(reader, "lat"),
-                    Lon = ReadFloat(reader, "lon"),
-                    Network = ReadString(reader, "network"),
-                    Provider = CleanProvider(ReadString(reader, "provider_name")),
-                    Band = ReadString(reader, "band"),
-                    Pci = ReadString(reader, "pci"),
-                    Rssi = ReadFloat(reader, "rssi"),
-                    Rsrp = ClampKpi(ReadFloat(reader, "rsrp"), -140, -44),
-                    Rsrq = ClampKpi(ReadFloat(reader, "rsrq"), -34, 3),
-                    Sinr = ClampKpi(ReadFloat(reader, "sinr"), -23, 40),
-                    Earfcn = earfcnValues.Count > 0 ? earfcnValues[0] : null,
-                    EarfcnValues = earfcnValues,
-                    Bler = ReadString(reader, "bler"), // Kept as string 
-                    VolteCall = ReadInt(reader,"volte_call"), // Reverted to int?
-                    DlTpt = ReadString(reader, "dl_tpt"),
-                    NodebId = ReadString(reader, "nodeb_id"),
-                    UlTpt = ReadString(reader, "ul_tpt"),
-                    Apps = ReadString(reader, "apps"),
-                    IndoorOutdoor = ReadString(reader, "indoor_outdoor"),
-                    CellId = ReadString(reader, "cell_id"),
-                    PuschTx = ExtractPuschTx(primaryCellInfo)
-                });
+                    var primaryCellInfo = ReadString(reader, "primary_cell_info_1");
+                    var earfcnValues = ExtractEarfcnValues(ReadString(reader, "earfcn"), primaryCellInfo);
+
+                    rows.Add(new UnifiedMapReportRow
+                    {
+                        Id = ReadInt(reader, "id") ?? 0,
+                        SessionId = ReadInt(reader, "session_id"),
+                        Timestamp = ReadDateTime(reader, "timestamp"),
+                        Lat = ReadFloat(reader, "lat"),
+                        Lon = ReadFloat(reader, "lon"),
+                        Network = ReadString(reader, "network"),
+                        Provider = CleanProvider(ReadString(reader, "provider_name")),
+                        Band = ReadString(reader, "band"),
+                        Pci = ReadString(reader, "pci"),
+                        Rssi = ReadFloat(reader, "rssi"),
+                        Rsrp = ClampKpi(ReadFloat(reader, "rsrp"), -140, -44),
+                        Rsrq = ClampKpi(ReadFloat(reader, "rsrq"), -34, 3),
+                        Sinr = ClampKpi(ReadFloat(reader, "sinr"), -23, 40),
+                        Earfcn = earfcnValues.Count > 0 ? earfcnValues[0] : null,
+                        EarfcnValues = earfcnValues,
+                        Bler = ReadString(reader, "bler"), // Kept as string 
+                        VolteCall = ReadInt(reader,"volte_call"), // Reverted to int?
+                        DlTpt = ReadString(reader, "dl_tpt"),
+                        NodebId = ReadString(reader, "nodeb_id"),
+                        UlTpt = ReadString(reader, "ul_tpt"),
+                        Apps = ReadString(reader, "apps"),
+                        IndoorOutdoor = ReadString(reader, "indoor_outdoor"),
+                        CellId = ReadString(reader, "cell_id"),
+                        PuschTx = ExtractPuschTx(primaryCellInfo)
+                    });
+                }
             }
+
+            if (rows.Count == 0 && applyProjectPolygon && request.ProjectId > 0)
+                return await QueryReportRowsAsync(request, sessionIds, applyProjectPolygon: false);
 
             return rows;
         }
@@ -266,7 +281,8 @@ namespace SignalTracker.Controllers
         private async Task<(string Clause, List<DbParameter> Parameters)> BuildReportSqlWhereAsync(
             UnifiedMapPdfRequest request,
             List<int> sessionIds,
-            DbCommand command)
+            DbCommand command,
+            bool applyProjectPolygon)
         {
             var clauses = new List<string>();
             var parameters = new List<DbParameter>();
@@ -280,8 +296,11 @@ namespace SignalTracker.Controllers
             }
 
             clauses.Add(idParams.Count > 0 ? $"session_id IN ({string.Join(",", idParams)})" : "1 = 0");
-            clauses.Add("COALESCE(NULLIF(TRIM(m_alpha_short), ''), NULLIF(TRIM(m_alpha_long), '')) IS NOT NULL");
-            clauses.Add("NULLIF(TRIM(band), '') IS NOT NULL");
+            clauses.Add("primary_cell_info_1 IS NOT NULL AND TRIM(primary_cell_info_1) <> ''");
+            clauses.Add(@"(
+                NULLIF(TRIM(band), '') IS NOT NULL
+                OR UPPER(TRIM(COALESCE(network, ''))) LIKE '%5G%'
+            )");
 
             var provider = request.Provider?.Trim();
             if (!string.IsNullOrWhiteSpace(provider))
@@ -349,12 +368,15 @@ namespace SignalTracker.Controllers
                 parameters.Add(CreateParam(command, "@to", request.EndDate.Value.AddDays(1)));
             }
 
-            var projectPolygonWkt = await ResolveProjectFilterWktAsync(request.ProjectId);
-            if (!string.IsNullOrWhiteSpace(projectPolygonWkt))
+            if (applyProjectPolygon)
             {
-                clauses.Add("lat IS NOT NULL AND lon IS NOT NULL");
-                clauses.Add("ST_Contains(ST_GeomFromText(@projectPolygonWkt, 4326), ST_SRID(POINT(lon, lat), 4326))");
-                parameters.Add(CreateParam(command, "@projectPolygonWkt", projectPolygonWkt));
+                var projectPolygonWkt = await ResolveProjectFilterWktAsync(request.ProjectId);
+                if (!string.IsNullOrWhiteSpace(projectPolygonWkt))
+                {
+                    clauses.Add("lat IS NOT NULL AND lon IS NOT NULL");
+                    clauses.Add("ST_Contains(ST_GeomFromText(@projectPolygonWkt, 4326), ST_SRID(POINT(lon, lat), 4326))");
+                    parameters.Add(CreateParam(command, "@projectPolygonWkt", projectPolygonWkt));
+                }
             }
 
             return (string.Join(" AND ", clauses), parameters);
@@ -564,6 +586,8 @@ namespace SignalTracker.Controllers
     {
         public string Title { get; set; } = "Unified Map Detail Report";
         public ReportLogo? Logo { get; set; }
+        public ReportLogo? CompanyLogo { get; set; }
+        public ReportLogo? ProductLogo { get; set; }
         public int ProjectId { get; set; }
         public string ProjectName { get; set; } = "";
         public string GeneratedBy { get; set; } = "";
@@ -600,6 +624,28 @@ namespace SignalTracker.Controllers
                 Path.Combine(env.ContentRootPath, "..", "StraceExeFron", "src", "assets", "vinfocom.png")
             };
 
+            return LoadLogoFromCandidates(candidates);
+        }
+
+        public static ReportLogo? LoadProductLogo(IWebHostEnvironment env)
+        {
+            var candidates = new[]
+            {
+                Path.Combine(env.ContentRootPath, "wwwroot", "stracer-logo.jpeg"),
+                Path.Combine(env.ContentRootPath, "wwwroot", "stracer-logo.jpg"),
+                Path.Combine(env.ContentRootPath, "wwwroot", "stracer-logo.png"),
+                Path.Combine(env.ContentRootPath, "wwwroot", "favicon.svg"),
+                Path.Combine(env.ContentRootPath, "wwwroot", "favicon.png"),
+                Path.Combine(env.ContentRootPath, "..", "StraceExeFron", "public", "favicon.svg"),
+                Path.Combine(env.ContentRootPath, "..", "StraceExeFron", "public", "favicon.png"),
+                Path.Combine(env.ContentRootPath, "..", "StraceExeFron", "src", "assets", "stracer-logo.png")
+            };
+
+            return LoadLogoFromCandidates(candidates) ?? CreateDefaultStracerLogo();
+        }
+
+        private static ReportLogo? LoadLogoFromCandidates(IEnumerable<string> candidates)
+        {
             foreach (var path in candidates)
             {
                 try
@@ -607,8 +653,7 @@ namespace SignalTracker.Controllers
                     var fullPath = Path.GetFullPath(path);
                     if (!System.IO.File.Exists(fullPath)) continue;
 
-                    var bytes = System.IO.File.ReadAllBytes(fullPath);
-                    var logo = PrepareLogo(bytes);
+                    var logo = PrepareLogo(fullPath);
                     if (logo != null) return logo;
                 }
                 catch
@@ -618,6 +663,17 @@ namespace SignalTracker.Controllers
             }
 
             return null;
+        }
+
+        private static ReportLogo? PrepareLogo(string path)
+        {
+            if (Path.GetExtension(path).Equals(".svg", StringComparison.OrdinalIgnoreCase))
+            {
+                var svg = System.IO.File.ReadAllText(path);
+                return PrepareSimpleSvgLogo(svg);
+            }
+
+            return PrepareLogo(System.IO.File.ReadAllBytes(path));
         }
 
         private static ReportLogo? PrepareLogo(byte[] bytes)
@@ -650,6 +706,201 @@ namespace SignalTracker.Controllers
             {
                 var (width, height) = UnifiedMapRawPdfBuilder.GetJpegDimensions(bytes);
                 return width > 0 && height > 0 ? new ReportLogo(bytes, width, height) : null;
+            }
+        }
+
+        private static ReportLogo? CreateDefaultStracerLogo()
+        {
+            const string svg = """
+                <svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" fill="none">
+                  <circle cx="256" cy="220" r="165" fill="#1E4E8C"/>
+                  <circle cx="256" cy="220" r="140" fill="#1F6FAE"/>
+                  <circle cx="256" cy="220" r="115" fill="#2798C4"/>
+                  <circle cx="256" cy="220" r="90" fill="#34B1CE"/>
+                  <circle cx="256" cy="220" r="65" fill="#57C6D9"/>
+                  <circle cx="256" cy="220" r="14" fill="#1E4E8C"/>
+                  <path d="M256 280 L115 592" stroke="#57C6D9" stroke-width="28" stroke-linecap="round"/>
+                  <path d="M256 280 L407 592" stroke="#57C6D9" stroke-width="28" stroke-linecap="round"/>
+                  <path d="M175 468 L304 380" stroke="#57C6D9" stroke-width="26" stroke-linecap="round"/>
+                  <path d="M304 380 L230 350" stroke="#57C6D9" stroke-width="26" stroke-linecap="round"/>
+                </svg>
+                """;
+
+            return PrepareSimpleSvgLogo(svg);
+        }
+
+        private static ReportLogo? PrepareSimpleSvgLogo(string svg)
+        {
+            try
+            {
+                var viewBox = ParseViewBox(svg);
+                const int size = 320;
+                using var image = new Image<Rgba32>(size, size);
+                FillImage(image, PdfBackground);
+
+                foreach (Match match in Regex.Matches(svg, @"<circle\b[^>]*>", RegexOptions.IgnoreCase))
+                {
+                    var tag = match.Value;
+                    var cx = ReadSvgDouble(tag, "cx");
+                    var cy = ReadSvgDouble(tag, "cy");
+                    var r = ReadSvgDouble(tag, "r");
+                    var fill = ReadSvgColor(tag, "fill");
+                    if (!cx.HasValue || !cy.HasValue || !r.HasValue || fill == null) continue;
+
+                    var (x, y) = MapSvgPoint(cx.Value, cy.Value, viewBox, size);
+                    DrawFilledCircle(image, x, y, r.Value * viewBox.Scale, fill.Value);
+                }
+
+                foreach (Match match in Regex.Matches(svg, @"<path\b[^>]*>", RegexOptions.IgnoreCase))
+                {
+                    var tag = match.Value;
+                    var stroke = ReadSvgColor(tag, "stroke");
+                    var strokeWidth = ReadSvgDouble(tag, "stroke-width") ?? 1;
+                    var d = ReadSvgString(tag, "d");
+                    if (stroke == null || string.IsNullOrWhiteSpace(d)) continue;
+
+                    var values = Regex.Matches(d, @"-?\d+(?:\.\d+)?")
+                        .Select(x => double.Parse(x.Value, CultureInfo.InvariantCulture))
+                        .ToList();
+
+                    for (var i = 0; i + 3 < values.Count; i += 2)
+                    {
+                        var (x1, y1) = MapSvgPoint(values[i], values[i + 1], viewBox, size);
+                        var (x2, y2) = MapSvgPoint(values[i + 2], values[i + 3], viewBox, size);
+                        DrawStrokedLine(image, x1, y1, x2, y2, strokeWidth * viewBox.Scale, stroke.Value);
+                    }
+                }
+
+                using var ms = new MemoryStream();
+                image.Save(ms, new JpegEncoder { Quality = 95 });
+                return new ReportLogo(ms.ToArray(), image.Width, image.Height);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static (double MinX, double MinY, double Width, double Height, double Scale, double OffsetX, double OffsetY) ParseViewBox(string svg)
+        {
+            const int targetSize = 320;
+            var match = Regex.Match(svg, @"viewBox\s*=\s*[""']\s*(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)", RegexOptions.IgnoreCase);
+            var minX = match.Success ? double.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture) : 0;
+            var minY = match.Success ? double.Parse(match.Groups[2].Value, CultureInfo.InvariantCulture) : 0;
+            var width = match.Success ? double.Parse(match.Groups[3].Value, CultureInfo.InvariantCulture) : 512;
+            var height = match.Success ? double.Parse(match.Groups[4].Value, CultureInfo.InvariantCulture) : 512;
+            var scale = Math.Min(targetSize / width, targetSize / height) * 0.88;
+            var offsetX = (targetSize - (width * scale)) / 2;
+            var offsetY = (targetSize - (height * scale)) / 2;
+            return (minX, minY, width, height, scale, offsetX, offsetY);
+        }
+
+        private static (double X, double Y) MapSvgPoint(
+            double x,
+            double y,
+            (double MinX, double MinY, double Width, double Height, double Scale, double OffsetX, double OffsetY) viewBox,
+            int targetSize)
+        {
+            return (
+                ((x - viewBox.MinX) * viewBox.Scale) + viewBox.OffsetX,
+                ((y - viewBox.MinY) * viewBox.Scale) + viewBox.OffsetY);
+        }
+
+        private static double? ReadSvgDouble(string tag, string name)
+        {
+            var value = ReadSvgString(tag, name);
+            return double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)
+                ? parsed
+                : null;
+        }
+
+        private static string? ReadSvgString(string tag, string name)
+        {
+            var match = Regex.Match(tag, $@"\b{Regex.Escape(name)}\s*=\s*[""']([^""']+)[""']", RegexOptions.IgnoreCase);
+            return match.Success ? match.Groups[1].Value : null;
+        }
+
+        private static Rgba32? ReadSvgColor(string tag, string name)
+        {
+            var value = ReadSvgString(tag, name);
+            if (string.IsNullOrWhiteSpace(value) || value.Equals("none", StringComparison.OrdinalIgnoreCase))
+                return null;
+
+            var hex = value.Trim().TrimStart('#');
+            if (hex.Length == 3)
+                hex = new string(new[] { hex[0], hex[0], hex[1], hex[1], hex[2], hex[2] });
+
+            return hex.Length == 6 && int.TryParse(hex, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var color)
+                ? new Rgba32((byte)((color >> 16) & 0xFF), (byte)((color >> 8) & 0xFF), (byte)(color & 0xFF))
+                : null;
+        }
+
+        private static void FillImage(Image<Rgba32> image, Rgba32 color)
+        {
+            image.ProcessPixelRows(accessor =>
+            {
+                for (var y = 0; y < accessor.Height; y++)
+                {
+                    var row = accessor.GetRowSpan(y);
+                    for (var x = 0; x < row.Length; x++)
+                        row[x] = color;
+                }
+            });
+        }
+
+        private static void DrawFilledCircle(Image<Rgba32> image, double cx, double cy, double radius, Rgba32 color)
+        {
+            var minX = Math.Max(0, (int)Math.Floor(cx - radius));
+            var maxX = Math.Min(image.Width - 1, (int)Math.Ceiling(cx + radius));
+            var minY = Math.Max(0, (int)Math.Floor(cy - radius));
+            var maxY = Math.Min(image.Height - 1, (int)Math.Ceiling(cy + radius));
+            var radiusSquared = radius * radius;
+
+            for (var y = minY; y <= maxY; y++)
+            {
+                for (var x = minX; x <= maxX; x++)
+                {
+                    var dx = x + 0.5 - cx;
+                    var dy = y + 0.5 - cy;
+                    if ((dx * dx) + (dy * dy) <= radiusSquared)
+                        image[x, y] = color;
+                }
+            }
+        }
+
+        private static void DrawStrokedLine(Image<Rgba32> image, double x1, double y1, double x2, double y2, double strokeWidth, Rgba32 color)
+        {
+            var radius = Math.Max(1, strokeWidth / 2);
+            var minX = Math.Max(0, (int)Math.Floor(Math.Min(x1, x2) - radius));
+            var maxX = Math.Min(image.Width - 1, (int)Math.Ceiling(Math.Max(x1, x2) + radius));
+            var minY = Math.Max(0, (int)Math.Floor(Math.Min(y1, y2) - radius));
+            var maxY = Math.Min(image.Height - 1, (int)Math.Ceiling(Math.Max(y1, y2) + radius));
+            var dx = x2 - x1;
+            var dy = y2 - y1;
+            var lengthSquared = (dx * dx) + (dy * dy);
+            var radiusSquared = radius * radius;
+
+            if (lengthSquared <= 0)
+            {
+                DrawFilledCircle(image, x1, y1, radius, color);
+                return;
+            }
+
+            for (var y = minY; y <= maxY; y++)
+            {
+                for (var x = minX; x <= maxX; x++)
+                {
+                    var px = x + 0.5;
+                    var py = y + 0.5;
+                    var t = (((px - x1) * dx) + ((py - y1) * dy)) / lengthSquared;
+                    t = Math.Clamp(t, 0, 1);
+                    var closestX = x1 + (t * dx);
+                    var closestY = y1 + (t * dy);
+                    var distanceX = px - closestX;
+                    var distanceY = py - closestY;
+                    if ((distanceX * distanceX) + (distanceY * distanceY) <= radiusSquared)
+                        image[x, y] = color;
+                }
             }
         }
 
@@ -1001,14 +1252,17 @@ namespace SignalTracker.Controllers
             List<long> sessionIds,
             List<UnifiedMapReportRow> rows,
             ReportThresholdConfig thresholds,
-            ReportLogo? logo)
+            ReportLogo? companyLogo,
+            ReportLogo? productLogo = null)
         {
             var orderedRows = rows.OrderBy(x => x.Timestamp ?? DateTime.MinValue).ThenBy(x => x.Id).ToList();
 
             var report = new UnifiedMapReport
             {
                 Title = string.IsNullOrWhiteSpace(request.Title) ? "Drive Test Analytics Report" : request.Title.Trim(),
-                Logo = logo,
+                Logo = companyLogo,
+                CompanyLogo = companyLogo,
+                ProductLogo = productLogo,
                 ProjectId = request.ProjectId,
                 ProjectName = string.IsNullOrWhiteSpace(projectName) ? $"Project {request.ProjectId}" : projectName.Trim(),
                 GeneratedBy = request.GeneratedBy?.Trim() ?? "",
@@ -1768,6 +2022,13 @@ namespace SignalTracker.Controllers
         private static byte[] BuildCoverPage(UnifiedMapReport report)
         {
             var lines = PageBackground();
+            var companyLogo = report.CompanyLogo ?? report.Logo;
+            var productLogo = report.ProductLogo ?? report.Logo;
+            if (companyLogo != null)
+            {
+                DrawImageFit(lines, "CompanyLogo", companyLogo, Margin, 780, 118, 42);
+            }
+
             lines.Add(FillColor(15, 23, 42));
             lines.Add(TextCenter(PageWidth / 2, 520, 24, "Drive Test Report"));
             lines.Add(TextCenter(PageWidth / 2, 490, 13, report.ProjectName));
@@ -1775,9 +2036,9 @@ namespace SignalTracker.Controllers
             lines.Add(StrokeColor(37, 99, 235));
             lines.Add("2 w");
             lines.Add($"{Fmt(170)} {Fmt(475)} m {Fmt(426)} {Fmt(475)} l S");
-            if (report.Logo != null)
+            if (productLogo != null)
             {
-                DrawImageFit(lines, "Logo", report.Logo, (PageWidth - 130) / 2, 600, 130, 76);
+                DrawImageFit(lines, "ProductLogo", productLogo, (PageWidth - 130) / 2, 600, 130, 76);
             }
             lines.Add(FillColor(71, 85, 105));
         
@@ -2135,9 +2396,10 @@ namespace SignalTracker.Controllers
         {
             var lines = PageBackground();
             var headerTextX = Margin;
-            if (report.Logo != null)
+            var productLogo = report.ProductLogo ?? report.Logo;
+            if (productLogo != null)
             {
-                DrawImageFit(lines, "Logo", report.Logo, Margin, HeaderLogoBoxY, HeaderLogoBoxWidth, HeaderLogoBoxHeight);
+                DrawImageFit(lines, "ProductLogo", productLogo, Margin, HeaderLogoBoxY, HeaderLogoBoxWidth, HeaderLogoBoxHeight);
                 headerTextX = Margin + HeaderLogoBoxWidth + 14;
             }
 
@@ -2622,8 +2884,11 @@ namespace SignalTracker.Controllers
 
             int nextObjId = 4;
             var imageIds = new Dictionary<string, int>();
+            var companyLogo = report.CompanyLogo ?? report.Logo;
+            var productLogo = report.ProductLogo ?? report.Logo;
             
-            if (report.Logo != null) imageIds["Logo"] = nextObjId++;
+            if (companyLogo != null) imageIds["CompanyLogo"] = nextObjId++;
+            if (productLogo != null) imageIds["ProductLogo"] = nextObjId++;
             foreach (var key in report.MapImages.Keys) imageIds[$"Img_{key}"] = nextObjId++;
 
             var firstPageObjectId = nextObjId;
@@ -2650,11 +2915,18 @@ namespace SignalTracker.Controllers
             }
             var xObjectResources = xObjBuilder.ToString();
 
-            if (report.Logo != null)
+            if (companyLogo != null)
             {
-                WriteStreamObj(stream, offsets, imageIds["Logo"], 
-                    $"<< /Type /XObject /Subtype /Image /Width {report.Logo.Width} /Height {report.Logo.Height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length {report.Logo.Bytes.Length} >>", 
-                    report.Logo.Bytes);
+                WriteStreamObj(stream, offsets, imageIds["CompanyLogo"], 
+                    $"<< /Type /XObject /Subtype /Image /Width {companyLogo.Width} /Height {companyLogo.Height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length {companyLogo.Bytes.Length} >>", 
+                    companyLogo.Bytes);
+            }
+
+            if (productLogo != null)
+            {
+                WriteStreamObj(stream, offsets, imageIds["ProductLogo"], 
+                    $"<< /Type /XObject /Subtype /Image /Width {productLogo.Width} /Height {productLogo.Height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length {productLogo.Bytes.Length} >>", 
+                    productLogo.Bytes);
             }
 
             foreach (var kvp in report.MapImages)

@@ -35,6 +35,7 @@ namespace SignalTracker.Controllers
         //   GeneratedBy     -> optional
         //   ProjectName     -> optional (defaults to zip file name)
         //   SessionIdOverride -> optional, forces the session id used for image lookup
+        //   BandFilter/Bands -> optional, one or more selected bands; ALL/empty = no filter
         [HttpPost("GenerateFromZip")]
         [Consumes("multipart/form-data")]
         [RequestSizeLimit(200_000_000)]
@@ -66,34 +67,22 @@ namespace SignalTracker.Controllers
                 .ToList();
             Response.Headers["X-Available-Bands"] = string.Join(",", bandsPresent);
 
-            // Optional band filter: e.g. "B3" or "B3,B8" (comma/semicolon separated).
-            // "ALL" or empty means no filtering.
-            if (!string.IsNullOrWhiteSpace(request.BandFilter) &&
-                !request.BandFilter.Trim().Equals("ALL", StringComparison.OrdinalIgnoreCase))
+            var selectedBands = ResolveSelectedBands(request, Request.HasFormContentType ? Request.Form : null);
+            if (selectedBands.Count > 0)
             {
-                var wantedBands = request.BandFilter
-                    .Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries)
-                    .Select(b => b.Trim())
-                    .Where(b => b.Length > 0)
-                    .ToList();
+                rows = FilterRowsByBands(rows, selectedBands);
 
-                if (wantedBands.Count > 0)
-                {
-                    rows = rows
-                        .Where(r => wantedBands.Any(b =>
-                            string.Equals((r.Band ?? "").Trim(), b, StringComparison.OrdinalIgnoreCase)))
-                        .ToList();
-
-                    if (rows.Count == 0)
-                        return BadRequest(new
-                        {
-                            Message = $"No samples found for band(s): {request.BandFilter}. Check the band value (e.g. B3, B8, B40, n78)."
-                        });
-                }
+                if (rows.Count == 0)
+                    return BadRequest(new
+                    {
+                        Message = $"No samples found for band(s): {string.Join(", ", selectedBands)}. Check the band value (e.g. B3, B8, B40, n78).",
+                        AvailableBands = bandsPresent
+                    });
             }
 
             var thresholds = ExtractThresholdConfig(archive);
-            var logo = LoadCompanyLogo();
+            var companyLogo = LoadCompanyLogo();
+            var productLogo = LoadProductLogo();
 
             var sessionIds = sessionId > 0 ? new List<long> { sessionId } : new List<long>();
 
@@ -110,10 +99,9 @@ namespace SignalTracker.Controllers
                 ? Path.GetFileNameWithoutExtension(request.LogZip.FileName)
                 : request.ProjectName;
 
-            if (!string.IsNullOrWhiteSpace(request.BandFilter) &&
-                !request.BandFilter.Trim().Equals("ALL", StringComparison.OrdinalIgnoreCase))
+            if (selectedBands.Count > 0)
             {
-                projectName += $" (Band: {request.BandFilter.Trim()})";
+                projectName += $" ({(selectedBands.Count == 1 ? "Band" : "Bands")}: {string.Join(", ", selectedBands)})";
             }
 
             var report = UnifiedMapReportFactory.Create(
@@ -122,7 +110,8 @@ namespace SignalTracker.Controllers
                 sessionIds,
                 rows,
                 thresholds,
-                logo);
+                companyLogo,
+                productLogo);
 
             report.MapImages = mapImages;
 
@@ -197,6 +186,77 @@ namespace SignalTracker.Controllers
                 v.Equals("null", StringComparison.OrdinalIgnoreCase))
                 return null;
             return v;
+        }
+
+        private static List<string> ResolveSelectedBands(ZipReportUploadRequest request, IFormCollection? form)
+        {
+            var values = new List<string>();
+            AddRawBandValues(values, request.BandFilter);
+
+            if (request.Bands != null)
+            {
+                foreach (var band in request.Bands)
+                    AddRawBandValues(values, band);
+            }
+
+            if (form != null)
+            {
+                AddFormBandValues(values, form, "BandFilter");
+                AddFormBandValues(values, form, "BandFilters");
+                AddFormBandValues(values, form, "Bands");
+            }
+
+            return values
+                .Select(x => x.Trim())
+                .Where(x => x.Length > 0)
+                .Where(x => !x.Equals("ALL", StringComparison.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        private static void AddFormBandValues(List<string> values, IFormCollection form, string key)
+        {
+            if (!form.TryGetValue(key, out var formValues)) return;
+
+            foreach (var value in formValues)
+                AddRawBandValues(values, value);
+        }
+
+        private static void AddRawBandValues(List<string> values, string? raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return;
+
+            values.AddRange(raw
+                .Split(new[] { ',', ';', '|' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(x => x.Trim())
+                .Where(x => x.Length > 0));
+        }
+
+        private static List<UnifiedMapReportRow> FilterRowsByBands(
+            IEnumerable<UnifiedMapReportRow> rows,
+            IReadOnlyCollection<string> selectedBands)
+        {
+            var wanted = selectedBands
+                .Select(CanonicalBandKey)
+                .Where(x => x.Length > 0)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            return rows
+                .Where(row => wanted.Contains(CanonicalBandKey(row.Band)))
+                .ToList();
+        }
+
+        private static string CanonicalBandKey(string? value)
+        {
+            var text = NormalizeText(value);
+            if (text == null) return "";
+
+            var key = Regex.Replace(text, @"\s+", "", RegexOptions.CultureInvariant).ToUpperInvariant();
+            if (key.StartsWith("BAND", StringComparison.Ordinal))
+                key = "B" + key[4..];
+            if (Regex.IsMatch(key, @"^\d{1,3}$"))
+                key = "B" + key;
+            return key;
         }
 
         // POST api/UnifiedMapZipReport/DiscoverBands
@@ -705,6 +765,11 @@ namespace SignalTracker.Controllers
         {
             return ReportImageHelper.LoadCompanyLogo(_env);
         }
+
+        private ReportLogo? LoadProductLogo()
+        {
+            return ReportImageHelper.LoadProductLogo(_env);
+        }
     }
 
     public sealed class ZipBandDiscoveryRequest
@@ -723,5 +788,8 @@ namespace SignalTracker.Controllers
 
         // Optional: e.g. "B3" or "B3,B8". "ALL" or empty = no filter (default).
         public string? BandFilter { get; set; }
+
+        // Optional multi-select form binding: send Bands=B3&Bands=B8 or Bands=B3,B8.
+        public List<string>? Bands { get; set; }
     }
 }
