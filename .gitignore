@@ -48,3 +48,5 @@ Template-Files/python-runtime-v*-win-x64.zip
 .aider*
 
 Template-Files/python-runtime-1.4.0-win-x64.zip
+
+.verify-build/

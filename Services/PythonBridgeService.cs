@@ -722,10 +722,32 @@ namespace SignalTracker.Services
 
             await using var command = conn.CreateCommand();
             command.CommandText = @"
-                SELECT *
-                FROM site_prediction
-                WHERE tbl_project_id = @pid
-                ORDER BY id
+                SELECT
+                    sp.*,
+                    sp.cluster AS provider,
+                    sp.cluster AS operator_name,
+                    CONCAT(
+                        TRIM(CAST(sp.site AS CHAR)), '|',
+                        TRIM(CAST(sp.cell_id AS CHAR)), '|',
+                        TRIM(CAST(sp.sector AS CHAR)), '|',
+                        TRIM(CAST(sp.band AS CHAR)), '|',
+                        TRIM(CAST(sp.cluster AS CHAR))
+                    ) AS site_prediction_key,
+                    CONCAT(
+                        TRIM(CAST(sp.site AS CHAR)), '|',
+                        TRIM(CAST(sp.cell_id AS CHAR)), '|',
+                        TRIM(CAST(sp.sector AS CHAR)), '|',
+                        TRIM(CAST(sp.band AS CHAR)), '|',
+                        TRIM(CAST(sp.cluster AS CHAR))
+                    ) AS site_cell_sector_band_operator_key
+                FROM site_prediction sp
+                WHERE sp.tbl_project_id = @pid
+                  AND sp.site IS NOT NULL AND TRIM(CAST(sp.site AS CHAR)) <> ''
+                  AND sp.cell_id IS NOT NULL AND TRIM(CAST(sp.cell_id AS CHAR)) <> ''
+                  AND sp.sector IS NOT NULL AND TRIM(CAST(sp.sector AS CHAR)) <> ''
+                  AND sp.band IS NOT NULL AND TRIM(CAST(sp.band AS CHAR)) <> ''
+                  AND sp.cluster IS NOT NULL AND TRIM(CAST(sp.cluster AS CHAR)) <> ''
+                ORDER BY sp.id
                 LIMIT @lim OFFSET @off;";
 
             PythonBridgeDbTool.AddParam(command, "@pid", request.ProjectId);
@@ -836,7 +858,7 @@ namespace SignalTracker.Services
             var polygonIds = ParsePolygonIds(request.PolygonIds);
             var polygonFilter = BuildPolygonFilterClause(polygonIds, "latitude", "longitude");
             var polygonKey = polygonIds.Count > 0 ? string.Join("-", polygonIds) : "all";
-            var cacheKey = BuildCacheKey("lte_site_pred", request.ProjectId, operatorFilter ?? "all", polygonKey, limit, offset);
+            var cacheKey = BuildCacheKey("lte_site_pred_complete_identity_v2", request.ProjectId, operatorFilter ?? "all", polygonKey, limit, offset);
 
             return await GetCachedOrLoadRowsAsync(
                 cacheKey,
@@ -852,12 +874,34 @@ namespace SignalTracker.Services
 
                     await using var command = conn.CreateCommand();
                     command.CommandText = $@"
-                SELECT *
-                FROM site_prediction
-                WHERE tbl_project_id = @pid
-                {(hasOperatorFilter ? "AND LOWER(cluster) = LOWER(@operator)" : string.Empty)}
+                SELECT
+                    sp.*,
+                    sp.cluster AS provider,
+                    sp.cluster AS operator_name,
+                    CONCAT(
+                        TRIM(CAST(sp.site AS CHAR)), '|',
+                        TRIM(CAST(sp.cell_id AS CHAR)), '|',
+                        TRIM(CAST(sp.sector AS CHAR)), '|',
+                        TRIM(CAST(sp.band AS CHAR)), '|',
+                        TRIM(CAST(sp.cluster AS CHAR))
+                    ) AS site_prediction_key,
+                    CONCAT(
+                        TRIM(CAST(sp.site AS CHAR)), '|',
+                        TRIM(CAST(sp.cell_id AS CHAR)), '|',
+                        TRIM(CAST(sp.sector AS CHAR)), '|',
+                        TRIM(CAST(sp.band AS CHAR)), '|',
+                        TRIM(CAST(sp.cluster AS CHAR))
+                    ) AS site_cell_sector_band_operator_key
+                FROM site_prediction sp
+                WHERE sp.tbl_project_id = @pid
+                  AND sp.site IS NOT NULL AND TRIM(CAST(sp.site AS CHAR)) <> ''
+                  AND sp.cell_id IS NOT NULL AND TRIM(CAST(sp.cell_id AS CHAR)) <> ''
+                  AND sp.sector IS NOT NULL AND TRIM(CAST(sp.sector AS CHAR)) <> ''
+                  AND sp.band IS NOT NULL AND TRIM(CAST(sp.band AS CHAR)) <> ''
+                  AND sp.cluster IS NOT NULL AND TRIM(CAST(sp.cluster AS CHAR)) <> ''
+                {(hasOperatorFilter ? "AND LOWER(TRIM(CAST(sp.cluster AS CHAR))) = LOWER(TRIM(@operator))" : string.Empty)}
                 {polygonFilter}
-                ORDER BY id
+                ORDER BY sp.id
                 LIMIT @lim OFFSET @off;";
 
                     PythonBridgeDbTool.AddParam(command, "@pid", request.ProjectId);
@@ -1184,7 +1228,7 @@ namespace SignalTracker.Services
                 effectiveScenario = Convert.ToInt32(latestScenarioValue);
             }
 
-            var cacheKey = BuildCacheKey("site_pred_opt", projectId, normalizedOperator ?? "all", effectiveScenario, polygonKey, limit, offset);
+            var cacheKey = BuildCacheKey("site_pred_opt_complete_identity_v2", projectId, normalizedOperator ?? "all", effectiveScenario, polygonKey, limit, offset);
 
             return await GetCachedOrLoadRowsAsync(
                 cacheKey,
@@ -1200,13 +1244,35 @@ namespace SignalTracker.Services
 
                     await using var command = conn.CreateCommand();
                     command.CommandText = $@"
-                SELECT *
-                FROM site_prediction_optimized
-                WHERE tbl_project_id = @pid
-                AND scenario = @scenario
-                {(hasOperatorFilter ? "AND LOWER(TRIM(cluster)) = LOWER(TRIM(@operator))" : string.Empty)}
+                SELECT
+                    spo.*,
+                    spo.cluster AS provider,
+                    spo.cluster AS operator_name,
+                    CONCAT(
+                        TRIM(CAST(spo.site AS CHAR)), '|',
+                        TRIM(CAST(spo.cell_id AS CHAR)), '|',
+                        TRIM(CAST(spo.sector AS CHAR)), '|',
+                        TRIM(CAST(spo.band AS CHAR)), '|',
+                        TRIM(CAST(spo.cluster AS CHAR))
+                    ) AS site_prediction_key,
+                    CONCAT(
+                        TRIM(CAST(spo.site AS CHAR)), '|',
+                        TRIM(CAST(spo.cell_id AS CHAR)), '|',
+                        TRIM(CAST(spo.sector AS CHAR)), '|',
+                        TRIM(CAST(spo.band AS CHAR)), '|',
+                        TRIM(CAST(spo.cluster AS CHAR))
+                    ) AS site_cell_sector_band_operator_key
+                FROM site_prediction_optimized spo
+                WHERE spo.tbl_project_id = @pid
+                  AND spo.scenario = @scenario
+                  AND spo.site IS NOT NULL AND TRIM(CAST(spo.site AS CHAR)) <> ''
+                  AND spo.cell_id IS NOT NULL AND TRIM(CAST(spo.cell_id AS CHAR)) <> ''
+                  AND spo.sector IS NOT NULL AND TRIM(CAST(spo.sector AS CHAR)) <> ''
+                  AND spo.band IS NOT NULL AND TRIM(CAST(spo.band AS CHAR)) <> ''
+                  AND spo.cluster IS NOT NULL AND TRIM(CAST(spo.cluster AS CHAR)) <> ''
+                {(hasOperatorFilter ? "AND LOWER(TRIM(CAST(spo.cluster AS CHAR))) = LOWER(TRIM(@operator))" : string.Empty)}
                 {polygonFilter}
-                ORDER BY id
+                ORDER BY spo.id
                 LIMIT @lim OFFSET @off;";
 
                     PythonBridgeDbTool.AddParam(command, "@pid", projectId);

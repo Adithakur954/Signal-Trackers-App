@@ -8324,6 +8324,29 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             return null;
         }
 
+        private static string BuildSitePredictionIdentityKey(Dictionary<string, object?> row, string? provider)
+        {
+            static string Part(string? value) => value?.Trim() ?? string.Empty;
+
+            return string.Join("|", new[]
+            {
+                Part(ReadSitePredictionText(row, "site")),
+                Part(ReadSitePredictionText(row, "cell_id")),
+                Part(ReadSitePredictionText(row, "sector")),
+                Part(ReadSitePredictionText(row, "band")),
+                Part(provider)
+            });
+        }
+
+        private static bool HasCompleteSitePredictionIdentity(Dictionary<string, object?> row)
+        {
+            return !string.IsNullOrWhiteSpace(ReadSitePredictionText(row, "site"))
+                && !string.IsNullOrWhiteSpace(ReadSitePredictionText(row, "cell_id"))
+                && !string.IsNullOrWhiteSpace(ReadSitePredictionText(row, "sector"))
+                && !string.IsNullOrWhiteSpace(ReadSitePredictionText(row, "band"))
+                && !string.IsNullOrWhiteSpace(ReadSitePredictionText(row, "provider", "operator_name", "project_provider", "cluster"));
+        }
+
         private static void EnrichSitePredictionRow(Dictionary<string, object?> row)
         {
             var originalCluster = ReadSitePredictionText(row, "original_cluster");
@@ -8358,6 +8381,15 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 row["provider"] = rawCluster;
                 row["operator_name"] = rawCluster;
             }
+
+            var identityProvider =
+                ReadSitePredictionText(row, "provider")
+                ?? ReadSitePredictionText(row, "operator_name")
+                ?? projectProvider
+                ?? rawCluster;
+            var identityKey = BuildSitePredictionIdentityKey(row, identityProvider);
+            row["site_prediction_key"] = identityKey;
+            row["site_cell_sector_band_operator_key"] = identityKey;
         }
 
         private async Task EnsureSitePredictionOptimizedTableAsync(DbConnection conn)
@@ -9298,6 +9330,10 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                     row[r.GetName(i)] = await r.IsDBNullAsync(i) ? null : r.GetValue(i);
                 }
                 EnrichSitePredictionRow(row);
+                if (!HasCompleteSitePredictionIdentity(row))
+                {
+                    continue;
+                }
                 list.Add(row);
             }
 
@@ -9393,6 +9429,8 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 technology = ReadString(row, "Technology", "technology"),
                 provider = ReadString(row, "provider", "operator_name", "project_provider", "cluster"),
                 operatorName = ReadString(row, "operator_name", "provider", "project_provider", "cluster"),
+                sitePredictionKey = ReadString(row, "site_prediction_key", "site_cell_sector_band_operator_key"),
+                siteCellSectorBandOperatorKey = ReadString(row, "site_cell_sector_band_operator_key", "site_prediction_key"),
                 cellsize = ReadString(row, "cellsize", "cell_size", "cellSize"),
                 frequency = ReadString(row, "frequency"),
                 uplink_center_frequency = ReadString(row, "uplink_center_frequency", "uplink_frequency", "uplinkCenterFrequency", "uplinkFrequency"),
@@ -12555,12 +12593,14 @@ public async Task<IActionResult> GetSitePredictionBase(
     [FromQuery(Name = "cell_id")] string? cellId = null,
     [FromQuery(Name = "sector")] string? sector = null,
     [FromQuery(Name = "sector_id")] string? sectorId = null,
+    [FromQuery(Name = "band")] string? band = null,
     [FromQuery(Name = "polygon_ids")] string? polygonIdsCsv = null)
 {
     var trimmedNodeBId = string.IsNullOrWhiteSpace(nodeBId) ? null : nodeBId.Trim();
     var trimmedCellId = string.IsNullOrWhiteSpace(cellId) ? null : cellId.Trim();
     var trimmedSector = string.IsNullOrWhiteSpace(sector) ? null : sector.Trim();
     var trimmedSectorId = string.IsNullOrWhiteSpace(sectorId) ? null : sectorId.Trim();
+    var trimmedBand = string.IsNullOrWhiteSpace(band) ? null : band.Trim();
     var lookupSector = trimmedSectorId ?? trimmedSector;
     var polygonIds = projectId.HasValue ? ParsePolygonIds(polygonIdsCsv) : new List<int>();
     var polygonFilter = BuildPolygonFilterClause(polygonIds, "b.lat", "b.lon");
@@ -12700,6 +12740,15 @@ public async Task<IActionResult> GetSitePredictionBase(
                 break;
             }
         }
+        string? bandColumn = null;
+        foreach (var candidate in new[] { "band", "frequency_band", "frequency" })
+        {
+            if (baselineColumns.Contains(candidate))
+            {
+                bandColumn = candidate;
+                break;
+            }
+        }
 
         string Eq(string alias, string column, string paramName) =>
             $"CONVERT(COALESCE({alias}.`{column}`, '') USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(@{paramName} USING utf8mb4) COLLATE utf8mb4_unicode_ci";
@@ -12763,6 +12812,14 @@ public async Task<IActionResult> GetSitePredictionBase(
             }
         }
 
+        if (!string.IsNullOrWhiteSpace(trimmedBand) && !string.IsNullOrWhiteSpace(bandColumn))
+        {
+            // Co-located cells at the same site/sector (e.g. 900 vs 1800 MHz) share the same
+            // node_b_id/cell_id/sector lookup values, so band must be ANDed in whenever the
+            // caller knows which band was actually clicked to avoid returning a sibling cell's row.
+            andClauses.Add(Eq("b", bandColumn, "band_lookup"));
+        }
+
         if (lookupClauses.Count == 0)
         {
             var empty = new { Status = 1, Table = tableName, Count = 0, Data = Array.Empty<object>() };
@@ -12776,6 +12833,9 @@ public async Task<IActionResult> GetSitePredictionBase(
         var selectSector = !string.IsNullOrWhiteSpace(sectorColumn)
             ? $"b.`{sectorColumn}` AS sector_lookup"
             : "NULL AS sector_lookup";
+        var selectBand = !string.IsNullOrWhiteSpace(bandColumn)
+            ? $"b.`{bandColumn}` AS band"
+            : "NULL AS band";
 
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = $@"
@@ -12794,7 +12854,8 @@ SELECT
     b.operator AS operator_name,
     b.created_at,
     {(string.IsNullOrWhiteSpace(baselineCombinedColumn) ? "NULL" : $"b.`{baselineCombinedColumn}`")} AS node_b_cell_id,
-    {selectSector}
+    {selectSector},
+    {selectBand}
 FROM {tableName} b
 WHERE {string.Join(" AND ", whereParts)}
 {polygonFilter}
@@ -12807,6 +12868,7 @@ ORDER BY b.id DESC;";
         for (var i = 0; i < lookupCellIds.Count; i++) Add(cmd, $"@cell_id_{i}", lookupCellIds[i]);
         for (var i = 0; i < lookupNodeBCellIds.Count; i++) Add(cmd, $"@node_b_cell_id_{i}", lookupNodeBCellIds[i]);
         if (!string.IsNullOrWhiteSpace(lookupSector)) Add(cmd, "@sector_lookup", lookupSector);
+        if (!string.IsNullOrWhiteSpace(trimmedBand) && !string.IsNullOrWhiteSpace(bandColumn)) Add(cmd, "@band_lookup", trimmedBand);
 
         var items = new List<Dictionary<string, object?>>();
         await using var reader = await cmd.ExecuteReaderAsync();
@@ -12830,6 +12892,7 @@ ORDER BY b.id DESC;";
             CellIdLookupValues = lookupCellIds,
             NodeBCellIdLookupValues = lookupNodeBCellIds,
             SectorFiltered = lookupSector,
+            BandFiltered = trimmedBand,
             Total = items.Count,
             Count = items.Count,
             Data = items
@@ -12849,6 +12912,7 @@ public async Task<IActionResult> GetSitePredictionOptimised(
     [FromQuery(Name = "cell_id")] string? cellId = null,
     [FromQuery(Name = "sector")] string? sector = null,
     [FromQuery(Name = "sector_id")] string? sectorId = null,
+    [FromQuery(Name = "band")] string? band = null,
     [FromQuery(Name = "scenario")] int? scenario = null,
     [FromQuery(Name = "scenario_id")] int? scenarioId = null,
     [FromQuery(Name = "public_scenario_id")] int? publicScenarioId = null,
@@ -12859,6 +12923,7 @@ public async Task<IActionResult> GetSitePredictionOptimised(
     var trimmedCellId = string.IsNullOrWhiteSpace(cellId) ? null : cellId.Trim();
     var trimmedSector = string.IsNullOrWhiteSpace(sector) ? null : sector.Trim();
     var trimmedSectorId = string.IsNullOrWhiteSpace(sectorId) ? null : sectorId.Trim();
+    var trimmedBand = string.IsNullOrWhiteSpace(band) ? null : band.Trim();
     var lookupSector = trimmedSectorId ?? trimmedSector;
     var requestedScenario = scenario ?? scenarioId ?? publicScenarioId ?? sitePredictionScenarioId;
     var selectedScenario = requestedScenario.HasValue && requestedScenario.Value > 0
@@ -13024,6 +13089,26 @@ public async Task<IActionResult> GetSitePredictionOptimised(
             }
         }
 
+        string? optimizedBandColumn = null;
+        foreach (var candidate in new[] { "band", "frequency_band", "frequency" })
+        {
+            if (optimizedColumns.Contains(candidate))
+            {
+                optimizedBandColumn = candidate;
+                break;
+            }
+        }
+
+        string? baselineBandColumn = null;
+        foreach (var candidate in new[] { "band", "frequency_band", "frequency" })
+        {
+            if (baselineColumns.Contains(candidate))
+            {
+                baselineBandColumn = candidate;
+                break;
+            }
+        }
+
         string Eq(string alias, string column, string paramName) =>
             $"CONVERT(COALESCE({alias}.`{column}`, '') USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(@{paramName} USING utf8mb4) COLLATE utf8mb4_unicode_ci";
 
@@ -13035,7 +13120,7 @@ public async Task<IActionResult> GetSitePredictionOptimised(
             return $"CONVERT(COALESCE({alias}.`{column}`, '') USING utf8mb4) COLLATE utf8mb4_unicode_ci IN ({string.Join(", ", names.Select(name => $"CONVERT({name} USING utf8mb4) COLLATE utf8mb4_unicode_ci"))})";
         }
 
-        string BuildWhereClause(string alias, HashSet<string> columns, string? sectorColumn)
+        string BuildWhereClause(string alias, HashSet<string> columns, string? sectorColumn, string? bandColumn)
         {
             var andClauses = new List<string>();
             if (projectId.HasValue && columns.Contains("project_id"))
@@ -13090,6 +13175,14 @@ public async Task<IActionResult> GetSitePredictionOptimised(
                 }
             }
 
+            if (!string.IsNullOrWhiteSpace(trimmedBand) && !string.IsNullOrWhiteSpace(bandColumn))
+            {
+                // Co-located cells at the same site/sector (e.g. 900 vs 1800 MHz) share the same
+                // node_b_id/cell_id/sector lookup values, so band must be ANDed in whenever the
+                // caller knows which band was actually clicked to avoid returning a sibling cell's row.
+                andClauses.Add(Eq(alias, bandColumn, "band_lookup"));
+            }
+
             if (lookupClauses.Count == 0)
                 return "1=0";
 
@@ -13099,7 +13192,7 @@ public async Task<IActionResult> GetSitePredictionOptimised(
             return string.Join(" AND ", whereParts);
         }
 
-        var optimizedWhere = BuildWhereClause("o", optimizedColumns, optimizedSectorColumn);
+        var optimizedWhere = BuildWhereClause("o", optimizedColumns, optimizedSectorColumn, optimizedBandColumn);
         if (selectedScenario.HasValue)
         {
             string? scenarioClause = null;
@@ -13121,7 +13214,7 @@ public async Task<IActionResult> GetSitePredictionOptimised(
                 optimizedWhere = $"({optimizedWhere}) AND {scenarioClause}";
             }
         }
-        var baselineWhere = BuildWhereClause("b", baselineColumns, baselineSectorColumn);
+        var baselineWhere = BuildWhereClause("b", baselineColumns, baselineSectorColumn, baselineBandColumn);
 
         var optimizedSectorSelect = !string.IsNullOrWhiteSpace(optimizedSectorColumn)
             ? $"o.`{optimizedSectorColumn}` AS sector_lookup"
@@ -13129,16 +13222,23 @@ public async Task<IActionResult> GetSitePredictionOptimised(
         var baselineSectorSelect = !string.IsNullOrWhiteSpace(baselineSectorColumn)
             ? $"b.`{baselineSectorColumn}` AS sector_lookup"
             : "NULL AS sector_lookup";
+        var optimizedBandSelect = !string.IsNullOrWhiteSpace(optimizedBandColumn)
+            ? $"o.`{optimizedBandColumn}` AS band"
+            : "NULL AS band";
+        var baselineBandSelect = !string.IsNullOrWhiteSpace(baselineBandColumn)
+            ? $"b.`{baselineBandColumn}` AS band"
+            : "NULL AS band";
 
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = $@"
 WITH optimized_source AS (
-    SELECT 
+    SELECT
         o.id, o.project_id, o.job_id, o.lat, o.lon,
         o.pred_rsrp, o.pred_rsrq, o.pred_sinr,
         o.node_b_id, o.cell_id, o.operator, o.created_at, o.site_id,
         {(string.IsNullOrWhiteSpace(optimizedCombinedColumn) ? "NULL" : $"o.`{optimizedCombinedColumn}`")} AS node_b_cell_id,
-        {optimizedSectorSelect}
+        {optimizedSectorSelect},
+        {optimizedBandSelect}
     FROM lte_prediction_optimised_results o
     WHERE {optimizedWhere}
     {optimizedPolygonFilter}
@@ -13154,6 +13254,7 @@ optimized_rows AS (
                     COALESCE(os.node_b_id, ''),
                     COALESCE(os.cell_id, ''),
                     COALESCE(os.site_id, ''),
+                    COALESCE(os.band, ''),
                     os.lat,
                     os.lon
                 ORDER BY os.id DESC
@@ -13163,21 +13264,22 @@ optimized_rows AS (
     WHERE ranked.rn = 1
 ),
 baseline_rows AS (
-    SELECT 
+    SELECT
         b.id, b.project_id, b.job_id, b.lat, b.lon,
         b.pred_rsrp, b.pred_rsrq, b.pred_sinr,
         b.node_b_id, b.cell_id, b.operator, b.created_at, b.site_id,
         {(string.IsNullOrWhiteSpace(baselineCombinedColumn) ? "NULL" : $"b.`{baselineCombinedColumn}`")} AS node_b_cell_id,
-        {baselineSectorSelect}
+        {baselineSectorSelect},
+        {baselineBandSelect}
     FROM lte_prediction_baseline_results b
     WHERE {baselineWhere}
     {baselinePolygonFilter}
 )
-SELECT 
+SELECT
     o.id, o.project_id, o.job_id, o.lat, o.lon,
     o.pred_rsrp, o.pred_rsrq, o.pred_sinr,
     o.node_b_id, o.cell_id, o.operator, o.created_at,
-    o.site_id, o.node_b_cell_id, o.sector_lookup,
+    o.site_id, o.node_b_cell_id, o.sector_lookup, o.band,
     'lte_prediction_optimised_results' AS source_table
 FROM optimized_rows o
 
@@ -13187,7 +13289,7 @@ SELECT
     b.id, b.project_id, b.job_id, b.lat, b.lon,
     b.pred_rsrp, b.pred_rsrq, b.pred_sinr,
     b.node_b_id, b.cell_id, b.operator, b.created_at,
-    b.site_id, b.node_b_cell_id, b.sector_lookup,
+    b.site_id, b.node_b_cell_id, b.sector_lookup, b.band,
     'lte_prediction_baseline_results' AS source_table
 FROM baseline_rows b
 WHERE NOT EXISTS (SELECT 1 FROM optimized_rows);";
@@ -13199,6 +13301,8 @@ WHERE NOT EXISTS (SELECT 1 FROM optimized_rows);";
         for (var i = 0; i < lookupCellIds.Count; i++) Add(cmd, $"@cell_id_{i}", lookupCellIds[i]);
         for (var i = 0; i < lookupNodeBCellIds.Count; i++) Add(cmd, $"@node_b_cell_id_{i}", lookupNodeBCellIds[i]);
         if (!string.IsNullOrWhiteSpace(lookupSector)) Add(cmd, "@sector_lookup", lookupSector);
+        if (!string.IsNullOrWhiteSpace(trimmedBand) && (!string.IsNullOrWhiteSpace(optimizedBandColumn) || !string.IsNullOrWhiteSpace(baselineBandColumn)))
+            Add(cmd, "@band_lookup", trimmedBand);
         if (selectedScenario.HasValue) Add(cmd, "@scenario_id", selectedScenario.Value);
 
         var rows = new List<Dictionary<string, object?>>();
@@ -13223,6 +13327,7 @@ WHERE NOT EXISTS (SELECT 1 FROM optimized_rows);";
             CellIdLookupValues = lookupCellIds,
             NodeBCellIdLookupValues = lookupNodeBCellIds,
             SectorFiltered = lookupSector,
+            BandFiltered = trimmedBand,
             ScenarioFiltered = selectedScenario,
             Count = rows.Count,
             Data = rows
