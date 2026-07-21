@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Hosting;
+using MySqlConnector;
 using System;
 using System.IO;
 using System.Linq;
@@ -25,6 +26,19 @@ namespace SignalTracker.Controllers
         private readonly IWebHostEnvironment _env;
         private readonly UserScopeService _userScope; // 1. Service for Security Logic
         private readonly RedisService _redis;
+
+        // Network-log ingestion (UploadFileType == 1) does a bulk row insert plus a
+        // heavy self-join UPDATE against tbl_network_log inside one DB transaction.
+        // If two of these run at the same time they lock each other out of the same
+        // rows and eventually fail with MySQL "Lock wait timeout exceeded". This has
+        // been observed happening across SEPARATE deployments/processes that all talk
+        // to the same MySQL server (production + other instances hitting the shared
+        // DB), so an in-process lock (SemaphoreSlim) isn't enough — it only protects
+        // one process. Instead we take a MySQL named lock (GET_LOCK), which is
+        // enforced by the DB server itself and serializes every connection from every
+        // process/host that acquires the same lock name, regardless of where it runs.
+        private const string NetworkLogIngestLockName = "stracer_networklog_ingest";
+        private const int NetworkLogIngestLockTimeoutSeconds = 90;
 
         // Robust timezone: Windows ("India Standard Time") and Linux ("Asia/Kolkata")
         private static readonly TimeZoneInfo INDIAN_ZONE = GetIndianZone();
@@ -98,23 +112,96 @@ namespace SignalTracker.Controllers
 
             string errorMsg = "";
             var csvProc = new ProcessCSVController(db, cf, _redis);
-            bool ok = csvProc.Process(
-                excelDetails.id,
-                mainPath,
-                uploadFile.FileName,
-                polygonPath,
-                uploadFileType,
-                projectId,
-                remarks,
-                out errorMsg,
-                userId
-            );
+
+            bool ok;
+            if (uploadFileType == 1)
+            {
+                (ok, errorMsg) = await RunNetworkLogIngestSerializedAsync(() =>
+                {
+                    var success = csvProc.Process(
+                        excelDetails.id,
+                        mainPath,
+                        uploadFile.FileName,
+                        polygonPath,
+                        uploadFileType,
+                        projectId,
+                        remarks,
+                        out var innerError,
+                        userId
+                    );
+                    return (success, innerError);
+                });
+            }
+            else
+            {
+                ok = csvProc.Process(
+                    excelDetails.id,
+                    mainPath,
+                    uploadFile.FileName,
+                    polygonPath,
+                    uploadFileType,
+                    projectId,
+                    remarks,
+                    out errorMsg,
+                    userId
+                );
+            }
 
             excelDetails.status = (short)(ok ? 1 : 0);
             excelDetails.errors = NormalizeUploadError(errorMsg);
             await db.SaveChangesAsync();
 
             return (excelDetails.id, ok, errorMsg);
+        }
+
+        // Acquires a MySQL named lock scoped to the same physical DB server `db` is
+        // connected to, runs `work`, then always releases the lock (including on
+        // exceptions and connection drops — MySQL auto-releases a session's named
+        // locks if the connection is lost). If another process/host is already
+        // holding the lock past the timeout, uploading fails fast with a clear
+        // message instead of racing into a long, confusing "Lock wait timeout".
+        private async Task<(bool Success, string? ErrorMessage)> RunNetworkLogIngestSerializedAsync(
+            Func<(bool Success, string? ErrorMessage)> work)
+        {
+            var connectionString = db.Database.GetConnectionString();
+            await using var lockConnection = new MySqlConnection(connectionString);
+            await lockConnection.OpenAsync();
+
+            bool lockAcquired;
+            await using (var acquireCmd = lockConnection.CreateCommand())
+            {
+                acquireCmd.CommandText = "SELECT GET_LOCK(@lockName, @timeoutSeconds)";
+                acquireCmd.Parameters.AddWithValue("@lockName", NetworkLogIngestLockName);
+                acquireCmd.Parameters.AddWithValue("@timeoutSeconds", NetworkLogIngestLockTimeoutSeconds);
+                var result = await acquireCmd.ExecuteScalarAsync();
+                lockAcquired = result is long l && l == 1;
+            }
+
+            if (!lockAcquired)
+            {
+                return (false,
+                    "Another network-log upload is currently being processed on the server. Please try again in a minute.");
+            }
+
+            try
+            {
+                return work();
+            }
+            finally
+            {
+                try
+                {
+                    await using var releaseCmd = lockConnection.CreateCommand();
+                    releaseCmd.CommandText = "SELECT RELEASE_LOCK(@lockName)";
+                    releaseCmd.Parameters.AddWithValue("@lockName", NetworkLogIngestLockName);
+                    await releaseCmd.ExecuteScalarAsync();
+                }
+                catch
+                {
+                    // Best-effort release; closing the connection below also releases
+                    // the lock server-side if this fails for any reason.
+                }
+            }
         }
 
         public ExcelUploadController(

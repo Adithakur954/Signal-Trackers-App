@@ -10,6 +10,8 @@ using CsvHelper;
 using CsvHelper.Configuration;
 using CsvHelper.Configuration.Attributes;
 
+using MySqlConnector;
+
 using System;
 using System.Collections.Generic;
 using System.Data;
@@ -769,6 +771,16 @@ public IActionResult UploadSitePrediction(
 	                    var strategy = db.Database.CreateExecutionStrategy();
 	                    strategy.Execute(() =>
 	                    {
+                        // The execution strategy may re-invoke this delegate after a transient
+                        // failure (e.g. MySQL "Lock wait timeout exceeded"), so reset every
+                        // counter/list mutated below — otherwise a retried attempt would double
+                        // up row counts and duplicate error/success messages from the failed try.
+                        IsValidSheet = true;
+                        allErrorList.Clear();
+                        uploadedSuccessSheetList.Clear();
+                        rowInserted = 0;
+                        rowUpdated = 0;
+
                         // outer transaction only for fileType=1 to keep session + logs atomic
                         using var outerTx = fileType == 1 ? db.Database.BeginTransaction() : null;
 
@@ -844,7 +856,26 @@ public IActionResult UploadSitePrediction(
 	                                    allErrorList.Add("Session creation failed. Network logs were not processed.");
 	                                    break;
 	                                }
-	                                IsValidSheet = ProcessNetLogWorkSheet(sessionId, resolvedCompanyId, file, imageList, excelID, ref rowInserted, ref rowUpdated, out errorList, outerTx);
+
+	                                // A session-data zip can bundle other CSVs from the same logging
+	                                // session (e.g. Event_*.csv, L3_*.csv diagnostic logs) — only files
+	                                // named "NetworkLog*" are the actual GPS/signal data this app stores.
+	                                // Skip anything else entirely, silently. This only applies to zip
+	                                // uploads: a direct single-CSV upload is saved on disk under a
+	                                // generated name (never "NetworkLog*"), so it must not be filtered here.
+	                                if (isZipFile && !Path.GetFileName(file).StartsWith("NetworkLog", StringComparison.OrdinalIgnoreCase))
+	                                {
+	                                    continue;
+	                                }
+
+	                                // Accumulate (AND), don't overwrite: a zip can contain several CSVs,
+	                                // and this decides the whole session's commit/rollback below. Plain
+	                                // assignment here meant only the LAST file processed determined the
+	                                // outcome — so a valid network-log CSV's already-inserted rows could
+	                                // get silently rolled back just because a later, unrelated file in the
+	                                // same zip failed (order-dependent data loss).
+	                                bool worksheetOk = ProcessNetLogWorkSheet(sessionId, resolvedCompanyId, file, imageList, excelID, ref rowInserted, ref rowUpdated, out errorList, outerTx);
+	                                IsValidSheet = IsValidSheet && worksheetOk;
 	                            }
                             else if (fileType == 2)
                                 IsValidSheet = ProcessCtrPredictionSheet(file, excelID, projectId, ref rowInserted, ref rowUpdated, out errorList);
@@ -898,7 +929,7 @@ public IActionResult UploadSitePrediction(
             catch (Exception ex)
             {
                 IsValidSheet = false;
-                errorMsag = "Exception " + SafeException.Get(ex);
+                errorMsag = "Exception " + GetProcessingExceptionMessage(ex);
             }
 
             try
@@ -1192,6 +1223,32 @@ public IActionResult UploadSitePrediction(
         //  YAHAN KOI expectedHeaders / ValidateCsvHeadersStrict NAHI HAI
         //  Direct records read karenge; mapping [Name(...)] handle karega
 
+        // Session-data zip uploads can legitimately bundle non-network-log CSVs from
+        // the same logging session — e.g. "Event_*.csv" / "L3_*.csv" diagnostic logs
+        // with columns like timestamp/category/message/severity. Those aren't GPS/
+        // signal rows and were never meant to map onto NetworkLogModel; previously
+        // CsvHelper would throw "No members are mapped" for them, which (combined
+        // with the IsValidSheet bug above) could roll back an otherwise-valid
+        // network-log CSV sitting right next to them in the same zip. Peek the
+        // header first and skip quietly if it clearly isn't network-log shaped,
+        // instead of treating every .csv in the zip as required network-log data.
+        csv.Read();
+        csv.ReadHeader();
+        var headerRecord = csv.HeaderRecord ?? Array.Empty<string>();
+        bool hasTimestampColumn = headerRecord.Any(h =>
+            string.Equals(h?.Trim(), "Timestamp", StringComparison.OrdinalIgnoreCase));
+        bool hasLatOrLonColumn = headerRecord.Any(h =>
+            string.Equals(h?.Trim(), "Latitude", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(h?.Trim(), "Longitude", StringComparison.OrdinalIgnoreCase));
+
+        if (!hasTimestampColumn || !hasLatOrLonColumn)
+        {
+            errorList.Add(
+                $"{fileName}: Skipped — this doesn't look like network-log data (no Timestamp + Latitude/Longitude columns). " +
+                "It was ignored so the rest of the upload could still be processed.");
+            return true;
+        }
+
         try
         {
             int rowIndex = 0;
@@ -1417,18 +1474,84 @@ public IActionResult UploadSitePrediction(
 	                         .Where(e => e.State is EntityState.Added or EntityState.Modified))
 	                e.State = EntityState.Detached;
 
+	            // Lock-wait-timeout / deadlock errors are transient: let them bubble up to
+	            // the execution strategy in ProcessFile so it can automatically retry the
+	            // whole unit of work, instead of swallowing them into a permanent failure.
+	            if (IsTransientDbException(ex))
+	                throw;
+
 	            errorList.Add($"{fileName} General error: {(SafeException.GetInnermost(ex))}");
 	            return false;
         }
     }
     catch (Exception ex)
     {
+        if (IsTransientDbException(ex))
+            throw;
+
         errorList.Add($"{fileName} General error: {(SafeException.GetInnermost(ex))}");
         return false;
     }
 
     return isColValValid;
 }
+
+        // Walks the exception chain looking for a MySQL transient error — lock wait
+        // timeout (1205) or deadlock (1213) — that EF's retrying execution strategy
+        // (EnableRetryOnFailure) is meant to recover from automatically. Those retries
+        // only work if the exception actually reaches strategy.Execute(); catching and
+        // swallowing it here (as the surrounding catch blocks otherwise do) defeats them.
+        [NonAction]
+        private static bool IsTransientDbException(Exception? ex)
+        {
+            while (ex != null)
+            {
+                if (ex is MySqlException mysqlEx &&
+                    (mysqlEx.IsTransient || mysqlEx.Number == 1205 || mysqlEx.Number == 1213))
+                {
+                    return true;
+                }
+                ex = ex.InnerException;
+            }
+            return false;
+        }
+
+        [NonAction]
+        private static string GetProcessingExceptionMessage(Exception ex)
+        {
+            var mysqlEx = FindMySqlException(ex);
+            if (mysqlEx != null)
+            {
+                return mysqlEx.Number switch
+                {
+                    1205 => "Database lock wait timeout exceeded while saving network logs. Another upload or long-running map/database operation is holding the same rows; please retry after it finishes.",
+                    1213 => "Database deadlock detected while saving network logs. Please retry the upload.",
+                    1040 => "Database has too many active connections. Please retry after current operations finish.",
+                    1153 => "Database packet size limit was exceeded while saving uploaded data.",
+                    2006 => "Database connection was lost while saving uploaded data. Please retry the upload.",
+                    2013 => "Database connection timed out while saving uploaded data. Please retry the upload.",
+                    _ => SafeException.GetInnermost(ex)
+                };
+            }
+
+            return SafeException.GetInnermost(ex);
+        }
+
+        [NonAction]
+        private static MySqlException? FindMySqlException(Exception? ex)
+        {
+            while (ex != null)
+            {
+                if (ex is MySqlException mysqlEx)
+                {
+                    return mysqlEx;
+                }
+
+                ex = ex.InnerException;
+            }
+
+            return null;
+        }
 
         [NonAction]
         private void Apply5GAlphaAndBandFillRules(int sessionId)
