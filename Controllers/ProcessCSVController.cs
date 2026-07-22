@@ -1253,6 +1253,7 @@ public IActionResult UploadSitePrediction(
         {
             int rowIndex = 0;
             bool hasAnyRecord = false;
+            var networkLogsToInsert = new List<tbl_network_log>();
 
             foreach (var row in csv.GetRecords<NetworkLogModel>())
             {
@@ -1441,10 +1442,7 @@ public IActionResult UploadSitePrediction(
                 if (!string.IsNullOrWhiteSpace(row.ThroughputDetails))
                     entity.all_neigbor_cell_info = row.ThroughputDetails;
 
-                if (entity.id > 0)
-                    db.Entry(entity).State = EntityState.Modified;
-                else
-                    db.tbl_network_log.Add(entity);
+                networkLogsToInsert.Add(entity);
 
                 rowInserted++;
             }
@@ -1456,7 +1454,20 @@ public IActionResult UploadSitePrediction(
 
 	            if (isColValValid)
 	            {
-	                db.SaveChanges();
+                    if (networkLogsToInsert.Count > 0)
+                    {
+                        var previousAutoDetectChanges = db.ChangeTracker.AutoDetectChangesEnabled;
+                        try
+                        {
+                            db.ChangeTracker.AutoDetectChangesEnabled = false;
+                            db.tbl_network_log.AddRange(networkLogsToInsert);
+                            db.SaveChanges();
+                        }
+                        finally
+                        {
+                            db.ChangeTracker.AutoDetectChangesEnabled = previousAutoDetectChanges;
+                        }
+                    }
                     Apply5GAlphaAndBandFillRules(sessionId);
 	                InvalidateNetworkLogCachesBestEffort();
 	            }
@@ -1557,6 +1568,29 @@ public IActionResult UploadSitePrediction(
         private void Apply5GAlphaAndBandFillRules(int sessionId)
         {
             if (sessionId <= 0)
+            {
+                return;
+            }
+
+            var needs5GFill = db.tbl_network_log
+                .AsNoTracking()
+                .Any(row =>
+                    row.session_id == sessionId &&
+                    row.network != null &&
+                    row.network.Contains("5G") &&
+                    (
+                        row.m_alpha_long == null ||
+                        row.m_alpha_long.Trim() == "" ||
+                        row.m_alpha_long.Trim().ToUpper() == "NA" ||
+                        row.m_alpha_short == null ||
+                        row.m_alpha_short.Trim() == "" ||
+                        row.m_alpha_short.Trim().ToUpper() == "NA" ||
+                        row.band == null ||
+                        row.band.Trim() == "" ||
+                        row.band.Trim().ToUpper() == "NA"
+                    ));
+
+            if (!needs5GFill)
             {
                 return;
             }

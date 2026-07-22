@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.DependencyInjection;
 using MySqlConnector;
 using System;
 using System.IO;
@@ -26,6 +27,7 @@ namespace SignalTracker.Controllers
         private readonly IWebHostEnvironment _env;
         private readonly UserScopeService _userScope; // 1. Service for Security Logic
         private readonly RedisService _redis;
+        private readonly IServiceScopeFactory _scopeFactory;
 
         // Network-log ingestion (UploadFileType == 1) does a bulk row insert plus a
         // heavy self-join UPDATE against tbl_network_log inside one DB transaction.
@@ -73,7 +75,7 @@ namespace SignalTracker.Controllers
             return $"{prefix}{stamp}_{suffix}{extension}";
         }
 
-        private async Task<(int UploadHistoryId, bool Success, string? ErrorMessage)> ProcessSingleUploadAsync(
+        private async Task<(int UploadHistoryId, bool Success, string? ErrorMessage, bool ProcessingStarted)> ProcessSingleUploadAsync(
             IFormFile uploadFile,
             string remarks,
             string polygonPath,
@@ -110,18 +112,70 @@ namespace SignalTracker.Controllers
             db.tbl_upload_history.Add(excelDetails);
             await db.SaveChangesAsync();
 
+            if (uploadFileType == 1)
+            {
+                _ = Task.Run(() => ProcessNetworkLogUploadInBackgroundAsync(
+                    excelDetails.id,
+                    mainPath,
+                    uploadFile.FileName,
+                    polygonPath,
+                    uploadFileType,
+                    projectId,
+                    remarks,
+                    userId));
+
+                return (excelDetails.id, true, null, true);
+            }
+
             string errorMsg = "";
             var csvProc = new ProcessCSVController(db, cf, _redis);
 
             bool ok;
-            if (uploadFileType == 1)
+            ok = csvProc.Process(
+                excelDetails.id,
+                mainPath,
+                uploadFile.FileName,
+                polygonPath,
+                uploadFileType,
+                projectId,
+                remarks,
+                out errorMsg,
+                userId
+            );
+
+            excelDetails.status = (short)(ok ? 1 : 0);
+            excelDetails.errors = NormalizeUploadError(errorMsg);
+            await db.SaveChangesAsync();
+
+            return (excelDetails.id, ok, errorMsg, false);
+        }
+
+        private async Task ProcessNetworkLogUploadInBackgroundAsync(
+            int uploadHistoryId,
+            string mainPath,
+            string originalFileName,
+            string polygonPath,
+            int uploadFileType,
+            int projectId,
+            string remarks,
+            int userId)
+        {
+            try
             {
-                (ok, errorMsg) = await RunNetworkLogIngestSerializedAsync(() =>
+                using var scope = _scopeFactory.CreateScope();
+                var scopedDb = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+                var httpContextAccessor = scope.ServiceProvider.GetRequiredService<IHttpContextAccessor>();
+                var redis = scope.ServiceProvider.GetRequiredService<RedisService>();
+                var scopedCommonFunction = new CommonFunction(scopedDb, httpContextAccessor);
+                var csvProc = new ProcessCSVController(scopedDb, scopedCommonFunction, redis);
+
+                string errorMsg = "";
+                var (ok, processingMessage) = await RunNetworkLogIngestSerializedAsync(scopedDb, () =>
                 {
                     var success = csvProc.Process(
-                        excelDetails.id,
+                        uploadHistoryId,
                         mainPath,
-                        uploadFile.FileName,
+                        originalFileName,
                         polygonPath,
                         uploadFileType,
                         projectId,
@@ -131,27 +185,40 @@ namespace SignalTracker.Controllers
                     );
                     return (success, innerError);
                 });
+
+                if (!string.IsNullOrWhiteSpace(processingMessage))
+                {
+                    errorMsg = processingMessage;
+                }
+
+                var history = await scopedDb.tbl_upload_history.FirstOrDefaultAsync(x => x.id == uploadHistoryId);
+                if (history != null)
+                {
+                    history.status = (short)(ok ? 1 : 0);
+                    history.errors = NormalizeUploadError(errorMsg);
+                    await scopedDb.SaveChangesAsync();
+                }
             }
-            else
+            catch (Exception ex)
             {
-                ok = csvProc.Process(
-                    excelDetails.id,
-                    mainPath,
-                    uploadFile.FileName,
-                    polygonPath,
-                    uploadFileType,
-                    projectId,
-                    remarks,
-                    out errorMsg,
-                    userId
-                );
+                try
+                {
+                    using var scope = _scopeFactory.CreateScope();
+                    var scopedDb = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+                    var history = await scopedDb.tbl_upload_history.FirstOrDefaultAsync(x => x.id == uploadHistoryId);
+                    if (history != null)
+                    {
+                        history.status = 0;
+                        history.errors = NormalizeUploadError(SafeException.GetInnermost(ex));
+                        await scopedDb.SaveChangesAsync();
+                    }
+                }
+                catch
+                {
+                    // If even status persistence fails, leave the row in Processing;
+                    // the server log remains the source of truth for this rare case.
+                }
             }
-
-            excelDetails.status = (short)(ok ? 1 : 0);
-            excelDetails.errors = NormalizeUploadError(errorMsg);
-            await db.SaveChangesAsync();
-
-            return (excelDetails.id, ok, errorMsg);
         }
 
         // Acquires a MySQL named lock scoped to the same physical DB server `db` is
@@ -163,7 +230,14 @@ namespace SignalTracker.Controllers
         private async Task<(bool Success, string? ErrorMessage)> RunNetworkLogIngestSerializedAsync(
             Func<(bool Success, string? ErrorMessage)> work)
         {
-            var connectionString = db.Database.GetConnectionString();
+            return await RunNetworkLogIngestSerializedAsync(db, work);
+        }
+
+        private static async Task<(bool Success, string? ErrorMessage)> RunNetworkLogIngestSerializedAsync(
+            ApplicationDbContext targetDb,
+            Func<(bool Success, string? ErrorMessage)> work)
+        {
+            var connectionString = targetDb.Database.GetConnectionString();
             await using var lockConnection = new MySqlConnection(connectionString);
             await lockConnection.OpenAsync();
 
@@ -209,13 +283,15 @@ namespace SignalTracker.Controllers
             IHttpContextAccessor httpContextAccessor,
             IWebHostEnvironment env,
             UserScopeService userScope,
-            RedisService redis) // 2. Inject Service
+            RedisService redis,
+            IServiceScopeFactory scopeFactory) // 2. Inject Service
         {
             db = context;
             cf = new CommonFunction(context, httpContextAccessor);
             _env = env;
             _userScope = userScope;
             _redis = redis;
+            _scopeFactory = scopeFactory;
         }
 
         // GET: /ExcelUpload/Index
@@ -333,7 +409,8 @@ namespace SignalTracker.Controllers
         uploaded_by = u != null ? u.name : "Unknown",
         status = h.status == 1 ? "Success" : 
                  (h.status == 2 ? "Processing" : "Failed"),
-        remarks = h.remarks
+        remarks = h.remarks,
+        errors = h.errors
     };
                 var data = await query
                     .OrderByDescending(x => x.id)
@@ -374,6 +451,19 @@ namespace SignalTracker.Controllers
 
                 if (uploadFiles.Count == 0)
                     return Json(new { Status = 0, Message = "Please select at least one excel file." });
+
+                if (UploadFileType == 1)
+                {
+                    var invalidSessionFile = uploadFiles.FirstOrDefault(file => !IsCsvOrZip(file));
+                    if (invalidSessionFile != null)
+                    {
+                        return Json(new
+                        {
+                            Status = 0,
+                            Message = $"{invalidSessionFile.FileName} is not supported for session uploads. Please upload a .csv file or the session .zip export."
+                        });
+                    }
+                }
 
                 const long maxUploadBytes = 524_288_000;
                 var oversized = uploadFiles.FirstOrDefault(file => file.Length > maxUploadBytes);
@@ -423,7 +513,7 @@ namespace SignalTracker.Controllers
                     projectId = objProject.id;
                 }
 
-                var results = new List<(int UploadHistoryId, bool Success, string? ErrorMessage, string FileName)>();
+                var results = new List<(int UploadHistoryId, bool Success, string? ErrorMessage, string FileName, bool ProcessingStarted)>();
                 foreach (var file in uploadFiles)
                 {
                     var result = await ProcessSingleUploadAsync(
@@ -437,10 +527,11 @@ namespace SignalTracker.Controllers
                         UploadFileType,
                         projectId
                     );
-                    results.Add((result.UploadHistoryId, result.Success, result.ErrorMessage, file.FileName));
+                    results.Add((result.UploadHistoryId, result.Success, result.ErrorMessage, file.FileName, result.ProcessingStarted));
                 }
 
                 bool allOk = results.All(item => item.Success);
+                bool anyProcessingStarted = results.Any(item => item.ProcessingStarted);
                 var failures = results
                     .Where(item => !item.Success)
                     .Select(item => new
@@ -454,7 +545,11 @@ namespace SignalTracker.Controllers
                     .ToList();
                 var failedFiles = failures.Select(item => item.FileName).ToList();
                 var createdUploadIds = results.Select(item => item.UploadHistoryId).ToList();
-                string responseMessage = allOk
+                string responseMessage = anyProcessingStarted
+                    ? (results.Count == 1
+                        ? "File uploaded successfully. Processing started in the background."
+                        : $"{results.Count} files uploaded successfully. Processing started in the background.")
+                    : allOk
                     ? (results.Count == 1
                         ? "File uploaded and processed successfully."
                         : $"{results.Count} files uploaded and processed successfully.")
@@ -473,12 +568,12 @@ namespace SignalTracker.Controllers
                         .Where(s => s.tbl_upload_id == uploadIdStr)
                         .OrderByDescending(s => s.id)
                         .Select(s => (int?)s.id)
-                        .FirstOrDefaultAsync();
+                    .FirstOrDefaultAsync();
                 }
 
                 return Json(new
                 {
-                    Status = allOk ? 1 : 0,
+                    Status = anyProcessingStarted ? 2 : (allOk ? 1 : 0),
                     Message = responseMessage,
                     UploadId = createdUploadIds.Count == 1 ? createdUploadIds[0] : (int?)null,
                     UploadIds = createdUploadIds,
