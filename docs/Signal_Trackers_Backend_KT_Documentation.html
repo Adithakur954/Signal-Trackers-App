@@ -1,0 +1,2331 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Signal Trackers Backend KT Documentation</title>
+  <style>
+    body { font-family: Arial, sans-serif; line-height: 1.5; margin: 40px; color: #1f2933; }
+    h1 { text-align: center; border-bottom: 2px solid #253858; padding-bottom: 12px; }
+    h2 { margin-top: 34px; color: #253858; border-bottom: 1px solid #d8dee9; padding-bottom: 6px; }
+    h3 { margin-top: 24px; color: #334e68; }
+    table { border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 13px; }
+    th, td { border: 1px solid #c8d1dc; padding: 8px; vertical-align: top; }
+    th { background: #edf2f7; text-align: left; }
+    pre { background: #111827; color: #f8fafc; padding: 14px; border-radius: 6px; overflow-x: auto; }
+    code { font-family: Consolas, monospace; }
+    @media print { body { margin: 18mm; } h2 { page-break-after: avoid; } table { page-break-inside: avoid; } }
+  </style>
+</head>
+<body>
+<h1>Signal Trackers Backend Documentation</h1>
+<h2>1. Backend Overview</h2>
+<p>Signal Trackers is an ASP.NET Core MVC/API backend using:</p>
+<ul>
+<li>ASP.NET Core controllers for web pages and JSON APIs.</li>
+<li>Entity Framework Core with MySQL.</li>
+<li>Cookie authentication plus server-side session.</li>
+<li>Redis for caching, login locking, and fast invalidation. If Redis is not configured, the app falls back where possible.</li>
+<li>CSV/ZIP upload processing for network logs, sessions, projects, polygons, and prediction data.</li>
+<li>A secured Python bridge API for external Python/ML/report jobs.</li>
+</ul>
+<p>The application entry point is Program.cs.</p>
+<h2>2. Startup Flow</h2>
+<p>Program.cs performs the backend setup in this order:</p>
+<ol>
+<li>Loads configuration.</li>
+</ol>
+<ul>
+<li>appsettings.json</li>
+<li>appsettings.Development.json</li>
+<li>development user secrets from SignalTracker.LocalDevelopment</li>
+<li>environment variables</li>
+</ul>
+<ol>
+<li>Registers application services.</li>
+</ol>
+<ul>
+<li>UserScopeService</li>
+<li>LicenseFeatureService</li>
+<li>PythonBridgeService</li>
+<li>OtpService</li>
+<li>SmsService</li>
+<li>UserDeletionService</li>
+<li>optional UserDeletionCleanupService</li>
+</ul>
+<ol>
+<li>Configures MVC/API.</li>
+</ol>
+<ul>
+<li>AddControllersWithViews</li>
+<li>production exception response filter</li>
+<li>JSON property names are preserved as written in C#.</li>
+</ul>
+<ol>
+<li>Configures security.</li>
+</ol>
+<ul>
+<li>CORS policy named AllowReactApp</li>
+<li>data protection keys</li>
+<li>cookie auth</li>
+<li>session</li>
+<li>forwarded headers</li>
+<li>HTTPS redirection</li>
+</ul>
+<ol>
+<li>Configures database.</li>
+</ol>
+<ul>
+<li>ApplicationDbContext uses MySQL.</li>
+<li>Connection string is selected dynamically by DbConnectionProvider.</li>
+<li>Main DB uses ConnectionStrings:MySqlConnection.</li>
+<li>TW/secondary DB uses ConnectionStrings:MySqlConnection2.</li>
+</ul>
+<ol>
+<li>Configures Redis.</li>
+</ol>
+<ul>
+<li>Uses ConnectionStrings:Redis if available.</li>
+<li>Uses resilient Redis options.</li>
+<li>If Redis fails or is not configured, Redis-dependent features degrade gracefully unless explicitly required.</li>
+</ul>
+<ol>
+<li>Configures upload limits.</li>
+</ol>
+<ul>
+<li>Default max upload comes from Security:MaxUploadBytes.</li>
+<li>Hard cap is 500 MB.</li>
+</ul>
+<ol>
+<li>Builds the middleware pipeline and maps controllers.</li>
+</ol>
+<h2>3. Middleware Request Flow</h2>
+<p>Every request passes through this pipeline:</p>
+<ol>
+<li>Security headers middleware.</li>
+<li>Production exception handler and HSTS, only outside development.</li>
+<li>Forwarded headers.</li>
+<li>HTTPS redirection when enabled.</li>
+<li>Static file serving.</li>
+<li>Legacy route rewrite:</li>
+</ol>
+<ul>
+<li>/api/MapView/GetSubSessionAnalyticsWithStatus</li>
+<li>rewritten to /api/MapView/GetSubSessionAnalytics?includeStatus=1</li>
+</ul>
+<ol>
+<li>Routing.</li>
+<li>CORS.</li>
+<li>Cookie policy.</li>
+<li>Session.</li>
+<li>Session keep-alive pulse.</li>
+<li>Cookie authentication.</li>
+<li>CSRF protection middleware.</li>
+<li>Authorization.</li>
+<li>Partitioned cookie support.</li>
+<li>Controller endpoint execution.</li>
+</ol>
+<h2>4. Authentication Flow</h2>
+<p>Main endpoint:</p>
+<ul>
+<li>POST /api/auth/login</li>
+</ul>
+<p>Login flow:</p>
+<ol>
+<li>Client sends email, password, optional country_code, and optional ForceLogin.</li>
+<li>If country_code = TW, backend checks the TW database first.</li>
+<li>Otherwise, backend checks the main DB first and can fall back to TW.</li>
+<li>Password is verified by PasswordSecurity.</li>
+<li>Legacy/plain text passwords can be accepted and upgraded to a secure hash.</li>
+<li>Redis login lock is created per user:</li>
+</ol>
+<ul>
+<li>key: auth:login-lock:user:{userId}</li>
+<li>TTL: 18,000 seconds</li>
+</ul>
+<ol>
+<li>If another login lock exists, login fails unless ForceLogin = true.</li>
+<li>Cookie auth claims are created:</li>
+</ol>
+<ul>
+<li>UserId</li>
+<li>UserTypeId</li>
+<li>CompanyId</li>
+<li>company_id</li>
+<li>country_code</li>
+<li>email/name claims</li>
+</ul>
+<ol>
+<li>Session values are also stored:</li>
+</ol>
+<ul>
+<li>country_code</li>
+<li>UserName</li>
+<li>UserID</li>
+<li>UserType</li>
+<li>CompanyId</li>
+</ul>
+<ol>
+<li>Response returns login status, source DB, user details, and enabled features.</li>
+</ol>
+<p>Other auth endpoints:</p>
+<ul>
+<li>POST /api/auth/logout</li>
+<li>GET /api/auth/status</li>
+</ul>
+<p>Logout clears:</p>
+<ul>
+<li>Redis login lock.</li>
+<li>Auth cookie.</li>
+<li>Server session.</li>
+</ul>
+<h2>5. Authorization and Scope Flow</h2>
+<p>Most backend APIs require cookie authentication through [Authorize].</p>
+<p>Public mobile/helper endpoints use:</p>
+<ul>
+<li>[AllowAnonymous]</li>
+<li>[PublicApiKey]</li>
+</ul>
+<p>Those public endpoints require either:</p>
+<ul>
+<li>X-Public-Api-Key</li>
+<li>X-API-Key</li>
+</ul>
+<p>User/company scoping is handled by UserScopeService.</p>
+<p>Roles:</p>
+<ul>
+<li>1 = normal user</li>
+<li>2 = admin</li>
+<li>3 = super admin</li>
+</ul>
+<p>Scope behavior:</p>
+<ul>
+<li>Super admin can access global data by default.</li>
+<li>Super admin can scope to a requested company ID.</li>
+<li>Normal users/admins are restricted to their own CompanyId.</li>
+<li>Some endpoints fall back to current user scope when company scope is missing.</li>
+</ul>
+<h2>6. Dynamic Database Selection</h2>
+<p>ApplicationDbContext gets its connection string from DbConnectionProvider.</p>
+<p>Selection rules:</p>
+<ul>
+<li>Login and important auth/user-management paths use main DB.</li>
+<li>If request has country_code = TW, use TW DB.</li>
+<li>Country can come from:</li>
+<li>query string: country_code</li>
+<li>header: x-country-code</li>
+<li>auth claim: country_code</li>
+<li>session: country_code</li>
+<li>Otherwise, use main DB.</li>
+</ul>
+<p>Both MySQL connections are normalized to support zero dates:</p>
+<ul>
+<li>Allow Zero DateTime = true</li>
+<li>Convert Zero DateTime = true</li>
+</ul>
+<p>Connection pool size is also constrained.</p>
+<h2>6.1 Country-Wise Database Model</h2>
+<p>This backend supports two MySQL databases:</p>
+<table><thead><tr>
+<th>Logical database</th>
+<th>Connection string key</th>
+<th>When it is used</th>
+</tr></thead><tbody>
+<tr>
+<td>Main database</td>
+<td>ConnectionStrings:MySqlConnection</td>
+<td>Default DB for India/main users, auth entrypoints, most admin write paths, and any request without TW context.</td>
+</tr>
+<tr>
+<td>TW/secondary database</td>
+<td>ConnectionStrings:MySqlConnection2</td>
+<td>Used when the request/user country context is TW.</td>
+</tr>
+</tbody></table>
+<p>Country code is stored mainly on:</p>
+<ul>
+<li>tbl_user.country_code</li>
+<li>tbl_company.country_code</li>
+<li>auth claim: country_code</li>
+<li>session value: country_code</li>
+</ul>
+<p>The database provider resolves country in this priority:</p>
+<ol>
+<li>Query string: ?country_code=TW</li>
+<li>Header: x-country-code: TW</li>
+<li>Auth claim from login cookie: country_code</li>
+<li>Session value: country_code</li>
+<li>Default: main DB</li>
+</ol>
+<p>Example DB routing:</p>
+<table><thead><tr>
+<th>Request/context</th>
+<th>Selected DB</th>
+</tr></thead><tbody>
+<tr>
+<td>User logs in through /api/auth/login</td>
+<td>Main DB first unless request asks for country_code = TW; can fallback to TW.</td>
+</tr>
+<tr>
+<td>Logged-in user has claim country_code = TW</td>
+<td>TW DB for normal scoped requests.</td>
+</tr>
+<tr>
+<td>Logged-in user has claim country_code = IN or empty</td>
+<td>Main DB.</td>
+</tr>
+<tr>
+<td>API call has header x-country-code: TW</td>
+<td>TW DB, if not overridden by a hardcoded main-DB path.</td>
+</tr>
+<tr>
+<td>No login/session/country header</td>
+<td>Main DB.</td>
+</tr>
+</tbody></table>
+<p>Important exception:</p>
+<ul>
+<li>Login/auth endpoints and selected admin user-management write paths are pinned to the main DB to avoid cross-database write confusion.</li>
+<li>AuthController manually checks TW during login and password upgrade when needed.</li>
+<li>Data deletion OTP/token services can search both main and TW databases by phone/token.</li>
+</ul>
+<h3>Country-Wise Login Flow</h3>
+<p>POST /api/auth/login has special logic:</p>
+<ol>
+<li>If request sends country_code = TW, it checks TW DB first.</li>
+<li>If request does not ask for TW, it checks main DB first.</li>
+<li>If main DB user has country_code = TW, it then checks TW DB.</li>
+<li>If main DB authentication fails, it can still fallback to TW DB.</li>
+<li>After successful login, the backend stores country_code in both claims and session.</li>
+<li>Later requests use that stored country code to pick the correct DB.</li>
+</ol>
+<p>This means the selected DB after login is not random. It follows the authenticated user&#x27;s country.</p>
+<h3>Country-Wise Data Separation</h3>
+<p>The code treats main DB and TW DB as separate data stores. A TW user&#x27;s sessions, logs, projects, settings, and company data are expected to live in the TW database. Main users&#x27; data lives in the main database.</p>
+<p>Operational rule:</p>
+<ul>
+<li>If a user says &quot;my data is missing,&quot; first check which country DB their login resolved to.</li>
+<li>Check /api/auth/status response and claims/session diagnostics.</li>
+<li>For admin troubleshooting, /Admin/DbDiagnostics is useful because it shows selected DB context information.</li>
+</ul>
+<h2>6.2 Company-Wise Data Model</h2>
+<p>Company ownership is the second major isolation layer inside a selected database.</p>
+<p>Company fields:</p>
+<ul>
+<li>tbl_company.id is the company primary key.</li>
+<li>tbl_user.company_id links users to a company.</li>
+<li>tbl_project.company_id is used by many project/prediction APIs.</li>
+<li>Some older rows may rely on user ownership instead of direct company ID.</li>
+</ul>
+<p>Role IDs:</p>
+<table><thead><tr>
+<th>Role ID</th>
+<th>Meaning</th>
+<th>Scope behavior</th>
+</tr></thead><tbody>
+<tr>
+<td>1</td>
+<td>Normal user</td>
+<td>Restricted to own company/user data.</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Admin</td>
+<td>Restricted to own company data.</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Super admin</td>
+<td>Can access all companies or filter to a requested company.</td>
+</tr>
+</tbody></table>
+<p>UserScopeService is the main company-scope resolver.</p>
+<p>Scope rules:</p>
+<table><thead><tr>
+<th>User type</th>
+<th>Requested company_id</th>
+<th>Effective scope</th>
+</tr></thead><tbody>
+<tr>
+<td>Super admin</td>
+<td>not provided</td>
+<td>global/all companies, represented as 0</td>
+</tr>
+<tr>
+<td>Super admin</td>
+<td>provided</td>
+<td>requested company ID</td>
+</tr>
+<tr>
+<td>Admin/user</td>
+<td>any value</td>
+<td>user&#x27;s own CompanyId claim/session</td>
+</tr>
+<tr>
+<td>Admin/user</td>
+<td>no company resolved</td>
+<td>many endpoints return unauthorized or fallback to current user scope</td>
+</tr>
+</tbody></table>
+<p>Company ID can come from:</p>
+<ul>
+<li>CompanyId claim</li>
+<li>company_id claim</li>
+<li>HttpContext.Session[&quot;CompanyId&quot;]</li>
+<li>query parameter company_id, only honored for super admin</li>
+</ul>
+<h3>Company-Wise Query Patterns</h3>
+<p>Common secure query pattern:</p>
+<pre><code>tbl_session -&gt; tbl_user -&gt; company_id</code></pre>
+<p>This is used when session/log rows do not directly store company ID.</p>
+<p>Example:</p>
+<pre><code>tbl_network_log.session_id
+    -&gt; tbl_session.id
+    -&gt; tbl_session.user_id
+    -&gt; tbl_user.id
+    -&gt; tbl_user.company_id</code></pre>
+<p>For project data, the common pattern is:</p>
+<pre><code>tbl_project.company_id</code></pre>
+<p>or fallback ownership:</p>
+<pre><code>tbl_project.created_by_user_id</code></pre>
+<p>For polygons:</p>
+<pre><code>map_regions.tbl_project_id -&gt; tbl_project.id -&gt; tbl_project.company_id</code></pre>
+<p>or for reusable/user-created polygons:</p>
+<pre><code>map_regions.created_by_user_id</code></pre>
+<h3>Company-Wise Examples</h3>
+<table><thead><tr>
+<th>Scenario</th>
+<th>What backend does</th>
+</tr></thead><tbody>
+<tr>
+<td>Super admin calls GET /api/MapView/GetProjects without company_id</td>
+<td>Returns global project list where endpoint supports global scope.</td>
+</tr>
+<tr>
+<td>Super admin calls GET /api/MapView/GetProjects?company_id=5</td>
+<td>Returns company 5 projects.</td>
+</tr>
+<tr>
+<td>Admin from company 5 calls GET /api/MapView/GetProjects?company_id=9</td>
+<td>Ignores requested 9 and uses company 5.</td>
+</tr>
+<tr>
+<td>Normal user has no valid company context</td>
+<td>Endpoint may return unauthorized, or fallback to user-created rows if implemented.</td>
+</tr>
+<tr>
+<td>Admin calls session/log analytics</td>
+<td>Backend joins logs -&gt; sessions -&gt; users and filters by admin&#x27;s company ID.</td>
+</tr>
+</tbody></table>
+<h2>6.3 License and Feature Access</h2>
+<p>Some features are controlled by license records.</p>
+<p>License-related tables:</p>
+<ul>
+<li>tbl_company_license_grant_history</li>
+<li>tbl_company_user_license_issued</li>
+<li>license_feature_access</li>
+</ul>
+<p>Feature codes:</p>
+<ul>
+<li>report_generation</li>
+<li>benchmark_tab</li>
+<li>run_prediction</li>
+<li>grid_fetch</li>
+</ul>
+<p>LicenseFeatureService normalizes aliases. For example, report, generate_report, and pdf_report map to report_generation.</p>
+<p>Feature behavior:</p>
+<ul>
+<li>Super admins get all default features.</li>
+<li>Normal/admin users need an active issued license.</li>
+<li>Active license condition includes status = 1 and valid_till &gt;= UTC_DATE().</li>
+<li>GridAnalyticsController specifically checks grid_fetch.</li>
+</ul>
+<p>If a feature API returns 403 FEATURE_NOT_ENABLED, check:</p>
+<ol>
+<li>User ID from auth claims/session.</li>
+<li>Active row in tbl_company_user_license_issued.</li>
+<li>Feature row in license_feature_access.</li>
+<li>Feature code spelling/aliases.</li>
+</ol>
+<h2>6.4 Knowledge Transfer: How To Trace Any Request</h2>
+<p>To understand any backend request, follow this checklist:</p>
+<ol>
+<li>Identify route/controller.</li>
+</ol>
+<ul>
+<li>Example: /api/MapView/GetProjects -&gt; MapViewController.GetProjects.</li>
+</ul>
+<ol>
+<li>Identify authentication type.</li>
+</ol>
+<ul>
+<li>[Authorize] means cookie login required.</li>
+<li>[AllowAnonymous] + [PublicApiKey] means public API key required.</li>
+<li>Python bridge means X-Python-Bridge-Key required.</li>
+</ul>
+<ol>
+<li>Identify selected database.</li>
+</ol>
+<ul>
+<li>Look at query/header/claim/session country_code.</li>
+<li>TW means secondary DB unless path is pinned to main DB.</li>
+<li>Otherwise main DB.</li>
+</ul>
+<ol>
+<li>Identify company/user scope.</li>
+</ol>
+<ul>
+<li>Super admin can use requested company_id.</li>
+<li>Admin/user is forced to own company.</li>
+<li>Missing company may fallback to current user or return unauthorized.</li>
+</ul>
+<ol>
+<li>Identify tables touched.</li>
+</ol>
+<ul>
+<li>Session/log flow: tbl_session, tbl_network_log, tbl_network_log_neighbour.</li>
+<li>Project/polygon flow: tbl_project, map_regions.</li>
+<li>Prediction flow: prediction tables.</li>
+<li>Upload flow: tbl_upload_history plus parsed target tables.</li>
+</ul>
+<ol>
+<li>Check Redis.</li>
+</ol>
+<ul>
+<li>Read APIs may return cached data.</li>
+<li>Write APIs often invalidate mapview:, networklog:, polygon, and date-range cache keys.</li>
+</ul>
+<ol>
+<li>Check response shape.</li>
+</ol>
+<ul>
+<li>Most APIs return Status, Message, and Data.</li>
+<li>Some newer APIs return success, message, or direct objects.</li>
+</ul>
+<h2>6.5 Operational KT: Common Backend Tasks</h2>
+<h3>Add a New Company</h3>
+<p>Use:</p>
+<ul>
+<li>POST /api/company/SaveCompanyDetails</li>
+</ul>
+<p>Backend work:</p>
+<ol>
+<li>Checks caller is super admin for company creation.</li>
+<li>Inserts company into tbl_company.</li>
+<li>Creates default admin user for that company.</li>
+<li>May mirror company/user into secondary DB depending on code path/config.</li>
+<li>Returns company/default user details.</li>
+</ol>
+<p>After creation:</p>
+<ul>
+<li>Grant company/user license if feature-gated modules are needed.</li>
+<li>Confirm tbl_user.company_id is set.</li>
+</ul>
+<h3>Grant Feature Access</h3>
+<p>Use:</p>
+<ul>
+<li>POST /api/company/grantLicense</li>
+<li>optionally update license features through company license update paths.</li>
+</ul>
+<p>Backend work:</p>
+<ol>
+<li>Creates/updates license grant.</li>
+<li>Creates/updates issued license rows.</li>
+<li>Saves feature codes in license_feature_access.</li>
+</ol>
+<p>Important:</p>
+<ul>
+<li>Without grid_fetch, grid analytics API will block normal users.</li>
+<li>Without run_prediction, frontend should not allow prediction flows if it checks enabled features.</li>
+</ul>
+<h3>Upload Drive-Test CSV</h3>
+<p>Use:</p>
+<ul>
+<li>POST /ExcelUpload/UploadExcelFile</li>
+</ul>
+<p>Backend work:</p>
+<ol>
+<li>Saves uploaded file under UploadedExcels.</li>
+<li>Inserts tbl_upload_history with processing status.</li>
+<li>Calls ProcessCSVController.Process.</li>
+<li>Inserts sessions/logs/prediction/project rows depending on upload type.</li>
+<li>Updates upload status and errors.</li>
+</ol>
+<h3>Mobile Drive-Test Collection</h3>
+<p>Use:</p>
+<ul>
+<li>POST /api/MapView/user_signup</li>
+<li>POST /api/MapView/start_session</li>
+<li>POST /api/MapView/log_networkAsync</li>
+<li>POST /api/MapView/end_session</li>
+</ul>
+<p>Backend work:</p>
+<ol>
+<li>Register or reuse mobile user/device.</li>
+<li>Create session.</li>
+<li>Insert network log samples and neighbor cells.</li>
+<li>End session with distance/location summary.</li>
+<li>Analytics APIs consume these logs.</li>
+</ol>
+<h3>Create Project and Analyze</h3>
+<p>Use:</p>
+<ul>
+<li>POST /api/MapView/createProject</li>
+<li>POST /api/MapView/SavePolygon</li>
+<li>POST /api/MapView/CreateProjectWithPolygons</li>
+<li>GET /api/MapView/GetNetworkLog</li>
+<li>GET /api/MapView/kpi-distribution</li>
+<li>GET /api/MapView/GetSubSessionAnalytics</li>
+</ul>
+<p>Backend work:</p>
+<ol>
+<li>Creates project.</li>
+<li>Stores project polygons as MySQL geometry.</li>
+<li>Links sessions/logs/prediction records to project.</li>
+<li>Returns map points and KPI summaries.</li>
+</ol>
+<h3>Run Prediction / ML Integration</h3>
+<p>There are two sides:</p>
+<p>Dashboard/API side:</p>
+<ul>
+<li>POST /api/MapView/UploadSitePredictionCsv</li>
+<li>GET /api/MapView/GetSitePrediction</li>
+<li>GET /api/MapView/CompareSitePrediction</li>
+<li>GET /api/MapView/GetSitePredictionOptimised</li>
+</ul>
+<p>Python side:</p>
+<ul>
+<li>GET /api/PythonBridge/GetLteBaselineRows</li>
+<li>POST /api/PythonBridge/SaveLtePredictionOptimisedResults</li>
+<li>POST /api/PythonBridge/CreateLteOptimizationScenario</li>
+<li>POST /api/PythonBridge/UpdateLteOptimizationScenarioStatus</li>
+</ul>
+<p>Backend work:</p>
+<ol>
+<li>Baseline/input rows are stored.</li>
+<li>Python fetches rows using bridge key.</li>
+<li>Python saves optimized/refined/geo/RF results.</li>
+<li>UI compares and visualizes baseline vs optimized.</li>
+</ol>
+<h3>Compute Grid Analytics</h3>
+<p>Use:</p>
+<ul>
+<li>POST /api/GridAnalytics/ComputeAndStoreGridAnalytics?projectId=...</li>
+<li>GET /api/GridAnalytics/GetGridAnalytics?projectId=...</li>
+</ul>
+<p>Backend work:</p>
+<ol>
+<li>Checks license feature grid_fetch.</li>
+<li>Resolves project and company scope.</li>
+<li>Builds grid over map region or prediction bounds.</li>
+<li>Maps baseline/optimized points to each grid cell.</li>
+<li>Calculates avg/median/min/max/mode RSRP/RSRQ/SINR.</li>
+<li>Stores rows in grid_analytics_results.</li>
+<li>Read API returns latest grid generation.</li>
+</ol>
+<h2>7. Main Data Model Areas</h2>
+<p>ApplicationDbContext maps these major table groups:</p>
+<p>Users and auth:</p>
+<ul>
+<li>tbl_user</li>
+<li>tbl_user_deletion_otp</li>
+<li>tbl_user_deletion_token</li>
+<li>tbl_user_deletion_audit</li>
+<li>tbl_user_login_audit_details</li>
+<li>m_user_type</li>
+<li>m_email_setting</li>
+</ul>
+<p>Company and licensing:</p>
+<ul>
+<li>tbl_company</li>
+<li>tbl_company_license_grant_history</li>
+<li>tbl_company_user_license_issued</li>
+</ul>
+<p>Sessions and network logs:</p>
+<ul>
+<li>tbl_session</li>
+<li>tbl_network_log</li>
+<li>tbl_network_log_neighbour</li>
+</ul>
+<p>Prediction and thresholds:</p>
+<ul>
+<li>tbl_prediction_data</li>
+<li>site_prediction</li>
+<li>site_prediction_optimized</li>
+<li>thresholds</li>
+<li>tbl_lte_prediction_results</li>
+<li>tbl_lte_prediction_results_refined</li>
+<li>lte_prediction_baseline_results</li>
+<li>lte_prediction_optimised_results</li>
+</ul>
+<p>Projects, polygons, uploads, and analytics:</p>
+<ul>
+<li>tbl_project</li>
+<li>map_regions</li>
+<li>tbl_upload_history</li>
+<li>tbl_dashboard_cache</li>
+<li>grid_analytics_results</li>
+</ul>
+<p>Raw SQL/keyless DTO result models:</p>
+<ul>
+<li>N78 neighbor DTOs</li>
+<li>KPI distribution rows</li>
+<li>band/operator/network DTOs</li>
+<li>temporary location DTOs</li>
+</ul>
+<h2>8. Controller Map</h2>
+<h2>8.1 Backend Product Concept</h2>
+<p>This backend supports a telecom/network tracking product. The main business concepts are:</p>
+<ul>
+<li>Users log in from the web dashboard or register from the mobile app.</li>
+<li>Companies own users, licenses, sessions, projects, polygons, and analytics data.</li>
+<li>A mobile drive-test app records location and radio/network KPI samples.</li>
+<li>Sessions group the collected network samples.</li>
+<li>Network logs store signal values such as RSRP, RSRQ, SINR, PCI, band, technology, throughput, latency, jitter, packet loss, indoor/outdoor, and neighbor cell data.</li>
+<li>Projects group selected sessions, polygons, and site-prediction data for analysis.</li>
+<li>Polygons/regions define map areas or buildings where logs/predictions are analyzed.</li>
+<li>Prediction APIs store and compare baseline, optimized, ML, and non-ML site prediction results.</li>
+<li>Grid analytics splits a project area into grid cells and compares baseline vs optimized network quality.</li>
+<li>Python bridge APIs allow external Python/ML/reporting scripts to fetch backend data and save computed results.</li>
+<li>Redis speeds up expensive analytics and prevents duplicate active logins.</li>
+</ul>
+<p>In simple terms:</p>
+<pre><code>User/Company -&gt; Sessions -&gt; Network Logs -&gt; Projects/Polygons -&gt; Analytics/Prediction -&gt; Dashboard/Reports</code></pre>
+<h2>8.2 API Authentication Types</h2>
+<p>There are three API access styles in this backend:</p>
+<table><thead><tr>
+<th>API type</th>
+<th>Used by</th>
+<th>Auth required</th>
+<th>Example</th>
+</tr></thead><tbody>
+<tr>
+<td>Web dashboard APIs</td>
+<td>React/MVC/admin frontend</td>
+<td>Cookie login through /api/auth/login</td>
+<td>/api/MapView/GetProjects</td>
+</tr>
+<tr>
+<td>Public mobile/helper APIs</td>
+<td>Mobile app, health/download helpers</td>
+<td>Public API key header</td>
+<td>/api/MapView/log_networkAsync</td>
+</tr>
+<tr>
+<td>Python bridge APIs</td>
+<td>Python scripts/jobs</td>
+<td>X-Python-Bridge-Key header</td>
+<td>/api/PythonBridge/GetDriveTestRows</td>
+</tr>
+</tbody></table>
+<p>Public API key headers:</p>
+<ul>
+<li>X-Public-Api-Key</li>
+<li>or X-API-Key</li>
+</ul>
+<p>Python bridge header:</p>
+<ul>
+<li>X-Python-Bridge-Key</li>
+</ul>
+<p>For authenticated dashboard requests, the browser must send the auth/session cookies:</p>
+<ul>
+<li>st.auth</li>
+<li>st.session</li>
+</ul>
+<p>If CSRF is enabled, mutating authenticated requests also need:</p>
+<ul>
+<li>cookie: st.csrf</li>
+<li>header: X-CSRF-TOKEN</li>
+</ul>
+<h2>8.3 API Work Catalog</h2>
+<p>This section explains which API is used for which backend work.</p>
+<h3>AuthController</h3>
+<p>Base route: /api/auth</p>
+<p>Purpose:</p>
+<ul>
+<li>Login/logout.</li>
+<li>Current auth status.</li>
+<li>Feature list resolution.</li>
+<li>Redis login lock handling.</li>
+<li>Main/TW DB login routing.</li>
+</ul>
+<p>Endpoints:</p>
+<table><thead><tr>
+<th>Method</th>
+<th>API</th>
+<th>What it does</th>
+<th>Main backend work</th>
+</tr></thead><tbody>
+<tr>
+<td>POST</td>
+<td>/api/auth/login</td>
+<td>Logs in dashboard/admin user.</td>
+<td>Validates password, selects main/TW DB, creates Redis login lock, writes auth cookie/session, returns user/features.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/auth/logout</td>
+<td>Logs out current user.</td>
+<td>Deletes Redis login lock, clears auth cookie and session.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/auth/status</td>
+<td>Checks if browser is logged in.</td>
+<td>Reads claims/cookie, fetches user summary, returns enabled license features.</td>
+</tr>
+</tbody></table>
+<h3>CompanyController</h3>
+<p>Base route: /api/company</p>
+<p>Purpose:</p>
+<ul>
+<li>Company CRUD.</li>
+<li>Default admin creation.</li>
+<li>License grant/revoke/update.</li>
+<li>Company user management.</li>
+</ul>
+<p>Important endpoints:</p>
+<table><thead><tr>
+<th>Method</th>
+<th>API</th>
+<th>What it does</th>
+<th>Main backend work</th>
+</tr></thead><tbody>
+<tr>
+<td>GET</td>
+<td>/api/company/GetAll</td>
+<td>Lists companies.</td>
+<td>Applies super-admin/company scope and returns company/license summary.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/company/SaveCompanyDetails</td>
+<td>Creates/updates company.</td>
+<td>Saves company details, can create default admin user, may mirror company/user into secondary DB.</td>
+</tr>
+<tr>
+<td>DELETE</td>
+<td>/api/company/deleteCompany?id=</td>
+<td>Soft/deletes company.</td>
+<td>Checks super-admin access and updates/deletes company record.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/company/grantLicenseHistory</td>
+<td>Gets license grant history.</td>
+<td>Reads tbl_company_license_grant_history with company scope.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/company/grantLicense</td>
+<td>Grants license to company.</td>
+<td>Inserts/updates license grant and history rows.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/company/usedLicenses</td>
+<td>Lists used licenses/users.</td>
+<td>Reads issued license rows and associated users.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/company/revokeLicense?licenseId=</td>
+<td>Revokes an issued license.</td>
+<td>Marks issued license inactive/revoked.</td>
+</tr>
+<tr>
+<td>PUT</td>
+<td>/api/company/updateUser?userId=</td>
+<td>Updates company user.</td>
+<td>Updates user info, role, active state, company-safe fields.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/company/revokeUser?userId=</td>
+<td>Revokes user access.</td>
+<td>Marks user/license inactive.</td>
+</tr>
+<tr>
+<td>DELETE</td>
+<td>/api/company/deleteUser?userId=</td>
+<td>Soft deletes company user.</td>
+<td>Marks user deleted after scope checks.</td>
+</tr>
+<tr>
+<td>PUT</td>
+<td>/api/company/updateIssuedLicense?licenseId=</td>
+<td>Updates issued license.</td>
+<td>Changes issued license feature/status/details.</td>
+</tr>
+</tbody></table>
+<h3>AdminController</h3>
+<p>Base route: /Admin</p>
+<p>Purpose:</p>
+<ul>
+<li>Admin web pages.</li>
+<li>Dashboard data.</li>
+<li>User listing.</li>
+<li>Redis diagnostics.</li>
+<li>DB diagnostics.</li>
+</ul>
+<p>Important endpoints:</p>
+<table><thead><tr>
+<th>Method</th>
+<th>API</th>
+<th>What it does</th>
+<th>Main backend work</th>
+</tr></thead><tbody>
+<tr>
+<td>GET</td>
+<td>/Admin/Index</td>
+<td>Admin landing view.</td>
+<td>Returns MVC view if authenticated.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/Admin/Dashboard</td>
+<td>Admin dashboard view.</td>
+<td>Returns MVC dashboard page.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/Admin/DbDiagnostics</td>
+<td>Shows DB/session diagnostics.</td>
+<td>Returns current auth claims, session, selected DB info.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/Admin/GetUsers</td>
+<td>Lists users.</td>
+<td>Applies company scope, optional filters, joins license data, caches where possible.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/Admin/GetUserById</td>
+<td>Gets one user.</td>
+<td>Reads user by ID with scope validation.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/Admin/SaveUserDetails</td>
+<td>Creates/updates user.</td>
+<td>Saves user profile, password, role/company fields.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/Admin/DeleteUser</td>
+<td>Soft deletes user.</td>
+<td>Marks user deleted/inactive.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/Admin/ActivateUser</td>
+<td>Activates user.</td>
+<td>Updates user active flag.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/Admin/InactivateUser</td>
+<td>Inactivates user.</td>
+<td>Updates user active flag.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/Admin/DeleteUserPermanent</td>
+<td>Permanently deletes user.</td>
+<td>Removes user after checks.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/Admin/UserResetPassword</td>
+<td>Admin resets password.</td>
+<td>Hashes and saves new password.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/Admin/ChangePassword</td>
+<td>User changes password.</td>
+<td>Verifies old password and saves new hash.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/Admin/GetAllNetworkLogs</td>
+<td>Returns network logs for dashboard.</td>
+<td>Reads log data with filters and caching.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/Admin/GetAllNetworkLogsPaged</td>
+<td>Paged network logs.</td>
+<td>Efficient paginated log read.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/Admin/GetOperatorCoverageRanking</td>
+<td>Operator coverage ranking.</td>
+<td>Aggregates coverage KPIs by operator.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/Admin/GetOperatorQualityRanking</td>
+<td>Operator quality ranking.</td>
+<td>Aggregates quality KPIs by operator.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/Admin/IndoorCount</td>
+<td>Indoor sample count.</td>
+<td>Counts indoor logs.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/Admin/OutdoorCount</td>
+<td>Outdoor sample count.</td>
+<td>Counts outdoor logs.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/Admin/IndoorKpis</td>
+<td>Indoor KPI summary.</td>
+<td>Aggregates indoor KPI values.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/Admin/OutdoorKpis</td>
+<td>Outdoor KPI summary.</td>
+<td>Aggregates outdoor KPI values.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/Admin/GetSessions</td>
+<td>Lists sessions.</td>
+<td>Reads sessions with user/company scope.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/Admin/GetSessionsByDateRange</td>
+<td>Sessions by date range.</td>
+<td>Filters sessions between dates.</td>
+</tr>
+<tr>
+<td>DELETE</td>
+<td>/Admin/DeleteSession?id=</td>
+<td>Deletes a session.</td>
+<td>Deletes session and cascaded network logs.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/Admin/TotalsV2</td>
+<td>Dashboard totals.</td>
+<td>Aggregates user/session/log totals.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/Admin/MonthlySamplesV2</td>
+<td>Monthly sample chart.</td>
+<td>Aggregates sample counts by month.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/Admin/OperatorSamplesV2</td>
+<td>Operator sample chart.</td>
+<td>Aggregates samples by operator.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/Admin/NetworkTypeDistributionV2</td>
+<td>Network type chart.</td>
+<td>Aggregates 2G/3G/4G/5G distribution.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/Admin/AvgRsrpV2, /AvgRsrqV2, /AvgSinrV2</td>
+<td>Average radio KPI charts.</td>
+<td>Aggregates selected KPI by operator/network/date.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/Admin/redis/keys</td>
+<td>Lists Redis keys.</td>
+<td>Reads Redis keys by pattern.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/Admin/redis/key-info</td>
+<td>Gets Redis key details.</td>
+<td>Reads TTL/type/value preview.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/Admin/redis/extend-ttl</td>
+<td>Extends Redis TTL.</td>
+<td>Updates key expiration.</td>
+</tr>
+<tr>
+<td>DELETE</td>
+<td>/Admin/redis/delete</td>
+<td>Deletes Redis key.</td>
+<td>Removes one key.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/Admin/redis/flush</td>
+<td>Flushes Redis.</td>
+<td>Clears Redis cache.</td>
+</tr>
+</tbody></table>
+<h3>MapViewController</h3>
+<p>Base route: /api/MapView</p>
+<p>Purpose:</p>
+<ul>
+<li>Mobile user signup/session lifecycle.</li>
+<li>Network log ingestion.</li>
+<li>Map polygons.</li>
+<li>Projects.</li>
+<li>Network analytics.</li>
+<li>KPI distributions.</li>
+<li>Prediction data.</li>
+<li>Site prediction baseline/optimized data.</li>
+<li>Redis-backed map analytics caching.</li>
+</ul>
+<p>Main endpoint groups:</p>
+<p>Mobile/public ingestion:</p>
+<table><thead><tr>
+<th>Method</th>
+<th>API</th>
+<th>What it does</th>
+<th>Main backend work</th>
+</tr></thead><tbody>
+<tr>
+<td>POST</td>
+<td>/api/MapView/user_signup</td>
+<td>Registers mobile user/device.</td>
+<td>Checks duplicate device/mobile, inserts tbl_user, returns userid.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/MapView/start_session</td>
+<td>Starts a drive-test session.</td>
+<td>Inserts tbl_session, invalidates map caches, returns sessionid.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/MapView/end_session</td>
+<td>Ends a drive-test session.</td>
+<td>Updates session end time, distance, start/end location/address, invalidates caches.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/MapView/log_networkAsync</td>
+<td>Saves mobile network samples.</td>
+<td>Inserts tbl_network_log and neighbor records, parses radio data, invalidates caches.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/MapView/UploadImage</td>
+<td>Uploads image from mobile/client.</td>
+<td>Saves uploaded file and returns path/name.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/MapView/UploadImageLegacy</td>
+<td>Legacy image upload.</td>
+<td>Same purpose for older clients.</td>
+</tr>
+</tbody></table>
+<p>Polygons and projects:</p>
+<table><thead><tr>
+<th>Method</th>
+<th>API</th>
+<th>What it does</th>
+<th>Main backend work</th>
+</tr></thead><tbody>
+<tr>
+<td>GET</td>
+<td>/api/MapView/GetProjects</td>
+<td>Lists projects user can access.</td>
+<td>Applies company/user scope, uses Redis cache, returns project metadata.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/MapView/createProject</td>
+<td>Creates simple project.</td>
+<td>Inserts tbl_project.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/MapView/CreateProjectWithPolygons</td>
+<td>Creates project and polygons.</td>
+<td>Inserts project and map_regions, links selected sessions/logs.</td>
+</tr>
+<tr>
+<td>DELETE</td>
+<td>/api/MapView/DeleteProject?projectId=</td>
+<td>Deletes project.</td>
+<td>Scope-checks project, deletes/marks project and invalidates caches.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/GetProjectPolygons</td>
+<td>Gets polygons for project.</td>
+<td>Reads map_regions and returns geometry/log counts.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/GetProjectPolygonsV2</td>
+<td>Gets project polygons, V2.</td>
+<td>Reads project region polygons and/or site-prediction source.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/MapView/SavePolygon</td>
+<td>Saves a polygon.</td>
+<td>Converts coordinates to MySQL geometry, inserts map_regions.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/MapView/SavePolygonWithLogs</td>
+<td>Saves polygon and attaches logs.</td>
+<td>Stores polygon and selected/contained session log references.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/MapView/ImportPolygon</td>
+<td>Imports polygon.</td>
+<td>Reads uploaded/imported polygon geometry and stores it.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/GetAvailablePolygons</td>
+<td>Lists saved polygons.</td>
+<td>Applies company/user scope and returns active polygons.</td>
+</tr>
+<tr>
+<td>DELETE</td>
+<td>/api/MapView/DeleteAvailablePolygon</td>
+<td>Deletes saved polygon.</td>
+<td>Scope-checks and marks/removes polygon.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/GetPolygonLogCount</td>
+<td>Counts logs inside polygon.</td>
+<td>Spatial/count query over network logs.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/MapView/AssignPolygonToProject</td>
+<td>Assigns polygon to project.</td>
+<td>Updates map_regions.tbl_project_id.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/ListSavedPolygons</td>
+<td>Lists saved polygons for assignment.</td>
+<td>Reads reusable polygons.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/MapView/AssignExistingSitePredictionToProject</td>
+<td>Links saved prediction/polygon to project.</td>
+<td>Updates project-region/prediction association.</td>
+</tr>
+</tbody></table>
+<p>Network log and map analytics:</p>
+<table><thead><tr>
+<th>Method</th>
+<th>API</th>
+<th>What it does</th>
+<th>Main backend work</th>
+</tr></thead><tbody>
+<tr>
+<td>GET</td>
+<td>/api/MapView/GetNetworkLog</td>
+<td>Returns map network logs.</td>
+<td>Filters by date/session/operator/network/band/project/polygon, returns log points.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/GetLogsByDateRange</td>
+<td>Returns logs by date range.</td>
+<td>Company/user-scoped log query with cache.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/GetNeighbourLogsByDateRange</td>
+<td>Returns neighbor logs by date range.</td>
+<td>Queries tbl_network_log_neighbour joined to sessions/users.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/GetSubSessionAnalytics</td>
+<td>Session/sub-session analytics.</td>
+<td>Groups sessions/logs and returns KPI summaries.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/GetSubSessionAnalyticsWithStatus</td>
+<td>Same as above with status.</td>
+<td>Alias/rewrite adds includeStatus=1.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/session/provider-network-time/combined</td>
+<td>Provider/network usage time.</td>
+<td>Aggregates time spent by provider and network type.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/kpi-distribution</td>
+<td>KPI distribution buckets.</td>
+<td>Buckets values such as RSRP/RSRQ/SINR/throughput.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/lat-lon-distribution</td>
+<td>Location distribution.</td>
+<td>Aggregates logs by lat/lon areas.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/GetN78NeighboursSimple</td>
+<td>Simple N78 neighbor summary.</td>
+<td>Reads neighbor records for n78 detection.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/GetN78Neighbours</td>
+<td>N78 neighbor details.</td>
+<td>Returns primary/neighbor 5G n78 details by session/project.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/GetProviderWiseVolume</td>
+<td>Provider-wise data volume.</td>
+<td>Aggregates RX/TX/download/upload volume by provider.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/sessionsDistance</td>
+<td>Session distance totals.</td>
+<td>Sums session distance for filters.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/GetTotalUsageTime</td>
+<td>Total usage time.</td>
+<td>Aggregates session/log duration.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/GetIndoorOutdoorSessionAnalytics</td>
+<td>Indoor/outdoor analytics.</td>
+<td>Splits session/log KPIs by indoor/outdoor flag.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/GetProviders</td>
+<td>Provider dropdown data.</td>
+<td>Distinct operators/providers from logs.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/GetTechnologies</td>
+<td>Technology dropdown data.</td>
+<td>Distinct network/technology values.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/GetBands</td>
+<td>Band dropdown data.</td>
+<td>Distinct band values.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/GetDominanceDetails</td>
+<td>Dominance details.</td>
+<td>Finds dominant/weak PCI/cell/operator conditions.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/GetPciDistribution</td>
+<td>PCI distribution.</td>
+<td>Aggregates samples by PCI.</td>
+</tr>
+</tbody></table>
+<p>Prediction/site prediction:</p>
+<table><thead><tr>
+<th>Method</th>
+<th>API</th>
+<th>What it does</th>
+<th>Main backend work</th>
+</tr></thead><tbody>
+<tr>
+<td>GET/POST</td>
+<td>/api/MapView/GetPredictionLog</td>
+<td>Returns prediction log points.</td>
+<td>Applies threshold colors/classes and returns prediction data for maps.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/GetPredictionDataForSelectedBuildingPolygonsRaw</td>
+<td>Raw prediction points for polygons.</td>
+<td>Reads prediction rows inside selected building polygons.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/MapView/UploadSitePredictionCsv</td>
+<td>Uploads site prediction CSV.</td>
+<td>Parses CSV and inserts baseline/site prediction records.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/MapView/EnsureSitePredictionOptimizedScenarioColumn</td>
+<td>DB compatibility helper.</td>
+<td>Ensures optimized scenario column exists.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/GetUpdatedSitePrediction</td>
+<td>Gets updated/optimized prediction.</td>
+<td>Returns optimized prediction rows for project/operator/scenario.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/GetSitePrediction</td>
+<td>Gets site prediction result.</td>
+<td>Reads prediction table with filters/paging.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/CompareSitePrediction</td>
+<td>Compares baseline vs optimized.</td>
+<td>Matches baseline and optimized rows and returns differences.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/MapView/UpdateSitePrediction</td>
+<td>Updates site prediction rows.</td>
+<td>Reads request body, updates prediction values/scenario data.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/GetSitePredictionScenarios</td>
+<td>Lists scenarios for project.</td>
+<td>Reads distinct optimized scenario IDs/status.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/MapView/DeleteSitePredictionScenario</td>
+<td>Deletes site prediction scenario.</td>
+<td>Removes scenario rows.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/MapView/DeleteLtePredictionOptimisedScenario</td>
+<td>Deletes LTE optimized scenario.</td>
+<td>Removes optimized scenario rows.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/MapView/DeleteSitePrediction</td>
+<td>Deletes site prediction data.</td>
+<td>Removes prediction rows by requested filters.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/GetSiteNoMl</td>
+<td>Gets non-ML site prediction.</td>
+<td>Reads non-ML prediction table/data.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/GetSiteMl</td>
+<td>Gets ML site prediction.</td>
+<td>Reads ML prediction table/data.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/MapView/AddSitePrediction</td>
+<td>Adds site prediction row.</td>
+<td>Inserts prediction row manually/API-driven.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/GetNeighboursForPrimary</td>
+<td>Neighbor details for primary cell.</td>
+<td>Looks up neighbors by selected primary cell/site/session.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/GetLtePredictionStats</td>
+<td>LTE prediction metric stats.</td>
+<td>Aggregates selected metric by project.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/GetLtePredictionLocationStats</td>
+<td>Location stats for LTE prediction.</td>
+<td>Aggregates metric at a location or cell.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/GetLtePredictionLocationStatsRefined</td>
+<td>Refined prediction location stats.</td>
+<td>Same idea using refined prediction table.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/GetSitePredictionBase</td>
+<td>Baseline prediction lookup.</td>
+<td>Reads lte_prediction_baseline_results by project/node/cell/sector.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/MapView/GetSitePredictionOptimised</td>
+<td>Optimized prediction lookup.</td>
+<td>Reads optimized rows first, falls back to baseline if optimized missing.</td>
+</tr>
+</tbody></table>
+<p>Caching:</p>
+<ul>
+<li>Cache keys start with prefixes like mapview:, networklog:v2:, networklog:v3:, projectpolygons:, availablepolygons:*.</li>
+<li>Mutating endpoints invalidate related Redis patterns.</li>
+</ul>
+<h3>ExcelUploadController</h3>
+<p>Base route: /ExcelUpload</p>
+<p>Purpose:</p>
+<ul>
+<li>Upload CSV/ZIP/template files.</li>
+<li>Track upload history.</li>
+<li>Create project on project upload.</li>
+<li>Run CSV processing.</li>
+<li>Download templates and uploaded files.</li>
+</ul>
+<p>Endpoints:</p>
+<table><thead><tr>
+<th>Method</th>
+<th>API</th>
+<th>What it does</th>
+<th>Main backend work</th>
+</tr></thead><tbody>
+<tr>
+<td>GET</td>
+<td>/ExcelUpload/Index</td>
+<td>Upload page.</td>
+<td>Returns MVC upload view.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/ExcelUpload/DownloadExcel</td>
+<td>Downloads template/uploaded file.</td>
+<td>Reads Template-Files or UploadedExcels; requires public API key for anonymous access.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/ExcelUpload/DownloadPythonRuntime</td>
+<td>Downloads Python runtime/template.</td>
+<td>Calls DownloadExcel(4, null).</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/ExcelUpload/GetUploadedExcelFiles</td>
+<td>Lists recent uploads.</td>
+<td>Reads tbl_upload_history, joins user/session, applies company scope.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/ExcelUpload/UploadExcelFile</td>
+<td>Uploads and processes CSV/ZIP.</td>
+<td>Saves file, creates upload history, creates project if needed, calls CSV processor, updates status.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/ExcelUpload/GetSessions</td>
+<td>Lists sessions by date range.</td>
+<td>Reads sessions for selected dates/company.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/ExcelUpload/Test</td>
+<td>Debug endpoint.</td>
+<td>Returns basic controller/environment status.</td>
+</tr>
+</tbody></table>
+<p>Upload flow:</p>
+<ol>
+<li>User uploads a file and optional polygon/note file.</li>
+<li>Files are saved under UploadedExcels.</li>
+<li>A tbl_upload_history row is created with status Processing.</li>
+<li>If upload type is project upload, a tbl_project row is created.</li>
+<li>ProcessCSVController.Process(...) parses and inserts data.</li>
+<li>Upload history is updated to success or failed.</li>
+<li>For session uploads, the created session ID is returned.</li>
+</ol>
+<h3>ProcessCSVController</h3>
+<p>Base route: /api/ProcessCSV</p>
+<p>Purpose:</p>
+<ul>
+<li>Parse uploaded CSV/ZIP data.</li>
+<li>Insert network logs, neighbor logs, prediction rows, and project data.</li>
+<li>Provide upload-specific APIs for site prediction.</li>
+</ul>
+<p>Important endpoints:</p>
+<table><thead><tr>
+<th>Method</th>
+<th>API</th>
+<th>What it does</th>
+<th>Main backend work</th>
+</tr></thead><tbody>
+<tr>
+<td>POST</td>
+<td>/api/ProcessCSV/upload/site-prediction</td>
+<td>Uploads site prediction CSV.</td>
+<td>Parses file, inserts site prediction records.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/ProcessCSV/site-prediction</td>
+<td>Lists site prediction rows.</td>
+<td>Reads prediction rows by project with paging.</td>
+</tr>
+</tbody></table>
+<p>Also contains internal processing methods used by ExcelUploadController.</p>
+<h3>PythonBridgeController</h3>
+<p>Base route: /api/PythonBridge</p>
+<p>Purpose:</p>
+<ul>
+<li>Secure machine-to-machine API for Python scripts/jobs.</li>
+<li>Reads drive-test/session/project data.</li>
+<li>Saves prediction, baseline, optimized, refined, geo feature, and RF optimization results.</li>
+</ul>
+<p>Security:</p>
+<ul>
+<li>Requires header X-Python-Bridge-Key.</li>
+<li>Key is validated by PythonBridgeService.</li>
+</ul>
+<p>Important read endpoints:</p>
+<table><thead><tr>
+<th>Method</th>
+<th>API</th>
+<th>What it does</th>
+<th>Main backend work</th>
+</tr></thead><tbody>
+<tr>
+<td>POST</td>
+<td>/api/PythonBridge/GetDriveTestRows</td>
+<td>Gives Python drive-test samples.</td>
+<td>Reads network logs for requested session IDs with paging.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/PythonBridge/GetLteTiltBaselineResults</td>
+<td>Gives tilt baseline rows.</td>
+<td>Reads LTE tilt baseline data for project.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/PythonBridge/GetLteTiltAntennaRows</td>
+<td>Gives antenna rows.</td>
+<td>Reads antenna/site rows for project.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/PythonBridge/GetLtePredictionGeoFeatures</td>
+<td>Gives geo features.</td>
+<td>Reads prediction geo feature records.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/PythonBridge/GetSitePredictionOptimized</td>
+<td>Gives optimized site prediction.</td>
+<td>Reads optimized site prediction rows by project/operator.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/PythonBridge/GetLteSitePredictionRows</td>
+<td>Gives LTE site prediction rows.</td>
+<td>Reads LTE prediction data for Python processing.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/PythonBridge/GetLteBuildingRows</td>
+<td>Gives building rows.</td>
+<td>Reads building/region data for project.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/PythonBridge/GetLteBaselineRows</td>
+<td>Gives baseline rows.</td>
+<td>Reads LTE baseline prediction rows.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/PythonBridge/GetProject</td>
+<td>Gives one project.</td>
+<td>Reads project metadata.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/PythonBridge/GetProjectRegions</td>
+<td>Gives project polygons.</td>
+<td>Reads map_regions for project.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/PythonBridge/GetReportNetworkLogs</td>
+<td>Gives report logs.</td>
+<td>Reads logs for report generation.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/PythonBridge/GetSessions</td>
+<td>Gives selected sessions.</td>
+<td>Reads tbl_session by IDs.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/PythonBridge/GetUser</td>
+<td>Gives user info.</td>
+<td>Reads tbl_user by ID.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/PythonBridge/GetUserThresholds</td>
+<td>Gives thresholds.</td>
+<td>Reads user/default threshold settings.</td>
+</tr>
+</tbody></table>
+<p>Important write endpoints:</p>
+<table><thead><tr>
+<th>Method</th>
+<th>API</th>
+<th>What it does</th>
+<th>Main backend work</th>
+</tr></thead><tbody>
+<tr>
+<td>POST</td>
+<td>/api/PythonBridge/SavePredictionData</td>
+<td>Saves generic prediction data.</td>
+<td>Bulk inserts tbl_prediction_data.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/PythonBridge/SaveLtePredictionResults</td>
+<td>Saves LTE prediction results.</td>
+<td>Bulk inserts LTE prediction result rows.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/PythonBridge/SaveLtePredictionRefined</td>
+<td>Saves refined LTE prediction.</td>
+<td>Bulk inserts refined result rows.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/PythonBridge/SaveLtePredictionOptimisedResults</td>
+<td>Saves optimized LTE results.</td>
+<td>Bulk inserts optimized rows/scenario results.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/PythonBridge/SaveLtePredictionBaselineResults</td>
+<td>Saves baseline LTE rows.</td>
+<td>Bulk inserts baseline rows.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/PythonBridge/SaveLtePredictionGeoFeatures</td>
+<td>Saves geo features.</td>
+<td>Bulk inserts feature rows.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/PythonBridge/DeleteLtePredictionGeoFeatures</td>
+<td>Deletes geo features.</td>
+<td>Deletes matching feature rows.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/PythonBridge/CreateLteOptimizationScenario</td>
+<td>Creates optimization scenario.</td>
+<td>Inserts scenario metadata and returns row/scenario ID.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/PythonBridge/UpdateLteOptimizationScenarioStatus</td>
+<td>Updates scenario status.</td>
+<td>Updates scenario state/progress.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/PythonBridge/SaveRfOptimizationResults</td>
+<td>Saves RF optimization output.</td>
+<td>Bulk inserts RF optimization result rows.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/PythonBridge/UpdateProjectDownloadPath</td>
+<td>Stores report/download path.</td>
+<td>Updates project download path.</td>
+</tr>
+</tbody></table>
+<p>Scenario helpers:</p>
+<table><thead><tr>
+<th>Method</th>
+<th>API</th>
+<th>What it does</th>
+</tr></thead><tbody>
+<tr>
+<td>GET</td>
+<td>/api/PythonBridge/GetNextRfOptimizationScenarioId</td>
+<td>Returns next RF scenario ID for project.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/PythonBridge/GetLatestLteBaselineJobId</td>
+<td>Returns latest baseline job ID.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/PythonBridge/GetNextLteOptimizationScenarioId</td>
+<td>Returns next LTE optimization scenario ID.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/PythonBridge/PredictionDebugSummary</td>
+<td>Returns prediction/project debug counts.</td>
+</tr>
+</tbody></table>
+<h3>DataDeletionController</h3>
+<p>Base route: /api/data-deletion</p>
+<p>Purpose:</p>
+<ul>
+<li>User data deletion workflow.</li>
+<li>OTP send/verify.</li>
+<li>Data preview before deletion.</li>
+<li>Deletion request creation.</li>
+</ul>
+<p>Endpoints:</p>
+<table><thead><tr>
+<th>Method</th>
+<th>API</th>
+<th>What it does</th>
+<th>Main backend work</th>
+</tr></thead><tbody>
+<tr>
+<td>POST</td>
+<td>/api/data-deletion/send-otp</td>
+<td>Sends deletion OTP.</td>
+<td>Finds user by phone and sends OTP through OTP/SMS service.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/data-deletion/verify-otp</td>
+<td>Verifies OTP.</td>
+<td>Validates OTP and returns deletion token.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/data-deletion/data-preview</td>
+<td>Shows data to be deleted.</td>
+<td>Uses bearer/header deletion token to count/list user data.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/data-deletion/request-deletion</td>
+<td>Requests permanent deletion.</td>
+<td>Validates token/confirmation and schedules deletion.</td>
+</tr>
+</tbody></table>
+<h3>SettingController</h3>
+<p>Base route: /api/Setting</p>
+<p>Purpose:</p>
+<ul>
+<li>User/company/default threshold settings.</li>
+</ul>
+<p>Endpoints:</p>
+<table><thead><tr>
+<th>Method</th>
+<th>API</th>
+<th>What it does</th>
+<th>Main backend work</th>
+</tr></thead><tbody>
+<tr>
+<td>GET</td>
+<td>/api/Setting/GetThresholdSettings</td>
+<td>Gets KPI threshold config.</td>
+<td>Returns user-specific thresholds, else default thresholds, else fallback row.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/Setting/SaveThreshold</td>
+<td>Saves KPI thresholds.</td>
+<td>Updates latest user threshold or inserts a new user-specific threshold row.</td>
+</tr>
+</tbody></table>
+<h3>GridAnalyticsController</h3>
+<p>Purpose:</p>
+<ul>
+<li>Grid-level analytics.</li>
+<li>Uses grid_analytics_results.</li>
+</ul>
+<p>Base route: /api/GridAnalytics</p>
+<table><thead><tr>
+<th>Method</th>
+<th>API</th>
+<th>What it does</th>
+<th>Main backend work</th>
+</tr></thead><tbody>
+<tr>
+<td>POST</td>
+<td>/api/GridAnalytics/ComputeAndStoreGridAnalytics</td>
+<td>Computes project grid analytics.</td>
+<td>Checks grid_fetch license, builds grid over polygon/project area, compares baseline vs optimized KPI values, stores results in grid_analytics_results.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/api/GridAnalytics/SetProjectGridSize</td>
+<td>Saves project grid size.</td>
+<td>Updates tbl_project.grid_size.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/GridAnalytics/GetGridAnalytics</td>
+<td>Reads stored grid analytics.</td>
+<td>Returns latest stored grid cells and KPI differences.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/GridAnalytics/GetCoverageOptimizationSummary</td>
+<td>Summarizes optimized coverage changes.</td>
+<td>Compares baseline vs optimized rows and lists changed fields/sectors.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/api/GridAnalytics/GetOptimizationScenarios</td>
+<td>Lists optimization scenarios.</td>
+<td>Reads scenario IDs/status for project.</td>
+</tr>
+</tbody></table>
+<h3>HealthController</h3>
+<p>Base route: /healthz</p>
+<p>Purpose:</p>
+<ul>
+<li>Liveness and readiness checks.</li>
+</ul>
+<p>Endpoints:</p>
+<table><thead><tr>
+<th>Method</th>
+<th>API</th>
+<th>What it does</th>
+<th>Main backend work</th>
+</tr></thead><tbody>
+<tr>
+<td>GET</td>
+<td>/healthz</td>
+<td>Readiness check.</td>
+<td>Checks main DB, TW DB, Redis status, uptime.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/healthz/ready</td>
+<td>Readiness check.</td>
+<td>Same as /healthz.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/healthz/live</td>
+<td>Liveness check.</td>
+<td>Returns service alive and uptime without DB dependency.</td>
+</tr>
+</tbody></table>
+<p>Readiness checks:</p>
+<ul>
+<li>Main database.</li>
+<li>TW database.</li>
+<li>Redis status.</li>
+<li>Uptime.</li>
+</ul>
+<h3>HomeController</h3>
+<p>Purpose:</p>
+<ul>
+<li>MVC web pages.</li>
+<li>Login page and authenticated page helpers.</li>
+<li>Current logged user helpers.</li>
+</ul>
+<p>Base route: /Home</p>
+<p>Important endpoints:</p>
+<table><thead><tr>
+<th>Method</th>
+<th>API</th>
+<th>What it does</th>
+</tr></thead><tbody>
+<tr>
+<td>GET</td>
+<td>/Home or /Home/Index</td>
+<td>Login/home page.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/Home/Login</td>
+<td>Login page.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/Home/UserLogin</td>
+<td>Legacy MVC login flow.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/Home/GetUserForgotPassword</td>
+<td>Starts forgot password flow.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/Home/ResetPassword</td>
+<td>Reset password page.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/Home/ForgotResetPassword</td>
+<td>Saves reset password.</td>
+</tr>
+<tr>
+<td>GET</td>
+<td>/Home/Logout</td>
+<td>Legacy logout.</td>
+</tr>
+<tr>
+<td>POST</td>
+<td>/Home/GetLoggedUser</td>
+<td>Returns logged-in user/session info.</td>
+</tr>
+</tbody></table>
+<h3>RedisTestController</h3>
+<p>Purpose:</p>
+<ul>
+<li>Redis test/diagnostic APIs.</li>
+</ul>
+<p>Base route: /api/RedisTest</p>
+<table><thead><tr>
+<th>Method</th>
+<th>API</th>
+<th>What it does</th>
+</tr></thead><tbody>
+<tr>
+<td>GET</td>
+<td>/api/RedisTest/test</td>
+<td>Pings Redis, writes a test key, reads it back, deletes it, and returns Redis health.</td>
+</tr>
+</tbody></table>
+<h2>9. Common Backend Flows</h2>
+<h3>A. Web User Login and Dashboard Flow</h3>
+<ol>
+<li>Frontend calls POST /api/auth/login.</li>
+<li>Backend validates credentials from main or TW DB.</li>
+<li>Backend creates auth cookie and session.</li>
+<li>Frontend calls GET /api/auth/status.</li>
+<li>User opens dashboard/admin/map pages.</li>
+<li>Protected APIs use claims/session to resolve:</li>
+</ol>
+<ul>
+<li>user ID</li>
+<li>role</li>
+<li>company ID</li>
+<li>country/database</li>
+</ul>
+<ol>
+<li>Queries run against the selected MySQL database.</li>
+<li>Responses are returned as JSON or MVC views.</li>
+</ol>
+<h3>B. Mobile App Drive Test Flow</h3>
+<ol>
+<li>Mobile app registers user with POST /api/MapView/user_signup.</li>
+<li>Mobile app starts a drive session with POST /api/MapView/start_session.</li>
+<li>Mobile app sends network samples to POST /api/MapView/log_networkAsync.</li>
+<li>Optional images are uploaded through UploadImage or UploadImageLegacy.</li>
+<li>Mobile app ends the session with POST /api/MapView/end_session.</li>
+<li>Backend stores data in:</li>
+</ol>
+<ul>
+<li>tbl_user</li>
+<li>tbl_session</li>
+<li>tbl_network_log</li>
+<li>tbl_network_log_neighbour</li>
+</ul>
+<ol>
+<li>Analytics endpoints read this data for maps, KPI charts, provider distribution, and session summaries.</li>
+</ol>
+<h3>C. CSV Upload Flow</h3>
+<ol>
+<li>User opens upload UI.</li>
+<li>User uploads CSV/ZIP using POST /ExcelUpload/UploadExcelFile.</li>
+<li>File is stored in UploadedExcels.</li>
+<li>Upload history is stored in tbl_upload_history.</li>
+<li>If project upload, tbl_project is created.</li>
+<li>ProcessCSVController.Process(...) parses the file.</li>
+<li>Parsed data is inserted into session/log/prediction/project tables.</li>
+<li>Upload history is marked success or failed.</li>
+<li>Cache is invalidated where needed.</li>
+</ol>
+<h3>D. Map/Analytics Flow</h3>
+<ol>
+<li>Frontend calls authenticated /api/MapView/* endpoint.</li>
+<li>UserScopeService determines company or user scope.</li>
+<li>DbConnectionProvider determines main/TW database.</li>
+<li>Controller checks Redis cache for heavy queries.</li>
+<li>If cache hit, cached response is returned.</li>
+<li>If cache miss, EF Core or raw SQL queries MySQL.</li>
+<li>Response is written to Redis with TTL.</li>
+<li>Mutating operations invalidate matching Redis key patterns.</li>
+</ol>
+<h3>E. Site Prediction Flow</h3>
+<ol>
+<li>Prediction input is uploaded through CSV/API endpoints.</li>
+<li>Data is stored in prediction-related tables:</li>
+</ol>
+<ul>
+<li>tbl_prediction_data</li>
+<li>site_prediction</li>
+<li>site_prediction_optimized</li>
+<li>tbl_lte_prediction_results</li>
+<li>tbl_lte_prediction_results_refined</li>
+<li>lte_prediction_baseline_results</li>
+<li>lte_prediction_optimised_results</li>
+</ul>
+<ol>
+<li>Python jobs can fetch input rows through PythonBridgeController.</li>
+<li>Python jobs save calculated results back through bridge save endpoints.</li>
+<li>UI reads prediction output through MapViewController endpoints.</li>
+<li>Optimized and baseline results can be compared through CompareSitePrediction.</li>
+</ol>
+<h3>F. Python/ML Bridge Flow</h3>
+<ol>
+<li>Python job sends request to /api/PythonBridge/*.</li>
+<li>Request includes X-Python-Bridge-Key.</li>
+<li>Controller validates the key.</li>
+<li>Controller validates required request fields.</li>
+<li>PythonBridgeService executes database read/write logic.</li>
+<li>Response returns count, paging info, inserted count, or scenario IDs.</li>
+</ol>
+<h3>G. Data Deletion Flow</h3>
+<ol>
+<li>User requests OTP through /api/data-deletion/send-otp.</li>
+<li>User verifies OTP through /api/data-deletion/verify-otp.</li>
+<li>User can preview deletable data through /api/data-deletion/data-preview.</li>
+<li>User submits deletion request through /api/data-deletion/request-deletion.</li>
+<li>Optional hosted cleanup service processes pending deletion requests if enabled.</li>
+</ol>
+<h2>10. Security Notes</h2>
+<ul>
+<li>Protected APIs rely on cookie authentication and [Authorize].</li>
+<li>Public ingestion/download APIs require public API key.</li>
+<li>Python bridge APIs require X-Python-Bridge-Key.</li>
+<li>CSRF protection can be enabled with Security:RequireCsrfHeader.</li>
+<li>CSRF header name is X-CSRF-TOKEN.</li>
+<li>CSRF cookie name is st.csrf.</li>
+<li>Auth cookie name is st.auth.</li>
+<li>Session cookie name is st.session.</li>
+<li>Uploads are limited and path traversal is guarded by Path.GetFileName in download paths.</li>
+<li>Production error responses are filtered by ProductionErrorResponseFilter.</li>
+<li>Exceptions are sanitized through SafeException in many controllers.</li>
+</ul>
+<h2>11. Caching Notes</h2>
+<p>Redis is used for:</p>
+<ul>
+<li>Login lock.</li>
+<li>MapView response caching.</li>
+<li>Project/polygon/network analytics caching.</li>
+<li>Admin Redis diagnostics.</li>
+</ul>
+<p>Important cache invalidation patterns:</p>
+<ul>
+<li>mapview:*</li>
+<li>projectpolygons:*</li>
+<li>availablepolygons:*</li>
+<li>networklog:v2:*</li>
+<li>networklog:v3:*</li>
+<li>latlon:dist:*</li>
+<li>n78_simple_kpi:*</li>
+<li>n78_neighbours:*</li>
+<li>daterangelog:*</li>
+</ul>
+<h2>12. Configuration Keys</h2>
+<p>Important configuration values:</p>
+<ul>
+<li>ConnectionStrings:MySqlConnection</li>
+<li>ConnectionStrings:MySqlConnection2</li>
+<li>ConnectionStrings:Redis</li>
+<li>Security:PublicApiKey</li>
+<li>Security:RequireCsrfHeader</li>
+<li>Security:RequireRedisLoginLock</li>
+<li>Security:SessionIdleMinutes</li>
+<li>Security:MaxUploadBytes</li>
+<li>Security:AllowedOrigins</li>
+<li>Security:AllowNullOrigin</li>
+<li>Security:AllowLoopbackOrigins</li>
+<li>Security:ForwardedHeaders:KnownProxies</li>
+<li>Security:ForwardedHeaders:KnownNetworks</li>
+<li>UserDeletionCleanup:Enabled</li>
+</ul>
+<h2>13. High-Level Backend Diagram</h2>
+<pre><code>Client / Mobile / Python Job
+        |
+        v
+ASP.NET Core Middleware
+Security headers -&gt; HTTPS -&gt; CORS -&gt; Session -&gt; Auth -&gt; CSRF -&gt; Authorization
+        |
+        v
+Controllers
+Auth | Admin | Company | MapView | ExcelUpload | ProcessCSV | PythonBridge | DataDeletion | Settings | Health
+        |
+        v
+Services
+UserScope | LicenseFeature | DbConnectionProvider | RedisService | PythonBridge | OTP/SMS | UserDeletion
+        |
+        v
+Data Stores
+MySQL Main DB / MySQL TW DB / Redis / UploadedExcels / Template-Files</code></pre>
+<h2>14. File-Level KT Map</h2>
+<p>Use this map when taking ownership of the backend.</p>
+<table><thead><tr>
+<th>Area</th>
+<th>Main files</th>
+<th>Main tables/services</th>
+</tr></thead><tbody>
+<tr>
+<td>App startup</td>
+<td>Program.cs</td>
+<td>DI, middleware, Redis, DB, upload limits</td>
+</tr>
+<tr>
+<td>Security config</td>
+<td>Configuration/SecurityServiceExtensions.cs</td>
+<td>CORS, cookie auth, session, data protection</td>
+</tr>
+<tr>
+<td>Dynamic DB routing</td>
+<td>Services/DbConnectionProvider.cs</td>
+<td>MySqlConnection, MySqlConnection2, country code</td>
+</tr>
+<tr>
+<td>Company/user scope</td>
+<td>Services/UserScopeService.cs</td>
+<td>claims/session CompanyId, UserTypeId</td>
+</tr>
+<tr>
+<td>Auth/login</td>
+<td>Controllers/AuthController.cs, Security/PasswordSecurity.cs</td>
+<td>tbl_user, Redis login lock</td>
+</tr>
+<tr>
+<td>Admin dashboard</td>
+<td>Controllers/AdminController.cs</td>
+<td>users, sessions, logs, Redis diagnostics</td>
+</tr>
+<tr>
+<td>Company/license</td>
+<td>Controllers/CompanyController.cs, Services/LicenseFeatureService.cs</td>
+<td>company, license, feature tables</td>
+</tr>
+<tr>
+<td>Mobile/map/log APIs</td>
+<td>Controllers/MapViewController.cs</td>
+<td>sessions, logs, neighbors, projects, polygons</td>
+</tr>
+<tr>
+<td>CSV upload</td>
+<td>Controllers/ExcelUploadController.cs, Controllers/ProcessCSVController.cs</td>
+<td>tbl_upload_history, parsed target tables</td>
+</tr>
+<tr>
+<td>Python/ML bridge</td>
+<td>Controllers/PythonBridgeController.cs, Services/PythonBridgeService.cs</td>
+<td>prediction/log/project tables</td>
+</tr>
+<tr>
+<td>Grid analytics</td>
+<td>Controllers/GridAnalyticsController.cs</td>
+<td>grid_analytics_results, prediction tables</td>
+</tr>
+<tr>
+<td>Data deletion</td>
+<td>Controllers/DataDeletionController.cs, Services/OtpService.cs, Services/UserDeletionService.cs, Services/UserDeletionCleanupService.cs</td>
+<td>deletion OTP/token/audit tables</td>
+</tr>
+<tr>
+<td>Settings</td>
+<td>Controllers/SettingController.cs</td>
+<td>thresholds</td>
+</tr>
+<tr>
+<td>Health/Redis checks</td>
+<td>Controllers/HealthController.cs, Controllers/RedisTestController.cs</td>
+<td>DB connectivity, Redis connectivity</td>
+</tr>
+<tr>
+<td>EF model mapping</td>
+<td>Models/AppDbContext.cs, Models/EntityModel.cs</td>
+<td>all DbSet/table mappings</td>
+</tr>
+</tbody></table>
+<h2>15. Main Table Relationship KT</h2>
+<p>Core user/company:</p>
+<pre><code>tbl_company.id
+    -&gt; tbl_user.company_id
+    -&gt; tbl_session.user_id
+    -&gt; tbl_network_log.session_id
+    -&gt; tbl_network_log_neighbour.session_id</code></pre>
+<p>Project/polygon:</p>
+<pre><code>tbl_company.id
+    -&gt; tbl_project.company_id
+    -&gt; map_regions.tbl_project_id</code></pre>
+<p>Upload/session:</p>
+<pre><code>tbl_upload_history.id
+    -&gt; tbl_session.tbl_upload_id</code></pre>
+<p>Project/prediction:</p>
+<pre><code>tbl_project.id
+    -&gt; tbl_prediction_data.tbl_project_id
+    -&gt; site_prediction.tbl_project_id
+    -&gt; site_prediction_optimized.tbl_project_id
+    -&gt; lte_prediction_baseline_results.project_id
+    -&gt; lte_prediction_optimised_results.project_id
+    -&gt; tbl_lte_prediction_results.project_id
+    -&gt; tbl_lte_prediction_results_refined.project_id</code></pre>
+<p>License/features:</p>
+<pre><code>tbl_company.id
+    -&gt; tbl_company_user_license_issued.tbl_company_id
+    -&gt; tbl_company_user_license_issued.tbl_user_id
+    -&gt; license_feature_access.license_id</code></pre>
+<p>Deletion:</p>
+<pre><code>tbl_user.id
+    -&gt; tbl_user_deletion_otp.user_id
+    -&gt; tbl_user_deletion_token.user_id
+    -&gt; tbl_user_deletion_audit.user_id</code></pre>
+<h2>16. Things To Be Careful About</h2>
+<ul>
+<li>MapViewController.cs is very large and contains many unrelated API groups. When changing it, search for the exact route and nearby helper methods before editing.</li>
+<li>Do not assume one database. Always confirm country context: main DB vs TW DB.</li>
+<li>Do not trust requested company_id for normal users. UserScopeService intentionally overrides it with the logged-in company.</li>
+<li>Some older data may not have direct company_id, so code often scopes through tbl_user or created_by_user_id.</li>
+<li>Redis can make analytics look stale if cache invalidation is missed. Mutating log/project/polygon/prediction APIs should invalidate related cache patterns.</li>
+<li>Some endpoints use EF Core; others use raw SQL because they need spatial queries, dynamic columns, or performance.</li>
+<li>Public mobile APIs are anonymous but protected by public API key. In production, Security:PublicApiKey must be configured.</li>
+<li>Python bridge APIs do not use normal user cookie auth. They use X-Python-Bridge-Key.</li>
+<li>Upload size differs by environment: production default is 100 MB unless configured; development config allows 500 MB.</li>
+<li>Date/time values are mixed between UTC and local/IST in places. Be careful when adding date filters.</li>
+<li>Many APIs return Status = 1/0; newer deletion APIs return success = true/false.</li>
+</ul>
+<h2>17. Fast KT Summary</h2>
+<p>If you only remember one mental model, use this:</p>
+<pre><code>Country chooses database.
+Company chooses data scope inside that database.
+Role decides whether requested company_id is honored.
+Session/log tables hold collected drive-test data.
+Project/polygon tables organize data for map analysis.
+Prediction tables hold baseline/optimized/ML outputs.
+Python bridge moves data between backend and ML/report scripts.
+Redis caches expensive analytics and controls active login locks.</code></pre>
+</body>
+</html>

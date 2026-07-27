@@ -437,8 +437,8 @@ namespace SignalTracker.Controllers
             [FromForm] string ProjectName,
             [FromForm] string SessionIds,
             [FromForm] int UploadFileType,
-            [FromForm] List<IFormFile> UploadFile,
-            [FromForm] IFormFile UploadNoteFile
+            List<IFormFile> UploadFile,
+            IFormFile UploadNoteFile
         )
         {
             try

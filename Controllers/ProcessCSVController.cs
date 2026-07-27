@@ -557,7 +557,7 @@ namespace SignalTracker.Controllers
         [HttpPost("upload/site-prediction")]
 [Consumes("multipart/form-data")]
 public IActionResult UploadSitePrediction(
-    [FromForm] IFormFile file,
+    IFormFile file,
     [FromForm] int projectId,
     [FromForm] int excelId = 0,
     [FromForm] string? remarks = "")

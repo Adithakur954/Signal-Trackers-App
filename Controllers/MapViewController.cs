@@ -7650,7 +7650,7 @@ public JsonResult GetPredictionLog(
         // =========================================================
 
         [HttpPost, AllowAnonymous, PublicApiKey, Route("UploadImage")]
-        public async Task<IActionResult> UploadImage([FromForm] IFormFile file)
+        public async Task<IActionResult> UploadImage(IFormFile file)
         {
             if (file == null || file.Length == 0)
                 return BadRequest("No file uploaded.");
@@ -7680,7 +7680,7 @@ public JsonResult GetPredictionLog(
         }
 
         [HttpPost, AllowAnonymous, PublicApiKey, Route("UploadImageLegacy")]
-        public async Task<IActionResult> UploadImageLegacy([FromForm] IFormFile file)
+        public async Task<IActionResult> UploadImageLegacy(IFormFile file)
         {
             if (file == null || file.Length == 0)
                 return BadRequest("No file uploaded.");

@@ -1,5 +1,6 @@
 ﻿using Microsoft.AspNetCore.Http.Features;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.OpenApi.Models;
 using SignalTracker.Configuration;
 using SignalTracker.Middleware;
 using SignalTracker.Models;
@@ -66,6 +67,17 @@ internal class Program
             {
                 o.JsonSerializerOptions.PropertyNamingPolicy = null;
             });
+        builder.Services.AddEndpointsApiExplorer();
+        builder.Services.AddSwaggerGen(o =>
+        {
+            o.CustomSchemaIds(type => type.FullName?.Replace("+", "."));
+            o.SwaggerDoc("v1", new OpenApiInfo
+            {
+                Title = "Signal Tracker API",
+                Version = "v1",
+                Description = "OpenAPI documentation for Signal Tracker API endpoints."
+            });
+        });
 
         // ----------------------------------------------------
         // SECURITY, CORS, COOKIES & DATA PROTECTION
@@ -187,6 +199,15 @@ internal class Program
         // MIDDLEWARE PIPELINE
         // ----------------------------------------------------
         app.UseSignalTrackerSecurityHeaders();
+
+        if (app.Environment.IsDevelopment())
+        {
+            app.UseSwagger();
+            app.UseSwaggerUI(o =>
+            {
+                o.SwaggerEndpoint("/swagger/v1/swagger.json", "Signal Tracker API v1");
+            });
+        }
 
         if (!app.Environment.IsDevelopment())
         {
