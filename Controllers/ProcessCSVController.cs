@@ -51,13 +51,13 @@ namespace SignalTracker.Controllers
         // =====================================================================
         private sealed class NetworkLogModel
         {
-            [Name("Timestamp")]
+            [Name("Timestamp", "timestamp")]
             public string? Timestamp { get; set; }
 
-            [Name("Latitude")]
+            [Name("Latitude", "latitude", "lat")]
             public string? Latitude { get; set; }
 
-            [Name("Longitude")]
+            [Name("Longitude", "longitude", "lon")]
             public string? Longitude { get; set; }
 
             [Name("Altitude")]
@@ -117,7 +117,7 @@ namespace SignalTracker.Controllers
             [Name("unsent_data")]
             public string? UnsentData { get; set; }
 
-            [Name("CI", "CI (5G - Nci 4G - Ci 3G - BasestationId 2G - Cid)", "CI  (5G - Nci 4G - Ci 3G - BasestationId 2G - Cid)")]
+            [Name("CI", "ci", "mci", "CI (5G - Nci 4G - Ci 3G - BasestationId 2G - Cid)", "CI  (5G - Nci 4G - Ci 3G - BasestationId 2G - Cid)")]
             public string? CI { get; set; }
 
             [Name("PCI", "NR-PCI / PCI / PSC")]
@@ -156,10 +156,10 @@ namespace SignalTracker.Controllers
             [Name("BLER", "BLER (2G - bitErrorRate 3G - ber Others - BLER)", "BLER (2G - bitErrorRate 3G - ber  Others - BLER)")]
             public string? BLER { get; set; }
 
-            [Name("Alpha Long")]
+            [Name("Alpha Long", "m_alpha_long")]
             public string? m_alpha_long { get; set; }
 
-            [Name("Alpha Short")]
+            [Name("Alpha Short", "m_alpha_short")]
             public string? m_alpha_short { get; set; }
 
             [Name("No of Cells", "num_cells")]
@@ -219,16 +219,16 @@ namespace SignalTracker.Controllers
             [Name("TA", "ta")]
             public string? TA { get; set; }
 
-            [Name("GPS Fix Type")]
+            [Name("GPS Fix Type", "gps_fix_type")]
             public string? GPSFixType { get; set; }
 
-            [Name("GPS HDOP")]
+            [Name("GPS HDOP", "gps_hdop")]
             public string? GPSHDOP { get; set; }
 
-            [Name("GPS VDOP")]
+            [Name("GPS VDOP", "gps_vdop")]
             public string? GPSVDOP { get; set; }
 
-            [Name("Phone Antenna Gain")]
+            [Name("Phone Antenna Gain", "phone_antenna_gain")]
             public string? PhoneAntennaGain { get; set; }
 
             [Name("csiRsrp", "csi_rsrp")]
@@ -387,7 +387,7 @@ namespace SignalTracker.Controllers
 
     public string? Primary { get; set; }
 
-    [Name("Throughput Details")]
+    [Name("Throughput Details", "all_neighbor_cell_info", "all_neigbor_cell_info")]
     public string? ThroughputDetails { get; set; }
 
     [Name("No of Cells")]
@@ -1253,12 +1253,14 @@ public IActionResult UploadSitePrediction(
             string.Equals(h?.Trim(), "Timestamp", StringComparison.OrdinalIgnoreCase));
         bool hasLatOrLonColumn = headerRecord.Any(h =>
             string.Equals(h?.Trim(), "Latitude", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(h?.Trim(), "Longitude", StringComparison.OrdinalIgnoreCase));
+            string.Equals(h?.Trim(), "Longitude", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(h?.Trim(), "lat", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(h?.Trim(), "lon", StringComparison.OrdinalIgnoreCase));
 
         if (!hasTimestampColumn || !hasLatOrLonColumn)
         {
             errorList.Add(
-                $"{fileName}: Skipped — this doesn't look like network-log data (no Timestamp + Latitude/Longitude columns). " +
+                $"{fileName}: Skipped — this doesn't look like network-log data (no Timestamp + Latitude/Longitude or lat/lon columns). " +
                 "It was ignored so the rest of the upload could still be processed.");
             return true;
         }
@@ -1488,6 +1490,7 @@ public IActionResult UploadSitePrediction(
                         {
                             db.ChangeTracker.AutoDetectChangesEnabled = previousAutoDetectChanges;
                         }
+                        UpdateSessionBoundsFromLogs(sessionId);
                     }
                     Apply5GAlphaAndBandFillRules(sessionId);
 	                InvalidateNetworkLogCachesBestEffort();
@@ -1599,6 +1602,50 @@ public IActionResult UploadSitePrediction(
                 polygon_id = source.polygon_id,
                 Speed = source.Speed
             };
+        }
+
+        [NonAction]
+        private void UpdateSessionBoundsFromLogs(int sessionId)
+        {
+            if (sessionId <= 0)
+            {
+                return;
+            }
+
+            var firstLog = db.tbl_network_log
+                .AsNoTracking()
+                .Where(row => row.session_id == sessionId && row.timestamp != null)
+                .OrderBy(row => row.timestamp)
+                .ThenBy(row => row.id)
+                .Select(row => new { row.timestamp, row.lat, row.lon })
+                .FirstOrDefault();
+
+            var lastLog = db.tbl_network_log
+                .AsNoTracking()
+                .Where(row => row.session_id == sessionId && row.timestamp != null)
+                .OrderByDescending(row => row.timestamp)
+                .ThenByDescending(row => row.id)
+                .Select(row => new { row.timestamp, row.lat, row.lon })
+                .FirstOrDefault();
+
+            if (firstLog == null || lastLog == null)
+            {
+                return;
+            }
+
+            var session = db.tbl_session.FirstOrDefault(row => row.id == sessionId);
+            if (session == null)
+            {
+                return;
+            }
+
+            session.start_time = firstLog.timestamp;
+            session.end_time = lastLog.timestamp;
+            session.start_lat = firstLog.lat;
+            session.start_lon = firstLog.lon;
+            session.end_lat = lastLog.lat;
+            session.end_lon = lastLog.lon;
+            db.SaveChanges();
         }
 
         // Walks the exception chain looking for a MySQL transient error — lock wait
@@ -2184,7 +2231,7 @@ public bool ProcessSitePredictionSheet(
         private float? ValidParseFloat(string? value, out bool isValid)
         {
             isValid = false;
-            if (string.IsNullOrWhiteSpace(value))
+            if (IsNullLikeCell(value))
             {
                 isValid = true;
                 return null;
@@ -2216,10 +2263,22 @@ public bool ProcessSitePredictionSheet(
             return TryInt(suffix);
         }
 
-        private float? ParseFloat(string? value) => float.TryParse(value, NumberStyles.Any, CultureInfo.InvariantCulture, out var r) ? r : (float?)null;
-        private double? ParseDouble(string? value) => double.TryParse(value, NumberStyles.Any, CultureInfo.InvariantCulture, out var r) ? r : (double?)null;
-        private int? ParseInt(string? value) => int.TryParse(value, NumberStyles.Any, CultureInfo.InvariantCulture, out var r) ? r : (int?)null;
-        private long? ParseLong(string? value) => long.TryParse(value, NumberStyles.Any, CultureInfo.InvariantCulture, out var r) ? r : (long?)null;
+        private static bool IsNullLikeCell(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return true;
+
+            var normalized = value.Trim();
+            return normalized.Equals("NULL", StringComparison.OrdinalIgnoreCase)
+                || normalized.Equals("NA", StringComparison.OrdinalIgnoreCase)
+                || normalized.Equals("N/A", StringComparison.OrdinalIgnoreCase)
+                || normalized.Equals("NIL", StringComparison.OrdinalIgnoreCase)
+                || normalized.Equals("-", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private float? ParseFloat(string? value) => !IsNullLikeCell(value) && float.TryParse(value, NumberStyles.Any, CultureInfo.InvariantCulture, out var r) ? r : (float?)null;
+        private double? ParseDouble(string? value) => !IsNullLikeCell(value) && double.TryParse(value, NumberStyles.Any, CultureInfo.InvariantCulture, out var r) ? r : (double?)null;
+        private int? ParseInt(string? value) => !IsNullLikeCell(value) && int.TryParse(value, NumberStyles.Any, CultureInfo.InvariantCulture, out var r) ? r : (int?)null;
+        private long? ParseLong(string? value) => !IsNullLikeCell(value) && long.TryParse(value, NumberStyles.Any, CultureInfo.InvariantCulture, out var r) ? r : (long?)null;
         private DateTime? ParseDateTime(string? value) => DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.None, out var r) ? r : (DateTime?)null;
 
         [NonAction]
@@ -2381,5 +2440,3 @@ public bool ProcessSitePredictionSheet(
         }
     }
 }
-
-        
