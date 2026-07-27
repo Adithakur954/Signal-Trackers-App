@@ -104,6 +104,768 @@ namespace SignalTracker.Controllers
             return File(bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename);
         }
 
+        // POST api/ExcelReport/GenerateFromZip
+        // multipart/form-data:
+        //   LogZip          -> the .zip file (required)
+        //   ProjectName     -> optional (defaults to zip file name)
+        //   SessionIdOverride -> optional, forces the session id used for image lookup
+        //   BandFilter/Bands -> optional, one or more selected bands; ALL/empty = no filter
+        [HttpPost("GenerateFromZip")]
+        [Consumes("multipart/form-data")]
+        [RequestSizeLimit(200_000_000)]
+        public async Task<IActionResult> GenerateFromZip([FromForm] ZipReportUploadRequest request)
+        {
+            if (request.LogZip == null || request.LogZip.Length == 0)
+                return BadRequest(new { Message = "A log zip file is required." });
+
+            using var zipStream = new MemoryStream();
+            await request.LogZip.CopyToAsync(zipStream, HttpContext.RequestAborted);
+            zipStream.Position = 0;
+
+            using var archive = new ZipArchive(zipStream, ZipArchiveMode.Read, leaveOpen: true);
+
+            var mapImages = ExtractMapImagesFromZip(archive, out var detectedSessionId);
+            var sessionId = (int)(request.SessionIdOverride ?? detectedSessionId ?? 0);
+
+            var rawRows = ExtractNetworkRowsFromZip(archive, sessionId);
+            var rows = CleanZipRows(rawRows);
+            if (rows.Count == 0)
+                return BadRequest(new { Message = "No usable network log rows were found inside the zip." });
+
+            var bandsPresent = rows
+                .Select(r => r.BandSheetName)
+                .Where(b => !string.IsNullOrWhiteSpace(b))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(b => b, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            Response.Headers["X-Available-Bands"] = string.Join(",", bandsPresent);
+
+            var selectedBands = ResolveSelectedBands(request, Request.HasFormContentType ? Request.Form : null);
+            if (selectedBands.Count > 0)
+            {
+                rows = FilterZipRowsByBands(rows, selectedBands);
+
+                if (rows.Count == 0)
+                    return BadRequest(new
+                    {
+                        Message = $"No samples found for band(s): {string.Join(", ", selectedBands)}. Check the band value (e.g. B3, B8, B40, n78).",
+                        AvailableBands = bandsPresent
+                    });
+            }
+
+            var thresholds = ExtractThresholdConfigFromZip(archive);
+            var siteRows = ExtractSiteSummaryRowsFromZip(archive);
+
+            var sessionIds = sessionId > 0 ? new List<int> { sessionId } : new List<int>();
+
+            var projectName = string.IsNullOrWhiteSpace(request.ProjectName)
+                ? Path.GetFileNameWithoutExtension(request.LogZip.FileName)
+                : request.ProjectName;
+
+            if (selectedBands.Count > 0)
+            {
+                projectName += $" ({(selectedBands.Count == 1 ? "Band" : "Bands")}: {string.Join(", ", selectedBands)})";
+            }
+
+            var imageBytesByUrl = BuildImageBytesByUrlFromZip(mapImages, sessionIds);
+
+            var workbook = BuildWorkbook(
+                projectName,
+                sessionIds,
+                rows,
+                siteRows,
+                imageBytesByUrl,
+                thresholds);
+
+            var bytes = SimpleXlsxWriter.Write(workbook);
+            var filename = $"Walk_Test_Report_Zip_{sessionId}_{DateTime.Now:yyyy-MM-dd}.xlsx";
+            return File(bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename);
+        }
+
+        // POST api/ExcelReport/DiscoverBands
+        [HttpPost("DiscoverBands")]
+        [Consumes("multipart/form-data")]
+        [RequestSizeLimit(200_000_000)]
+        public async Task<IActionResult> DiscoverBands([FromForm] ZipBandDiscoveryRequest request)
+        {
+            if (request.LogZip == null || request.LogZip.Length == 0)
+                return BadRequest(new { Message = "A log zip file is required." });
+
+            using var zipStream = new MemoryStream();
+            await request.LogZip.CopyToAsync(zipStream, HttpContext.RequestAborted);
+            zipStream.Position = 0;
+
+            using var archive = new ZipArchive(zipStream, ZipArchiveMode.Read, leaveOpen: true);
+
+            ExtractMapImagesFromZip(archive, out var detectedSessionId);
+            var sessionId = (int)(request.SessionIdOverride ?? detectedSessionId ?? 0);
+
+            var rawRows = ExtractNetworkRowsFromZip(archive, sessionId);
+            var rows = CleanZipRows(rawRows);
+
+            var bandSummary = rows
+                .GroupBy(r => r.BandSheetName, StringComparer.OrdinalIgnoreCase)
+                .Select(g => new
+                {
+                    Band = g.Key,
+                    Count = g.Count(),
+                    Percentage = rows.Count == 0 ? 0 : Math.Round(g.Count() * 100.0 / rows.Count, 2)
+                })
+                .OrderByDescending(x => x.Count)
+                .ToList();
+
+            return Ok(new
+            {
+                SessionId = sessionId,
+                TotalRows = rows.Count,
+                AvailableBands = bandSummary
+            });
+        }
+
+        private static IReadOnlyDictionary<string, byte[]?> BuildImageBytesByUrlFromZip(
+            Dictionary<string, byte[]> mapImages,
+            List<int> sessionIds)
+        {
+            var result = new Dictionary<string, byte[]?>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var kvp in mapImages)
+            {
+                var header = kvp.Key.ToUpperInvariant();
+                result[header] = kvp.Value;
+
+                foreach (var sid in sessionIds)
+                {
+                    var url = BuildImageUrl(sid, header);
+                    result[url] = kvp.Value;
+                }
+
+                var fallbackUrl = BuildImageUrl(0, header);
+                result[fallbackUrl] = kvp.Value;
+            }
+
+            return result;
+        }
+
+        private Dictionary<string, byte[]> ExtractMapImagesFromZip(ZipArchive archive, out long? detectedSessionId)
+        {
+            var images = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
+            var sessionCounts = new Dictionary<long, int>();
+
+            foreach (var entry in archive.Entries)
+            {
+                var ext = Path.GetExtension(entry.FullName).ToLowerInvariant();
+                if (ext != ".png" && ext != ".jpg" && ext != ".jpeg") continue;
+
+                var fileName = Path.GetFileNameWithoutExtension(entry.FullName);
+                if (fileName.StartsWith("legend_", StringComparison.OrdinalIgnoreCase)) continue;
+
+                var match = Regex.Match(entry.FullName, @"(?:^|[\\/])(?:map_)?(\d+)_([A-Za-z0-9_]+)\.(png|jpg|jpeg)$", RegexOptions.IgnoreCase);
+                string header;
+                if (match.Success)
+                {
+                    if (long.TryParse(match.Groups[1].Value, out var sid))
+                        sessionCounts[sid] = sessionCounts.TryGetValue(sid, out var c) ? c + 1 : 1;
+
+                    header = match.Groups[2].Value.ToUpperInvariant();
+                }
+                else
+                {
+                    header = fileName.Replace("map_", "", StringComparison.OrdinalIgnoreCase).ToUpperInvariant();
+                }
+
+                try
+                {
+                    using var entryStream = entry.Open();
+                    using var ms = new MemoryStream();
+                    entryStream.CopyTo(ms);
+                    images[header] = ms.ToArray();
+                }
+                catch { }
+            }
+
+            detectedSessionId = sessionCounts.Count > 0
+                ? sessionCounts.OrderByDescending(x => x.Value).First().Key
+                : (long?)null;
+
+            return images;
+        }
+
+        private List<WalkTestLogRow> ExtractNetworkRowsFromZip(ZipArchive archive, long sessionId)
+        {
+            var rows = new List<WalkTestLogRow>();
+            var nextId = 1;
+
+            var csvEntries = archive.Entries
+                .Where(e => e.FullName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase))
+                .Where(e => !Path.GetFileName(e.FullName).StartsWith("ColorSettings", StringComparison.OrdinalIgnoreCase) &&
+                            !Path.GetFileName(e.FullName).StartsWith("SiteSummary", StringComparison.OrdinalIgnoreCase) &&
+                            !Path.GetFileName(e.FullName).StartsWith("sites", StringComparison.OrdinalIgnoreCase))
+                .OrderBy(e => e.FullName, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            foreach (var entry in csvEntries)
+            {
+                using var stream = entry.Open();
+                using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+                var text = reader.ReadToEnd();
+                var lines = text.Split('\n').Select(l => l.TrimEnd('\r')).Where(l => l.Length > 0).ToList();
+                if (lines.Count < 2) continue;
+
+                var headers = ParseCsvLine(lines[0]).Select(h => h.Trim()).ToList();
+                var map = BuildZipColumnMap(headers);
+
+                for (var i = 1; i < lines.Count; i++)
+                {
+                    var cols = ParseCsvLine(lines[i]);
+                    if (cols.Count < 2) continue;
+
+                    var row = ParseZipRow(cols, map, sessionId, ref nextId);
+                    if (row != null) rows.Add(row);
+                }
+            }
+
+            return rows;
+        }
+
+        private sealed class ZipColumnMap
+        {
+            public int Timestamp = -1, Lat = -1, Lon = -1, Network = -1, IndoorOutdoor = -1,
+                Mos = -1, CellId = -1, Pci = -1,
+                Rsrp = -1, Rsrq = -1, Sinr = -1, DlTpt = -1, UlTpt = -1, Earfcn = -1,
+                VolteCall = -1, Band = -1, Bler = -1, AlphaLong = -1, AlphaShort = -1,
+                NodebId = -1, Apps = -1, PuschTx = -1, Ta = -1, Cqi = -1, Level = -1, Primary = -1,
+                PrimaryCellInfo = -1;
+        }
+
+        private static ZipColumnMap BuildZipColumnMap(List<string> headers)
+        {
+            return new ZipColumnMap
+            {
+                Timestamp = FindZipColumn(headers, "timestamp"),
+                Lat = FindZipColumn(headers, "latitude"),
+                Lon = FindZipColumn(headers, "longitude"),
+                Network = FindZipColumn(headers, "network type"),
+                IndoorOutdoor = FindZipColumn(headers, "indoor/outdoor"),
+                Mos = FindZipColumn(headers, "mos"),
+                CellId = FindZipColumn(headers, "cell id"),
+                Pci = FindZipColumn(headers, "pci / psc"),
+                Rsrp = FindZipColumn(headers, "ssrsrp", "rsrp"),
+                Rsrq = FindZipColumn(headers, "ssrsrq", "rsrq"),
+                Sinr = FindZipColumn(headers, "rxqual", "sinr"),
+                DlTpt = FindZipColumn(headers, "dl thpt", "dl_tpt"),
+                UlTpt = FindZipColumn(headers, "ul thpt", "ul_tpt"),
+                Earfcn = FindZipColumn(headers, "earfcn"),
+                VolteCall = FindZipColumn(headers, "volte call", "volte_call"),
+                Band = FindZipColumn(headers, "band"),
+                Bler = FindZipColumn(headers, "bler"),
+                AlphaLong = FindZipColumn(headers, "alpha long", "m_alpha_long"),
+                AlphaShort = FindZipColumn(headers, "alpha short", "m_alpha_short"),
+                NodebId = FindZipColumn(headers, "nodeb id", "nodeb_id"),
+                Apps = FindZipColumn(headers, "running apps", "apps"),
+                PuschTx = FindZipColumn(headers, "pusch tx", "pusch_tx", "pusch"),
+                Ta = FindZipColumn(headers, "ta"),
+                Cqi = FindZipColumn(headers, "cqi"),
+                Level = FindZipColumn(headers, "level"),
+                Primary = FindZipColumnByName(headers, "primary"),
+                PrimaryCellInfo = FindZipColumnByName(headers, "cellinfo_1", "primary_cell_info_1")
+            };
+        }
+
+        private static int FindZipColumnByName(List<string> headers, params string[] candidates)
+        {
+            var candidateNames = candidates
+                .Select(NormalizeZipColumnName)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            for (var i = 0; i < headers.Count; i++)
+            {
+                if (candidateNames.Contains(NormalizeZipColumnName(headers[i])))
+                    return i;
+            }
+
+            return -1;
+        }
+
+        private static int FindZipColumn(List<string> headers, params string[] candidates)
+        {
+            for (var i = 0; i < headers.Count; i++)
+            {
+                var h = headers[i].ToLowerInvariant();
+                foreach (var c in candidates)
+                {
+                    if (h.Contains(c.ToLowerInvariant())) return i;
+                }
+            }
+            return -1;
+        }
+
+        private static string NormalizeZipColumnName(string value) =>
+            Regex.Replace(value.Trim(), @"[^a-z0-9]+", "", RegexOptions.IgnoreCase);
+
+        private WalkTestLogRow? ParseZipRow(List<string> cols, ZipColumnMap map, long sessionId, ref int nextId)
+        {
+            var tsRaw = GetZipCol(cols, map.Timestamp);
+            if (!DateTime.TryParse(tsRaw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var ts))
+                return null;
+
+            if (!IsZipPrimaryRegisteredRow(cols, map))
+                return null;
+
+            var provider = GetZipCol(cols, map.AlphaShort);
+            if (string.IsNullOrWhiteSpace(provider)) provider = GetZipCol(cols, map.AlphaLong);
+
+            var band = GetZipCol(cols, map.Band);
+            var network = GetZipCol(cols, map.Network);
+
+            return new WalkTestLogRow
+            {
+                Id = nextId++,
+                SessionId = (int)sessionId,
+                Timestamp = ts,
+                Lat = ParseFloatSafe(GetZipCol(cols, map.Lat)),
+                Lon = ParseFloatSafe(GetZipCol(cols, map.Lon)),
+                Network = network,
+                Provider = CleanZipProvider(provider),
+                Band = band,
+                BandSheetName = ToBandSheetName(band, network),
+                Pci = GetZipCol(cols, map.Pci),
+                Rsrp = ClampKpiFloat(ParseFloatSafe(GetZipCol(cols, map.Rsrp)), -140, -44),
+                Rsrq = ClampKpiFloat(ParseFloatSafe(GetZipCol(cols, map.Rsrq)), -34, 3),
+                Sinr = ClampKpiFloat(ParseFloatSafe(GetZipCol(cols, map.Sinr)), -23, 40),
+                Mos = ParseFloatSafe(GetZipCol(cols, map.Mos)),
+                Earfcn = GetZipCol(cols, map.Earfcn),
+                Bler = GetZipCol(cols, map.Bler),
+                VolteCall = GetZipCol(cols, map.VolteCall),
+                DlTpt = GetZipCol(cols, map.DlTpt),
+                UlTpt = GetZipCol(cols, map.UlTpt),
+                NodeBId = GetZipCol(cols, map.NodebId),
+                Apps = GetZipCol(cols, map.Apps),
+                IndoorOutdoor = GetZipCol(cols, map.IndoorOutdoor),
+                CellId = GetZipCol(cols, map.CellId),
+                Ta = map.PuschTx >= 0 ? GetZipCol(cols, map.PuschTx) : GetZipCol(cols, map.Ta),
+                Cqi = ParseFloatSafe(GetZipCol(cols, map.Cqi)),
+                Level = ParseIntSafe(GetZipCol(cols, map.Level)),
+                Primary = GetZipCol(cols, map.Primary)
+            };
+        }
+
+        private static bool IsZipPrimaryRegisteredRow(List<string> cols, ZipColumnMap map)
+        {
+            var primary = GetZipCol(cols, map.Primary);
+            if (!string.IsNullOrWhiteSpace(primary) && !primary.Equals("Yes", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            var primaryCellInfo = GetZipCol(cols, map.PrimaryCellInfo);
+            if (!string.IsNullOrWhiteSpace(primaryCellInfo))
+                return primaryCellInfo.Contains("mRegistered=YES", StringComparison.OrdinalIgnoreCase);
+
+            return true;
+        }
+
+        private static List<WalkTestLogRow> CleanZipRows(List<WalkTestLogRow> rows)
+        {
+            var cleaned = new List<WalkTestLogRow>(rows.Count);
+            var seen = new HashSet<string>();
+
+            foreach (var r in rows)
+            {
+                if (!r.Timestamp.HasValue) continue;
+
+                r.Provider = NormalizeZipText(r.Provider);
+                r.Band = NormalizeZipText(r.Band);
+                r.Network = NormalizeZipText(r.Network);
+                r.Pci = NormalizeZipText(r.Pci);
+                r.NodeBId = NormalizeZipText(r.NodeBId);
+                r.CellId = NormalizeZipText(r.CellId);
+                r.IndoorOutdoor = NormalizeZipText(r.IndoorOutdoor);
+                r.Apps = NormalizeZipText(r.Apps);
+                r.Bler = NormalizeZipText(r.Bler);
+
+                if (r.Lat is < -90 or > 90) r.Lat = null;
+                if (r.Lon is < -180 or > 180) r.Lon = null;
+                if (r.Lat == 0 && r.Lon == 0) { r.Lat = null; r.Lon = null; }
+
+                var dedupeKey = string.Join('|',
+                    r.SessionId, r.Timestamp?.Ticks, r.Pci, r.Rsrp, r.Rsrq, r.Band);
+                if (!seen.Add(dedupeKey)) continue;
+
+                cleaned.Add(r);
+            }
+
+            for (var i = 0; i < cleaned.Count; i++) cleaned[i].Id = i + 1;
+
+            return cleaned;
+        }
+
+        private static string? NormalizeZipText(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return null;
+            var v = value.Trim().Trim('"').Trim('\'').Trim();
+            if (v.Length == 0) return null;
+            if (v.Equals("N/A", StringComparison.OrdinalIgnoreCase) ||
+                v.Equals("Unknown", StringComparison.OrdinalIgnoreCase) ||
+                v.Equals("null", StringComparison.OrdinalIgnoreCase))
+                return null;
+            return v;
+        }
+
+        private static List<string> ResolveSelectedBands(ZipReportUploadRequest request, IFormCollection? form)
+        {
+            var values = new List<string>();
+            AddRawBandValues(values, request.BandFilter);
+
+            if (request.Bands != null)
+            {
+                foreach (var band in request.Bands)
+                    AddRawBandValues(values, band);
+            }
+
+            if (form != null)
+            {
+                AddFormBandValues(values, form, "BandFilter");
+                AddFormBandValues(values, form, "BandFilters");
+                AddFormBandValues(values, form, "Bands");
+            }
+
+            return values
+                .Select(x => x.Trim())
+                .Where(x => x.Length > 0)
+                .Where(x => !x.Equals("ALL", StringComparison.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        private static void AddFormBandValues(List<string> values, IFormCollection form, string key)
+        {
+            if (!form.TryGetValue(key, out var formValues)) return;
+
+            foreach (var value in formValues)
+                AddRawBandValues(values, value);
+        }
+
+        private static void AddRawBandValues(List<string> values, string? raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return;
+
+            values.AddRange(raw
+                .Split(new[] { ',', ';', '|' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(x => x.Trim())
+                .Where(x => x.Length > 0));
+        }
+
+        private static List<WalkTestLogRow> FilterZipRowsByBands(
+            IEnumerable<WalkTestLogRow> rows,
+            IReadOnlyCollection<string> selectedBands)
+        {
+            var wanted = selectedBands
+                .Select(CanonicalZipBandKey)
+                .Where(x => x.Length > 0)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            return rows
+                .Where(row => wanted.Contains(CanonicalZipBandKey(row.BandSheetName)) || wanted.Contains(CanonicalZipBandKey(row.Band)))
+                .ToList();
+        }
+
+        private static string CanonicalZipBandKey(string? value)
+        {
+            var text = NormalizeZipText(value);
+            if (text == null) return "";
+
+            var key = Regex.Replace(text, @"\s+", "", RegexOptions.CultureInvariant).ToUpperInvariant();
+            if (key.StartsWith("BAND", StringComparison.Ordinal))
+                key = "B" + key[4..];
+            if (Regex.IsMatch(key, @"^\d{1,3}$"))
+                key = "B" + key;
+            return key;
+        }
+
+        private static ReportThresholdConfig ExtractThresholdConfigFromZip(ZipArchive archive)
+        {
+            var thresholds = ReportThresholdConfig.Hardcoded();
+            var entry = archive.Entries
+                .Where(e => e.FullName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase) || e.FullName.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+                .FirstOrDefault(e => Path.GetFileName(e.FullName).StartsWith("ColorSettings", StringComparison.OrdinalIgnoreCase) ||
+                                     Path.GetFileName(e.FullName).StartsWith("colorsetting", StringComparison.OrdinalIgnoreCase) ||
+                                     Path.GetFileName(e.FullName).StartsWith("thresholds", StringComparison.OrdinalIgnoreCase));
+
+            if (entry == null) return thresholds;
+
+            try
+            {
+                using var stream = entry.Open();
+                using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+                var text = reader.ReadToEnd();
+
+                if (entry.FullName.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+                {
+                    var cfg = ReportThresholdConfig.FromColorSettingsJson(text, $"Zip color settings ({entry.Name})");
+                    if (cfg != null) return cfg;
+                }
+
+                var lines = text
+                    .Split('\n')
+                    .Select(l => l.TrimEnd('\r'))
+                    .Where(l => !string.IsNullOrWhiteSpace(l))
+                    .ToList();
+
+                if (lines.Count < 2) return thresholds;
+
+                var headers = ParseCsvLine(lines[0]);
+                var metricIndex = FindHeaderIndex(headers, "Metric");
+                var typeIndex = FindHeaderIndex(headers, "Type");
+                var minIndex = FindHeaderIndex(headers, "Min");
+                var maxIndex = FindHeaderIndex(headers, "Max");
+                var valueIndex = FindHeaderIndex(headers, "Value");
+                var colorIndex = FindHeaderIndex(headers, "Color");
+                var labelIndex = FindHeaderIndex(headers, "Label");
+
+                if (metricIndex < 0 || typeIndex < 0 || colorIndex < 0) return thresholds;
+
+                var rangesByMetric = new Dictionary<string, List<ThresholdRange>>(StringComparer.OrdinalIgnoreCase);
+
+                foreach (var line in lines.Skip(1))
+                {
+                    var cols = ParseCsvLine(line);
+                    var metric = GetZipCol(cols, metricIndex).Trim().ToUpperInvariant();
+                    var type = GetZipCol(cols, typeIndex).Trim().ToUpperInvariant();
+                    if (string.IsNullOrWhiteSpace(metric) || string.IsNullOrWhiteSpace(type)) continue;
+
+                    var color = NormalizeColorHex(GetZipCol(cols, colorIndex));
+                    var label = GetZipCol(cols, labelIndex);
+                    ThresholdRange? range = null;
+
+                    if (type == "RANGE")
+                    {
+                        var min = ParseDoubleSafe(GetZipCol(cols, minIndex));
+                        var max = ParseDoubleSafe(GetZipCol(cols, maxIndex));
+                        if (!min.HasValue || !max.HasValue) continue;
+                        range = new ThresholdRange(label, min.Value, max.Value, color);
+                    }
+                    else if (type == "VALUE")
+                    {
+                        var value = GetZipCol(cols, valueIndex);
+                        if (string.IsNullOrWhiteSpace(value)) continue;
+                        range = new ThresholdRange(label, 0, 0, color) { ValueMatch = value.Trim() };
+                    }
+
+                    if (range == null) continue;
+
+                    if (!rangesByMetric.TryGetValue(metric, out var ranges))
+                    {
+                        ranges = new List<ThresholdRange>();
+                        rangesByMetric[metric] = ranges;
+                    }
+
+                    ranges.Add(range);
+                }
+
+                if (rangesByMetric.Count == 0) return thresholds;
+
+                ApplyZipMetricRanges(rangesByMetric, "RSRP", ranges => thresholds.Rsrp = ranges);
+                ApplyZipMetricRanges(rangesByMetric, "RSRQ", ranges => thresholds.Rsrq = ranges);
+                ApplyZipMetricRanges(rangesByMetric, "SINR", ranges => thresholds.Sinr = ranges);
+                ApplyZipMetricRanges(rangesByMetric, "DL_THPT", ranges => thresholds.DlTpt = ranges);
+                ApplyZipMetricRanges(rangesByMetric, "UL_THPT", ranges => thresholds.UlTpt = ranges);
+                ApplyZipMetricRanges(rangesByMetric, "EARFCN", ranges => thresholds.Earfcn = ranges);
+                ApplyZipMetricRanges(rangesByMetric, "BLER", ranges => thresholds.Bler = ranges);
+                ApplyZipMetricRanges(rangesByMetric, "LTE_BLER", ranges => thresholds.Bler = ranges);
+                ApplyZipMetricRanges(rangesByMetric, "VOLTE", ranges => thresholds.VolteCall = ranges);
+                ApplyZipMetricRanges(rangesByMetric, "VOLTE_CALL", ranges => thresholds.VolteCall = ranges);
+                ApplyZipMetricRanges(rangesByMetric, "PUSCH_TX", ranges => thresholds.PuschTx = ranges);
+
+                thresholds.Source = $"Log zip color settings ({Path.GetFileName(entry.FullName)})";
+            }
+            catch
+            {
+                return thresholds;
+            }
+
+            return thresholds;
+        }
+
+        private static void ApplyZipMetricRanges(
+            Dictionary<string, List<ThresholdRange>> rangesByMetric,
+            string metric,
+            Action<List<ThresholdRange>> apply)
+        {
+            if (rangesByMetric.TryGetValue(metric, out var ranges) && ranges.Count > 0)
+                apply(ranges);
+        }
+
+        private static int FindHeaderIndex(List<string> headers, string name)
+        {
+            for (var i = 0; i < headers.Count; i++)
+            {
+                if (headers[i].Trim().Equals(name, StringComparison.OrdinalIgnoreCase))
+                    return i;
+            }
+            return -1;
+        }
+
+        private static List<WalkTestSiteSummaryRow> ExtractSiteSummaryRowsFromZip(ZipArchive archive)
+        {
+            var list = new List<WalkTestSiteSummaryRow>();
+            var entry = archive.Entries
+                .Where(e => e.FullName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase))
+                .FirstOrDefault(e => Path.GetFileName(e.FullName).StartsWith("SiteSummary", StringComparison.OrdinalIgnoreCase) ||
+                                     Path.GetFileName(e.FullName).StartsWith("site_summary", StringComparison.OrdinalIgnoreCase) ||
+                                     Path.GetFileName(e.FullName).StartsWith("sites", StringComparison.OrdinalIgnoreCase));
+
+            if (entry == null) return list;
+
+            try
+            {
+                using var stream = entry.Open();
+                using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+                var lines = reader.ReadToEnd().Split('\n').Select(l => l.TrimEnd('\r')).Where(l => l.Length > 0).ToList();
+                if (lines.Count < 2) return list;
+
+                var headers = ParseCsvLine(lines[0]).Select(h => h.Trim()).ToList();
+
+                for (var i = 1; i < lines.Count; i++)
+                {
+                    var cols = ParseCsvLine(lines[i]);
+                    if (cols.Count < 2) continue;
+
+                    list.Add(new WalkTestSiteSummaryRow
+                    {
+                        Source = GetZipColByHeader(cols, headers, "Source", "Optimized"),
+                        Site = ParseIntSafe(GetZipColByHeader(cols, headers, "Site")),
+                        SiteName = ParseIntSafe(GetZipColByHeader(cols, headers, "Site Name", "SiteName")),
+                        Sector = GetZipColByHeader(cols, headers, "Sector"),
+                        CellId = ParseIntSafe(GetZipColByHeader(cols, headers, "Cell ID", "CellId")),
+                        SecId = ParseIntSafe(GetZipColByHeader(cols, headers, "Sec ID", "SecId")),
+                        Latitude = ParseDoubleSafe(GetZipColByHeader(cols, headers, "Latitude", "Lat")),
+                        Longitude = ParseDoubleSafe(GetZipColByHeader(cols, headers, "Longitude", "Lon")),
+                        Tac = ParseIntSafe(GetZipColByHeader(cols, headers, "TAC")),
+                        Pci = ParseIntSafe(GetZipColByHeader(cols, headers, "PCI")),
+                        Azimuth = ParseIntSafe(GetZipColByHeader(cols, headers, "Azimuth")),
+                        Height = ParseIntSafe(GetZipColByHeader(cols, headers, "Height")),
+                        Band = ParseIntSafe(GetZipColByHeader(cols, headers, "Band")),
+                        Earfcn = ParseIntSafe(GetZipColByHeader(cols, headers, "EARFCN")),
+                        Bw = ParseIntSafe(GetZipColByHeader(cols, headers, "BW")),
+                        MTilt = ParseIntSafe(GetZipColByHeader(cols, headers, "M Tilt", "MTilt")),
+                        ETilt = ParseIntSafe(GetZipColByHeader(cols, headers, "E Tilt", "ETilt")),
+                        TxPower = ParseDoubleSafe(GetZipColByHeader(cols, headers, "Tx Power", "TxPower")),
+                        ReferenceSignalPower = ParseDoubleSafe(GetZipColByHeader(cols, headers, "Reference Signal Power")),
+                        Frequency = GetZipColByHeader(cols, headers, "Frequency"),
+                        Cluster = GetZipColByHeader(cols, headers, "Cluster"),
+                        Technology = GetZipColByHeader(cols, headers, "Technology")
+                    });
+                }
+            }
+            catch { }
+
+            return list;
+        }
+
+        private static string GetZipColByHeader(List<string> cols, List<string> headers, params string[] names)
+        {
+            foreach (var name in names)
+            {
+                var idx = FindHeaderIndex(headers, name);
+                if (idx >= 0 && idx < cols.Count)
+                    return cols[idx].Trim();
+            }
+            return "";
+        }
+
+        private static string GetZipCol(List<string> cols, int idx) =>
+            idx >= 0 && idx < cols.Count ? cols[idx].Trim() : "";
+
+        private static string CleanZipProvider(string? value) =>
+            (value ?? "").Trim().Trim('"').Trim('\'');
+
+        private static float? ParseFloatSafe(string s)
+        {
+            if (string.IsNullOrWhiteSpace(s)) return null;
+            var m = Regex.Match(s, @"-?\d+(\.\d+)?");
+            return m.Success && float.TryParse(m.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var v)
+                ? v
+                : (float?)null;
+        }
+
+        private static float? ClampKpiFloat(float? value, float min, float max)
+        {
+            if (!value.HasValue) return null;
+            return Math.Min(Math.Max(value.Value, min), max);
+        }
+
+        private static string NormalizeColorHex(string color)
+        {
+            if (string.IsNullOrWhiteSpace(color)) return "#808080";
+
+            var hex = color.Trim();
+            if (hex.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+                hex = hex[2..];
+            hex = hex.TrimStart('#');
+
+            if (hex.Length == 8)
+                hex = hex[2..];
+
+            return hex.Length == 6 ? $"#{hex}" : "#808080";
+        }
+
+        private static double? ParseDoubleSafe(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return null;
+            return double.TryParse(value.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)
+                ? parsed
+                : null;
+        }
+
+        private static int? ParseIntSafe(string? s)
+        {
+            if (string.IsNullOrWhiteSpace(s)) return null;
+            var m = Regex.Match(s, @"-?\d+");
+            return m.Success && int.TryParse(m.Value, out var v) ? v : (int?)null;
+        }
+
+        private static List<string> ParseCsvLine(string line)
+        {
+            var result = new List<string>();
+            var sb = new StringBuilder();
+            var inQuotes = false;
+
+            for (var i = 0; i < line.Length; i++)
+            {
+                var c = line[i];
+                if (inQuotes)
+                {
+                    if (c == '"')
+                    {
+                        if (i + 1 < line.Length && line[i + 1] == '"')
+                        {
+                            sb.Append('"');
+                            i++;
+                        }
+                        else
+                        {
+                            inQuotes = false;
+                        }
+                    }
+                    else
+                    {
+                        sb.Append(c);
+                    }
+                }
+                else
+                {
+                    if (c == '"') inQuotes = true;
+                    else if (c == ',')
+                    {
+                        result.Add(sb.ToString());
+                        sb.Clear();
+                    }
+                    else sb.Append(c);
+                }
+            }
+
+            result.Add(sb.ToString());
+            return result;
+        }
+
         /// <summary>
         /// Downloads every distinct chart image (one per session x header) that the report can
         /// reference, so they can be embedded as real pictures instead of hyperlinked / _xlfn.IMAGE()
@@ -220,16 +982,29 @@ namespace SignalTracker.Controllers
                     Bler = x.bler,
                     VolteCall = x.volte_call,
                     Cqi = x.cqi,
-                    Ta = x.ta,
+                    Ta = x.ta ?? ExtractPuschTxFromPrimaryCellInfo(x.primary_cell_info_1),
                     Level = x.level,
                     Primary = x.primary
                 })
                 .ToListAsync(HttpContext.RequestAborted);
 
             foreach (var row in rows)
+            {
+                if (string.IsNullOrWhiteSpace(row.Ta))
+                    row.Ta = ExtractPuschTxFromPrimaryCellInfo(row.Primary);
+
                 row.BandSheetName = ToBandSheetName(row.Band, row.Network);
+            }
 
             return rows;
+        }
+
+        private static string? ExtractPuschTxFromPrimaryCellInfo(string? primaryCellInfo)
+        {
+            if (string.IsNullOrWhiteSpace(primaryCellInfo)) return null;
+
+            var match = Regex.Match(primaryCellInfo, @"(?:mPuschTx|pusch_tx|mTxPower|txPower)\s*=\s*(-?\d+(\.\d+)?)", RegexOptions.IgnoreCase);
+            return match.Success ? match.Groups[1].Value : null;
         }
 
         private async Task<List<WalkTestSiteSummaryRow>> QuerySiteSummaryRowsAsync(int projectId)
@@ -357,7 +1132,6 @@ namespace SignalTracker.Controllers
 
             sheet.Rows.Add(XlsxRow.Title($"Walk Test Excel Report - {projectName}", 22));
             sheet.Rows.Add(XlsxRow.FromText("Generated On", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)));
-            sheet.Rows.Add(XlsxRow.FromText("Sessions", string.Join(", ", sessionIds)));
             sheet.Rows.Add(XlsxRow.FromText("Total Log Samples", rows.Count.ToString("N0", CultureInfo.InvariantCulture)));
             sheet.Rows.Add(XlsxRow.FromText("Band Sheets", string.Join(", ", rows.Select(x => x.BandSheetName).Distinct().OrderBy(x => x))));
             sheet.Rows.Add(XlsxRow.Blank());
