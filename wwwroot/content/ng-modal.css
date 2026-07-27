@@ -1,0 +1,97 @@
+
+.ng-modal-overlay {
+  background-color: #000000!important;
+  opacity: 0.75!important;
+}
+
+.ng-modal-close {
+  position: absolute;
+  top: 3px;
+  right: 5px;
+  cursor: pointer;
+  font-size: 120%;
+  padding: 5px;
+  display: inline-block;
+}
+.login-close {
+    right: 130px;
+}
+.ng-modal-close-x {
+  font-weight: bold;
+  font-family: Arial, sans-serif;
+}
+.ng-modal-title {
+  font-weight: bold;
+  font-size: 145%;
+  display: block;
+  margin-top: 10px;
+  padding-left: 15px;
+}
+@media (max-width: 480px) {
+    .login-close {
+    right: 30px;
+    }
+}
+.loginmodal-container {
+    padding: 15px;
+    width: 100% !important;
+    margin: 0 auto;
+    overflow: hidden;
+        text-align: center;
+}
+.loginmodal-container .ng-modal-title {
+    text-align: center;
+    font-size: 1.8em;
+}
+.loginmodal-container .login-close {
+    right: 80px;
+}
+ .loginmodal-container input[type=submit] {
+        width: 100%;
+        display: block;
+        margin-bottom: 10px;
+        margin-top: 15px;
+        position: relative;
+        font-size: 15pt;
+        padding:8px;
+  }
+.loginmodal-submit {
+    border: 0px;
+    text-shadow: 0 1px rgba(0,0,0,0.3);
+    background-color: #ADFF2F;
+}
+.loginmodal-container input[type=text], input[type=password], input[type=email] {
+    height: 47px;
+    font-size: 16px;
+    width: 100%;
+    margin-top: 10px;
+    border-radius:0;
+    background: #fff;
+   
+    /* border-radius: 2px;
+         -webkit-appearance: none;
+         border: 1px solid #d9d9d9;
+    border-top: 1px solid #c0c0c0;
+         */
+    padding: 0 8px;
+    box-sizing: border-box;
+    -moz-box-sizing: border-box;
+}
+.login-help {    
+    padding: 20px;
+    font-size: 12pt;
+    font-weight: 400;
+    text-align:right;
+}
+.loginmodal-container .login-help a {
+    text-decoration: none;
+    color: #328da2;
+    font-weight: 400;
+    text-align: center;
+    display: inline-block;
+    opacity: 0.9;
+    transition: opacity ease 0.5s;
+    font-size: 12pt;
+    cursor:pointer;
+}
+
