@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
@@ -1314,6 +1314,7 @@ public int ActiveDurationSeconds   { get; set; }
 
     public DateTime? FirstTimestamp { get; set; }
     public DateTime? LastTimestamp  { get; set; }
+    // remove  grid size 
 
     public AppAgg(string name) { AppName = name; }
 }
