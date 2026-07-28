@@ -124,6 +124,48 @@ namespace SignalTracker.Services
             }
         }
 
+        private static async Task<string?> ResolveProjectFilterWktAsync(
+            DbConnection conn,
+            long? projectId,
+            CancellationToken cancellationToken = default)
+        {
+            if (!projectId.HasValue || projectId.Value <= 0)
+            {
+                return null;
+            }
+
+            await using var command = conn.CreateCommand();
+            command.CommandText = @"
+                SELECT polygon_wkt
+                FROM (
+                    SELECT
+                        ST_AsText(p.polygon) AS polygon_wkt,
+                        1 AS prio,
+                        0 AS row_order
+                    FROM tbl_project p
+                    WHERE p.id = @pid
+
+                    UNION ALL
+
+                    SELECT
+                        ST_AsText(mr.region) AS polygon_wkt,
+                        2 AS prio,
+                        mr.id AS row_order
+                    FROM map_regions mr
+                    WHERE mr.tbl_project_id = @pid
+                ) src
+                WHERE polygon_wkt IS NOT NULL AND polygon_wkt <> ''
+                ORDER BY prio ASC, row_order DESC
+                LIMIT 1;";
+            PythonBridgeDbTool.AddParam(command, "@pid", projectId.Value);
+
+            var result = await command.ExecuteScalarAsync(cancellationToken);
+            var wkt = result == null || result == DBNull.Value
+                ? null
+                : Convert.ToString(result, CultureInfo.InvariantCulture);
+            return string.IsNullOrWhiteSpace(wkt) ? null : wkt.Trim();
+        }
+
         private async Task<(int Limit, int Offset, List<Dictionary<string, object?>> Rows)> GetCachedOrLoadRowsAsync(
             string cacheKey,
             int limit,
@@ -603,7 +645,9 @@ namespace SignalTracker.Services
                   AND (({1}) OR ({2}))
                   {3}
                   {4}
-                  {5} ";
+                  {5}
+                  {6}
+                  {7} ";
             var neighbourSql = @"
                 SELECT
                     lat, lon, rsrp, rsrq, sinr, cell_id, nodeb_id, band, network, pci, earfcn,
@@ -616,13 +660,22 @@ namespace SignalTracker.Services
                   AND (({1}) OR ({2}))
                   {3}
                   {4}
-                  {5} ";
+                  {5}
+                  {6}
+                  {7} ";
 
             var conn = _db.Database.GetDbConnection();
             if (conn.State != ConnectionState.Open)
             {
                 await conn.OpenAsync(cancellationToken);
             }
+
+            var projectPolygonWkt = await ResolveProjectFilterWktAsync(
+                conn,
+                request.ProjectId,
+                cancellationToken
+            );
+            var hasProjectPolygon = !string.IsNullOrWhiteSpace(projectPolygonWkt);
 
             await using var command = conn.CreateCommand();
             var inClause = PythonBridgeDbTool.BuildInClause(command, sessionIds, "sid");
@@ -632,8 +685,20 @@ namespace SignalTracker.Services
             var primaryClause = primaryOnly
                 ? "AND LOWER(COALESCE(`primary`, '')) = 'yes'"
                 : string.Empty;
-            var servingQuery = string.Format(servingSql, inClause, validBandPredicate, fiveGPredicate, $"AND ({primaryCellInfoPredicate})", operatorClause, primaryClause);
-            var neighbourQuery = string.Format(neighbourSql, inClause, validBandPredicate, fiveGPredicate, $"AND ({primaryCellInfoPredicate})", operatorClause, primaryClause);
+            var dateClause = string.Empty;
+            if (request.StartDate.HasValue)
+            {
+                dateClause += " AND timestamp >= @startDate";
+            }
+            if (request.EndDate.HasValue)
+            {
+                dateClause += " AND timestamp < @endDate";
+            }
+            var polygonClause = hasProjectPolygon
+                ? "AND lat IS NOT NULL AND lon IS NOT NULL AND ST_Contains(ST_GeomFromText(@projectPolygonWkt, 4326), ST_SRID(POINT(lon, lat), 4326))"
+                : string.Empty;
+            var servingQuery = string.Format(servingSql, inClause, validBandPredicate, fiveGPredicate, $"AND ({primaryCellInfoPredicate})", operatorClause, primaryClause, dateClause, polygonClause);
+            var neighbourQuery = string.Format(neighbourSql, inClause, validBandPredicate, fiveGPredicate, $"AND ({primaryCellInfoPredicate})", operatorClause, primaryClause, dateClause, polygonClause);
 
             command.CommandText = request.IncludeNeighbour
                 ? $"{servingQuery} UNION ALL {neighbourQuery} LIMIT @lim OFFSET @off;"
@@ -641,6 +706,22 @@ namespace SignalTracker.Services
 
             PythonBridgeDbTool.AddParam(command, "@lim", limit);
             PythonBridgeDbTool.AddParam(command, "@off", offset);
+            if (hasOperatorFilter)
+            {
+                PythonBridgeDbTool.AddParam(command, "@operator", operatorFilter);
+            }
+            if (request.StartDate.HasValue)
+            {
+                PythonBridgeDbTool.AddParam(command, "@startDate", request.StartDate.Value);
+            }
+            if (request.EndDate.HasValue)
+            {
+                PythonBridgeDbTool.AddParam(command, "@endDate", request.EndDate.Value.Date.AddDays(1));
+            }
+            if (hasProjectPolygon)
+            {
+                PythonBridgeDbTool.AddParam(command, "@projectPolygonWkt", projectPolygonWkt);
+            }
 
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             var rows = await PythonBridgeDbTool.ReadRowsAsync(reader, cancellationToken);
