@@ -7,6 +7,7 @@ using SignalTracker.Middleware;
 using SignalTracker.Models;
 using SignalTracker.Security;
 using SignalTracker.Services;
+using SignalTracker.Services.ZipImport;
 using StackExchange.Redis;
 using System.Threading.RateLimiting;
 
@@ -62,6 +63,7 @@ internal class Program
         builder.Services.AddScoped<LicenseFeatureService>();
         builder.Services.AddScoped<PythonBridgeService>();
         builder.Services.AddScoped<SitePredictionService>();
+        builder.Services.AddScoped<ZipImportService>();
         builder.Services.AddScoped<IOtpService, OtpService>();
         builder.Services.AddScoped<IUserDeletionService, UserDeletionService>();
         builder.Services.AddHttpClient<ISmsService, SmsService>();

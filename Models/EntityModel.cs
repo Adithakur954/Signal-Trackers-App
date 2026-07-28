@@ -391,6 +391,7 @@ public class tbl_company_license_grant_history
         public DateTime? timestamp { get; set; }
         public float? lat { get; set; }
         public float? lon { get; set; }
+        public float? altitude { get; set; }
         public int? battery { get; set; }
         public string? dls { get; set; }
         public string? uls { get; set; }
@@ -445,6 +446,7 @@ public class tbl_company_license_grant_history
         public string? bw { get; set; }
         public long? tbl_sub_session_ps_id { get; set; }
         public long? tbl_sub_session_cs_id { get; set; }
+        public string? extra_json { get; set; }
 
 
          public float? Speed {get;set;}
@@ -509,6 +511,7 @@ public class N78NeighbourSimpleDto
         public DateTime? timestamp { get; set; }
         public float? lat { get; set; }
         public float? lon { get; set; }
+        public float? altitude { get; set; }
         public int? battery { get; set; }
         public string? dls { get; set; }
         public string? uls { get; set; }
@@ -546,7 +549,27 @@ public class N78NeighbourSimpleDto
         public string? all_neigbor_cell_info { get; set; }
         public string? image_path { get; set; }
         public int? polygon_id { get; set; }
+        public long? tbl_sub_session_ps_id { get; set; }
+        public long? tbl_sub_session_cs_id { get; set; }
+        public string? extra_json { get; set; }
          public float? Speed {get;set;}
+    }
+
+    public class tbl_sub_session
+    {
+        public long id { get; set; }
+        public int? user_id { get; set; }
+        public int? session_id { get; set; }
+        public int? sub_session_id { get; set; }
+        public byte? type { get; set; }
+        public DateTime? start_time { get; set; }
+        public DateTime? end_time { get; set; }
+        public string? json_data { get; set; }
+        public byte? status { get; set; }
+        public double? start_lat { get; set; }
+        public double? start_lon { get; set; }
+        public double? end_lat { get; set; }
+        public double? end_lon { get; set; }
     }
 
 public class LatLonDistributionDto
