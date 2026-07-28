@@ -9,6 +9,7 @@ using SignalTracker.Security;
 using SignalTracker.Services;
 using SignalTracker.Services.ZipImport;
 using StackExchange.Redis;
+using System.Data;
 using System.Threading.RateLimiting;
 
 internal class Program
@@ -40,6 +41,48 @@ internal class Program
         Console.WriteLine(
             $"Missing database connection string '{name}'. " +
             $"Set 'ConnectionStrings:{name}' in configuration or environment variable 'ConnectionStrings__{name}'.");
+    }
+
+    private static void DropProjectGridSizeColumnIfExists(WebApplication app)
+    {
+        try
+        {
+            using var scope = app.Services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var conn = db.Database.GetDbConnection();
+            var shouldClose = conn.State != ConnectionState.Open;
+            if (shouldClose)
+                conn.Open();
+
+            try
+            {
+                using var exists = conn.CreateCommand();
+                exists.CommandText = @"
+                    SELECT COUNT(*)
+                    FROM information_schema.columns
+                    WHERE table_schema = DATABASE()
+                      AND table_name = 'tbl_project'
+                      AND column_name = 'grid_size';";
+
+                var count = Convert.ToInt32(exists.ExecuteScalar());
+                if (count <= 0)
+                    return;
+
+                using var drop = conn.CreateCommand();
+                drop.CommandText = "ALTER TABLE tbl_project DROP COLUMN grid_size;";
+                drop.ExecuteNonQuery();
+                Console.WriteLine("Dropped obsolete column tbl_project.grid_size.");
+            }
+            finally
+            {
+                if (shouldClose)
+                    conn.Close();
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Could not drop obsolete column tbl_project.grid_size: {ex.Message}");
+        }
     }
 
     private static void Main(string[] args)
@@ -279,6 +322,7 @@ internal class Program
         // BUILD APP
         // ----------------------------------------------------
         var app = builder.Build();
+        DropProjectGridSizeColumnIfExists(app);
 
         // ----------------------------------------------------
         // MIDDLEWARE PIPELINE

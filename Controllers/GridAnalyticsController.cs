@@ -253,16 +253,7 @@ namespace SignalTracker.Controllers
                     // â”€â”€ 3. FETCH grid_size FROM tbl_project â”€â”€
                     double gridSizeMeters = gridSize ?? 0;
                     if (gridSizeMeters <= 0)
-                    {
-                        await using var cmdProj = conn.CreateCommand();
-                        cmdProj.CommandText = "SELECT grid_size FROM tbl_project WHERE id = @pid";
-                        AddParam(cmdProj, "@pid", projectId);
-                        var gsRaw = await cmdProj.ExecuteScalarAsync();
-                        if (gsRaw != null && gsRaw != DBNull.Value)
-                            double.TryParse(gsRaw.ToString(), NumberStyles.Any, CultureInfo.InvariantCulture, out gridSizeMeters);
-                    }
-                    if (gridSizeMeters <= 0)
-                        return BadRequest(new { Status = 0, Message = "grid_size not available. Pass gridSize query param (meters)." });
+                        return BadRequest(new { Status = 0, Message = "Pass gridSize query param (meters)." });
 
                     // â”€â”€ 4. SECURITY: project belongs to company â”€â”€
                     if (targetCompanyId > 0)
@@ -274,19 +265,6 @@ namespace SignalTracker.Controllers
                         var accRes = await cmdAcc.ExecuteScalarAsync();
                         if (accRes == null || Convert.ToInt32(accRes) == 0)
                             return Unauthorized(new { Status = 0, Message = "Project does not belong to your company." });
-                    }
-
-                    if (gridSize.HasValue && gridSize.Value > 0)
-                    {
-                        await using var cmdUpdateGrid = conn.CreateCommand();
-                        cmdUpdateGrid.CommandText = "UPDATE tbl_project SET grid_size = @gridSize WHERE id = @pid";
-                        AddParam(
-                            cmdUpdateGrid,
-                            "@gridSize",
-                            gridSize.Value.ToString(CultureInfo.InvariantCulture)
-                        );
-                        AddParam(cmdUpdateGrid, "@pid", projectId);
-                        await cmdUpdateGrid.ExecuteNonQueryAsync();
                     }
 
                     // â”€â”€ 5. FETCH PREDICTION DATA (raw ADO.NET) â”€â”€
@@ -548,59 +526,6 @@ namespace SignalTracker.Controllers
             {
                 sw.Stop();
                 return StatusCode(500, new { Status = 0, Message = "An internal server error occurred." });
-            }
-        }
-
-        // =====================================================================
-        // POST api/GridAnalytics/SetProjectGridSize
-        // Saves manual grid size preference to tbl_project.grid_size
-        // =====================================================================
-        [HttpPost("SetProjectGridSize")]
-        public async Task<IActionResult> SetProjectGridSize(
-            [FromQuery] int projectId,
-            [FromQuery] double gridSize,
-            [FromQuery] int? company_id = null)
-        {
-            if (!await CanUseGridFeatureAsync())
-                return StatusCode(403, new { Status = 0, Message = "Feature disabled in license: grid_fetch", Code = "FEATURE_NOT_ENABLED" });
-
-            int targetCompanyId = _userScope.GetTargetCompanyId(User, company_id);
-            bool isSuperAdmin = _userScope.IsSuperAdmin(User);
-            if (!isSuperAdmin && targetCompanyId == 0)
-                return Unauthorized(new { Status = 0, Message = "Unauthorized. Unable to resolve company context." });
-
-            if (projectId <= 0)
-                return BadRequest(new { Status = 0, Message = "Invalid projectId." });
-
-            if (double.IsNaN(gridSize) || double.IsInfinity(gridSize) || gridSize <= 0)
-                return BadRequest(new { Status = 0, Message = "gridSize must be a positive number." });
-
-            try
-            {
-                var project = await _db.tbl_project.FirstOrDefaultAsync(p => p.id == projectId);
-                if (project == null)
-                    return NotFound(new { Status = 0, Message = "Project not found." });
-
-                if (!isSuperAdmin && targetCompanyId > 0 && project.company_id != targetCompanyId)
-                    return Unauthorized(new { Status = 0, Message = "Project does not belong to your company." });
-
-                project.grid_size = gridSize.ToString(CultureInfo.InvariantCulture);
-                await _db.SaveChangesAsync();
-
-                return Ok(new
-                {
-                    Status = 1,
-                    Message = "Project grid size updated.",
-                    Data = new
-                    {
-                        project_id = projectId,
-                        grid_size_meters = gridSize
-                    }
-                });
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, new { Status = 0, Message = "Error: " + SafeException.Get(ex) });
             }
         }
 

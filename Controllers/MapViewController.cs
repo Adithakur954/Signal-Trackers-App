@@ -2304,7 +2304,6 @@ public class AvailablePolygonsResponse
             public DateTime? ToDate { get; set; }
             public List<int>? PolygonIds { get; set; }
             public List<int>? SessionIds { get; set; }
-            public string? GridSize { get; set; }
             public string? LogGrid { get; set; }
             public string? log_grid { get; set; }
             public int? company_id { get; set; }
@@ -2418,8 +2417,7 @@ public async Task<JsonResult> CreateProjectWithPolygons([FromBody] CreateProject
                     status         = 1,
                     ref_session_id = (model.SessionIds != null && model.SessionIds.Any())
                                         ? string.Join(",", model.SessionIds)
-                                        : null,
-                    grid_size      = model.GridSize
+                                        : null
                 };
 
                 db.tbl_project.Add(newProj);
@@ -2468,7 +2466,6 @@ public async Task<JsonResult> CreateProjectWithPolygons([FromBody] CreateProject
                 p.band,
                 p.earfcn,
                 p.apps,
-                p.grid_size,
                 p.created_on,
                 p.status
             })
@@ -4293,7 +4290,6 @@ public async Task<IActionResult> UpdateProjectSessions([FromBody] UpdateProjectS
                 project.band,
                 project.earfcn,
                 project.apps,
-                project.grid_size,
                 project.log_grid,
                 project.created_on,
                 project.status
@@ -10951,8 +10947,7 @@ public async Task<IActionResult> CreateSimpleProject([FromBody] CreateProjectMod
             earfcn = model.EarFcn,
             apps = model.Apps,
             from_date = model.FromDate?.ToString("yyyy-MM-dd"),
-            to_date = model.ToDate?.ToString("yyyy-MM-dd"),
-            grid_size = model.GridSize
+            to_date = model.ToDate?.ToString("yyyy-MM-dd")
         };
 
         // 4. Save to Database
@@ -11912,7 +11907,6 @@ private async Task<List<object>> GetProjectsFromRawSqlAsync(
             p.band,
             p.earfcn,
             p.apps,
-            p.grid_size,
             {logGridSelect},
             {siteSizeSelect},
             p.created_on,
@@ -11971,7 +11965,6 @@ private async Task<List<object>> GetProjectsFromRawSqlAsync(
             band = ReadDb("band"),
             earfcn = ReadDb("earfcn"),
             apps = ReadDb("apps"),
-            grid_size = ReadDb("grid_size"),
             log_grid = ReadDb("log_grid"),
             sitesize = ReadDb("sitesize"),
             created_on = ReadDb("created_on"),
@@ -12022,7 +12015,6 @@ private async Task<List<object>> GetProjectsFallbackAsync(
             p.band,
             p.earfcn,
             p.apps,
-            p.grid_size,
             {logGridSelect},
             {siteSizeSelect},
             p.created_on,
@@ -12061,7 +12053,6 @@ private async Task<List<object>> GetProjectsFallbackAsync(
             band = ReadDb("band"),
             earfcn = ReadDb("earfcn"),
             apps = ReadDb("apps"),
-            grid_size = ReadDb("grid_size"),
             log_grid = ReadDb("log_grid"),
             sitesize = ReadDb("sitesize"),
             created_on = ReadDb("created_on"),
