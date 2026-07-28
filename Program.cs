@@ -43,7 +43,7 @@ internal class Program
             $"Set 'ConnectionStrings:{name}' in configuration or environment variable 'ConnectionStrings__{name}'.");
     }
 
-    private static void DropProjectGridSizeColumnIfExists(WebApplication app)
+    private static void EnsureProjectGridSizeColumnExists(WebApplication app)
     {
         try
         {
@@ -65,13 +65,13 @@ internal class Program
                       AND column_name = 'grid_size';";
 
                 var count = Convert.ToInt32(exists.ExecuteScalar());
-                if (count <= 0)
+                if (count > 0)
                     return;
 
-                using var drop = conn.CreateCommand();
-                drop.CommandText = "ALTER TABLE tbl_project DROP COLUMN grid_size;";
-                drop.ExecuteNonQuery();
-                Console.WriteLine("Dropped obsolete column tbl_project.grid_size.");
+                using var add = conn.CreateCommand();
+                add.CommandText = "ALTER TABLE tbl_project ADD COLUMN grid_size VARCHAR(50) NULL;";
+                add.ExecuteNonQuery();
+                Console.WriteLine("Added missing column tbl_project.grid_size.");
             }
             finally
             {
@@ -81,7 +81,7 @@ internal class Program
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Could not drop obsolete column tbl_project.grid_size: {ex.Message}");
+            Console.WriteLine($"Could not ensure column tbl_project.grid_size: {ex.Message}");
         }
     }
 
@@ -322,7 +322,7 @@ internal class Program
         // BUILD APP
         // ----------------------------------------------------
         var app = builder.Build();
-        DropProjectGridSizeColumnIfExists(app);
+        EnsureProjectGridSizeColumnExists(app);
 
         // ----------------------------------------------------
         // MIDDLEWARE PIPELINE
