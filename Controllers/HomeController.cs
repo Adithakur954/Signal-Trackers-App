@@ -193,6 +193,7 @@ namespace SignalTracker.Controllers
         }
 
         [HttpPost("UserLogin")]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("Auth")]
         public async Task<JsonResult> UserLogin([FromBody] LoginData obj)
         {
             var sw = Stopwatch.StartNew();
@@ -381,6 +382,7 @@ namespace SignalTracker.Controllers
         }
 
         [HttpPost("GetUserForgotPassword")]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("PasswordRecovery")]
         public JsonResult GetUserForgotPassword([FromBody] LoginData obj)
         {
             var message = new ReturnMessage { Status = 0, Message = DisplayMessage.ErrorMessage };
@@ -460,6 +462,7 @@ namespace SignalTracker.Controllers
         }
 
         [HttpPost("ForgotResetPassword")]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("PasswordRecovery")]
         public JsonResult ForgotResetPassword([FromBody] ResetPasswordModel model)
         {
             var ret = new ReturnMessage();

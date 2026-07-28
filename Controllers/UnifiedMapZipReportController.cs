@@ -28,6 +28,21 @@ namespace SignalTracker.Controllers
             _env = env;
         }
 
+        private static async Task<string> SaveUploadToTempFileAsync(IFormFile upload, CancellationToken ct)
+        {
+            var tempPath = Path.Combine(Path.GetTempPath(), $"signaltracker-unified-report-{Guid.NewGuid():N}.zip");
+            await using var output = new FileStream(
+                tempPath,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                bufferSize: 128 * 1024,
+                useAsync: true);
+
+            await upload.CopyToAsync(output, ct);
+            return tempPath;
+        }
+
         // POST api/UnifiedMapZipReport/GenerateFromZip
         // multipart/form-data:
         //   LogZip          -> the .zip file (required)
@@ -37,6 +52,7 @@ namespace SignalTracker.Controllers
         //   SessionIdOverride -> optional, forces the session id used for image lookup
         //   BandFilter/Bands -> optional, one or more selected bands; ALL/empty = no filter
         [HttpPost("GenerateFromZip")]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("Report")]
         [Consumes("multipart/form-data")]
         [RequestSizeLimit(200_000_000)]
         public async Task<IActionResult> GenerateFromZip([FromForm] ZipReportUploadRequest request)
@@ -44,9 +60,16 @@ namespace SignalTracker.Controllers
             if (request.LogZip == null || request.LogZip.Length == 0)
                 return BadRequest(new { Message = "A log zip file is required." });
 
-            using var zipStream = new MemoryStream();
-            await request.LogZip.CopyToAsync(zipStream, HttpContext.RequestAborted);
-            zipStream.Position = 0;
+            var tempZipPath = await SaveUploadToTempFileAsync(request.LogZip, HttpContext.RequestAborted);
+            try
+            {
+            await using var zipStream = new FileStream(
+                tempZipPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                bufferSize: 128 * 1024,
+                useAsync: true);
 
             using var archive = new ZipArchive(zipStream, ZipArchiveMode.Read, leaveOpen: true);
 
@@ -118,6 +141,11 @@ namespace SignalTracker.Controllers
             var pdf = UnifiedMapRawPdfBuilder.Build(report);
             var filename = $"UnifiedMap_ZipReport_{sessionId}_{DateTime.Now:yyyy-MM-dd}.pdf";
             return File(pdf, "application/pdf", filename);
+            }
+            finally
+            {
+                System.IO.File.Delete(tempZipPath);
+            }
         }
 
         // ---------------------------------------------------------------
@@ -263,6 +291,7 @@ namespace SignalTracker.Controllers
         // Upload the same zip here first to see which band values it contains,
         // so you know what to pass as BandFilter to GenerateFromZip.
         [HttpPost("DiscoverBands")]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("Report")]
         [Consumes("multipart/form-data")]
         [RequestSizeLimit(200_000_000)]
         public async Task<IActionResult> DiscoverBands([FromForm] ZipBandDiscoveryRequest request)
@@ -270,9 +299,16 @@ namespace SignalTracker.Controllers
             if (request.LogZip == null || request.LogZip.Length == 0)
                 return BadRequest(new { Message = "A log zip file is required." });
 
-            using var zipStream = new MemoryStream();
-            await request.LogZip.CopyToAsync(zipStream, HttpContext.RequestAborted);
-            zipStream.Position = 0;
+            var tempZipPath = await SaveUploadToTempFileAsync(request.LogZip, HttpContext.RequestAborted);
+            try
+            {
+            await using var zipStream = new FileStream(
+                tempZipPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                bufferSize: 128 * 1024,
+                useAsync: true);
 
             using var archive = new ZipArchive(zipStream, ZipArchiveMode.Read, leaveOpen: true);
 
@@ -290,6 +326,11 @@ namespace SignalTracker.Controllers
                 TotalRows = rows.Count,
                 AvailableBands = bandSummary
             });
+            }
+            finally
+            {
+                System.IO.File.Delete(tempZipPath);
+            }
         }
 
         private static List<object> BuildBandSummary(List<UnifiedMapReportRow> rows)

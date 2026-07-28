@@ -211,7 +211,7 @@ namespace SignalTracker.Services
 
             if (string.IsNullOrWhiteSpace(configuredKey))
             {
-                return true;
+                return false;
             }
 
             if (string.IsNullOrWhiteSpace(incomingKey))

@@ -48,8 +48,7 @@ namespace SignalTracker.Controllers
             var configuredKey =
                 _configuration["PythonBridge:ApiKey"]
                 ?? Environment.GetEnvironmentVariable("PYTHON_BRIDGE_API_KEY")
-                ?? Environment.GetEnvironmentVariable("SIGNAL_TRACKERS_BRIDGE_KEY")
-                ?? "s-tracer-local-bridge";
+                ?? Environment.GetEnvironmentVariable("SIGNAL_TRACKERS_BRIDGE_KEY");
 
             if (string.IsNullOrWhiteSpace(configuredKey))
             {

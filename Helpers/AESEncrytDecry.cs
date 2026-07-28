@@ -11,18 +11,37 @@ namespace SignalTracker
 {
     public class AESEncrytDecry
     {
-        public static readonly string AESKey = "xsbbucbducbhbub78r848";
-        public static readonly string AESIV = "cjhdbchdbcbc788746748567";
+        private const string DefaultAESKey = "xsbbucbducbhbub78r848";
+        private const string DefaultAESIV = "cjhdbchdbcbc788746748567";
+        private const string DefaultPassword = "kpmg@admin";
+        private const string DefaultHash = "SHA1";
+        private const string DefaultSalt = "aselrias38490a32";
+        private const string DefaultVector = "8947az34awl34kjq";
+
+        public static readonly string AESKey = GetSecret("SIGNALTRACKER_AES_KEY", DefaultAESKey);
+        public static readonly string AESIV = GetSecret("SIGNALTRACKER_AES_IV", DefaultAESIV);
         #region Settings
 
-        private static int _iterations = 2;
-        private static int _keySize = 256;
-        private static string password = "kpmg@admin";
-        private static string _hash = "SHA1";
-        private static string _salt = "aselrias38490a32"; // Random
-        private static string _vector = "8947az34awl34kjq"; // Random
+        private static int _iterations = GetIntSecret("SIGNALTRACKER_AES_ITERATIONS", 2);
+        private static int _keySize = GetIntSecret("SIGNALTRACKER_AES_KEY_SIZE", 256);
+        private static string password = GetSecret("SIGNALTRACKER_AES_PASSWORD", DefaultPassword);
+        private static string _hash = GetSecret("SIGNALTRACKER_AES_HASH", DefaultHash);
+        private static string _salt = GetSecret("SIGNALTRACKER_AES_SALT", DefaultSalt);
+        private static string _vector = GetSecret("SIGNALTRACKER_AES_VECTOR", DefaultVector);
 
         #endregion
+
+        private static string GetSecret(string name, string fallback)
+        {
+            var value = Environment.GetEnvironmentVariable(name);
+            return string.IsNullOrWhiteSpace(value) ? fallback : value;
+        }
+
+        private static int GetIntSecret(string name, int fallback)
+        {
+            var value = Environment.GetEnvironmentVariable(name);
+            return int.TryParse(value, out var parsed) && parsed > 0 ? parsed : fallback;
+        }
 
         public static string Encrypt(string value)
         {

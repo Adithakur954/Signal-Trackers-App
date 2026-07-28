@@ -555,6 +555,7 @@ namespace SignalTracker.Controllers
         // =====================================================================
         /// <summary>Upload a Site Prediction CSV (or ZIP of CSVs) and process it (fileType=15).</summary>
         [HttpPost("upload/site-prediction")]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("Upload")]
 [Consumes("multipart/form-data")]
 public IActionResult UploadSitePrediction(
     IFormFile file,

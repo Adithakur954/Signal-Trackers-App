@@ -1,5 +1,6 @@
 ﻿using Microsoft.AspNetCore.Http.Features;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.OpenApi.Models;
 using SignalTracker.Configuration;
 using SignalTracker.Middleware;
@@ -7,9 +8,24 @@ using SignalTracker.Models;
 using SignalTracker.Security;
 using SignalTracker.Services;
 using StackExchange.Redis;
+using System.Threading.RateLimiting;
 
 internal class Program
 {
+    private static string GetRateLimitPartitionKey(HttpContext context, bool preferUser = true)
+    {
+        if (preferUser)
+        {
+            var userId = context.User?.FindFirst("UserId")?.Value
+                ?? context.User?.FindFirst("user_id")?.Value;
+
+            if (!string.IsNullOrWhiteSpace(userId))
+                return $"user:{userId}";
+        }
+
+        return $"ip:{context.Connection.RemoteIpAddress?.ToString() ?? "unknown"}";
+    }
+
     private static void WarnIfConnectionStringMissing(IConfiguration configuration, string name)
     {
         var connectionString = MySqlConnectionStringHelper.EnsureZeroDateTimeHandling(
@@ -77,6 +93,73 @@ internal class Program
                 Version = "v1",
                 Description = "OpenAPI documentation for Signal Tracker API endpoints."
             });
+        });
+        builder.Services.AddRateLimiter(o =>
+        {
+            o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+            o.AddPolicy("Auth", context => RateLimitPartition.GetFixedWindowLimiter(
+                GetRateLimitPartitionKey(context, preferUser: false),
+                _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = 20,
+                    Window = TimeSpan.FromMinutes(1),
+                    QueueLimit = 0
+                }));
+
+            o.AddPolicy("PasswordRecovery", context => RateLimitPartition.GetFixedWindowLimiter(
+                GetRateLimitPartitionKey(context, preferUser: false),
+                _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = 15,
+                    Window = TimeSpan.FromMinutes(3),
+                    QueueLimit = 0
+                }));
+
+            o.AddPolicy("Otp", context => RateLimitPartition.GetFixedWindowLimiter(
+                GetRateLimitPartitionKey(context, preferUser: false),
+                _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = 5,
+                    Window = TimeSpan.FromMinutes(1),
+                    QueueLimit = 0
+                }));
+
+            o.AddPolicy("Upload", context => RateLimitPartition.GetFixedWindowLimiter(
+                GetRateLimitPartitionKey(context),
+                _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = 15,
+                    Window = TimeSpan.FromMinutes(30),
+                    QueueLimit = 0
+                }));
+
+            o.AddPolicy("Report", context => RateLimitPartition.GetFixedWindowLimiter(
+                GetRateLimitPartitionKey(context),
+                _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = 12,
+                    Window = TimeSpan.FromMinutes(5),
+                    QueueLimit = 0
+                }));
+
+            o.AddPolicy("MobileIngestion", context => RateLimitPartition.GetFixedWindowLimiter(
+                GetRateLimitPartitionKey(context, preferUser: false),
+                _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = 1200,
+                    Window = TimeSpan.FromMinutes(1),
+                    QueueLimit = 0
+                }));
+
+            o.AddPolicy("PublicApi", context => RateLimitPartition.GetFixedWindowLimiter(
+                GetRateLimitPartitionKey(context, preferUser: false),
+                _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = 120,
+                    Window = TimeSpan.FromMinutes(1),
+                    QueueLimit = 0
+                }));
         });
 
         // ----------------------------------------------------
@@ -237,6 +320,7 @@ internal class Program
         });
 
         app.UseRouting();
+        app.UseRateLimiter();
         app.UseCors(SecurityServiceExtensions.CorsPolicyName);
         app.UseWebSockets();
         app.UseCookiePolicy();
