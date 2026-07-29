@@ -190,9 +190,9 @@ namespace SignalTracker.Services.ZipImport
                 .ToArray();
 
             if (tokens.Any(x => x.Equals("CS", StringComparison.OrdinalIgnoreCase) || x.Equals("CallSession", StringComparison.OrdinalIgnoreCase)))
-                return 1;
-            if (tokens.Any(x => x.Equals("PS", StringComparison.OrdinalIgnoreCase) || x.Equals("PacketSession", StringComparison.OrdinalIgnoreCase)))
                 return 2;
+            if (tokens.Any(x => x.Equals("PS", StringComparison.OrdinalIgnoreCase) || x.Equals("PacketSession", StringComparison.OrdinalIgnoreCase)))
+                return 1;
 
             return null;
         }
@@ -261,7 +261,7 @@ namespace SignalTracker.Services.ZipImport
                     timestamp,
                     lat.Value,
                     lon.Value,
-                    type: 1,
+                    type: 2,
                     rawPayload: csPayload,
                     nextSubSessionId,
                     pendingSubSessions,
@@ -277,7 +277,7 @@ namespace SignalTracker.Services.ZipImport
                     timestamp,
                     lat.Value,
                     lon.Value,
-                    type: 2,
+                    type: 1,
                     rawPayload: psPayload,
                     nextSubSessionId,
                     pendingSubSessions,
@@ -340,7 +340,7 @@ namespace SignalTracker.Services.ZipImport
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                var payload = GetField(csv, headerMap, type == 1 ? "CS" : "PS", "json_data", "payload", "details", "sub_session_details")
+                var payload = GetField(csv, headerMap, type == 1 ? "PS" : "CS", "json_data", "payload", "details", "sub_session_details")
                     ?? BuildCurrentRowJson(csv, csv.HeaderRecord ?? Array.Empty<string>());
                 if (string.IsNullOrWhiteSpace(payload))
                 {
@@ -371,8 +371,8 @@ namespace SignalTracker.Services.ZipImport
 
                 if (id.HasValue)
                 {
-                    if (type == 1) summary.CsPayloadRows++;
-                    if (type == 2) summary.PsPayloadRows++;
+                    if (type == 2) summary.CsPayloadRows++;
+                    if (type == 1) summary.PsPayloadRows++;
                 }
             }
         }
