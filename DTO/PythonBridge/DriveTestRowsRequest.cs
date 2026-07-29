@@ -3,6 +3,8 @@
     public class DriveTestRowsRequest
     {
         public long? ProjectId { get; set; }
+        public string? Region { get; set; }
+        public string? CountryCode { get; set; }
         public List<long> SessionIds { get; set; } = new();
         public bool IncludeNeighbour { get; set; } = true;
         public string? Operator { get; set; }

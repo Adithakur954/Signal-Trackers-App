@@ -78,6 +78,11 @@ namespace SignalTracker.Controllers
             {
                 return BadRequest(new { Status = 0, Message = "ProjectId is required." });
             }
+            if (string.IsNullOrWhiteSpace(request.CountryCode) &&
+                Request.Query.TryGetValue("country_code", out var countryCode))
+            {
+                request.CountryCode = countryCode.ToString();
+            }
 
             var result = await _pythonBridgeService.GetLteTiltBaselineResultsAsync(
                 request,
@@ -103,6 +108,11 @@ namespace SignalTracker.Controllers
             if (request == null || request.ProjectId <= 0)
             {
                 return BadRequest(new { Status = 0, Message = "ProjectId is required." });
+            }
+            if (string.IsNullOrWhiteSpace(request.CountryCode) &&
+                Request.Query.TryGetValue("country_code", out var countryCode))
+            {
+                request.CountryCode = countryCode.ToString();
             }
 
             var result = await _pythonBridgeService.GetLteTiltAntennaRowsAsync(
@@ -152,6 +162,9 @@ namespace SignalTracker.Controllers
             [FromQuery] string? operatorName,
             [FromQuery(Name = "operator")] string? operatorAlias,
             [FromQuery(Name = "polygon_ids")] string? polygonIds,
+            [FromQuery] string? region,
+            [FromQuery] string? countryCode,
+            [FromQuery(Name = "country_code")] string? countryCodeSnake,
             [FromQuery] int? scenario,
             [FromQuery] int? scenarioId,
             [FromQuery] int? sitePredictionScenarioId,
@@ -170,6 +183,8 @@ namespace SignalTracker.Controllers
                 projectId,
                 operatorName ?? operatorAlias,
                 polygonIds,
+                region,
+                countryCode ?? countryCodeSnake,
                 scenario ?? scenarioId ?? sitePredictionScenarioId,
                 limit,
                 offset,
@@ -202,6 +217,11 @@ namespace SignalTracker.Controllers
             {
                 request.PolygonIds = polygonIds.ToString();
             }
+            if (string.IsNullOrWhiteSpace(request.CountryCode) &&
+                Request.Query.TryGetValue("country_code", out var countryCode))
+            {
+                request.CountryCode = countryCode.ToString();
+            }
 
             var result = await _pythonBridgeService.GetLteSitePredictionRowsAsync(
                 request,
@@ -220,6 +240,11 @@ namespace SignalTracker.Controllers
             if (request == null || request.ProjectId <= 0)
             {
                 return BadRequest(new { Status = 0, Message = "ProjectId is required." });
+            }
+            if (string.IsNullOrWhiteSpace(request.CountryCode) &&
+                Request.Query.TryGetValue("country_code", out var countryCode))
+            {
+                request.CountryCode = countryCode.ToString();
             }
 
             var result = await _pythonBridgeService.GetLteBuildingRowsAsync(
@@ -689,7 +714,11 @@ namespace SignalTracker.Controllers
         }
 
         [HttpGet("GetProjectRegions")]
-        public async Task<IActionResult> GetProjectRegions([FromQuery] long projectId)
+        public async Task<IActionResult> GetProjectRegions(
+            [FromQuery] long projectId,
+            [FromQuery] string? region,
+            [FromQuery] string? countryCode,
+            [FromQuery(Name = "country_code")] string? countryCodeSnake)
         {
             var authResult = EnsureAuthorized();
             if (authResult is not null) return authResult;
@@ -701,6 +730,8 @@ namespace SignalTracker.Controllers
 
             var rows = await _pythonBridgeService.GetProjectRegionsAsync(
                 projectId,
+                region,
+                countryCode ?? countryCodeSnake,
                 HttpContext.RequestAborted
             );
 

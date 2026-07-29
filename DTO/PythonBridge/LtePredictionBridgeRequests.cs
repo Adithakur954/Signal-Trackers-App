@@ -3,6 +3,8 @@
     public class LteSitePredictionRowsRequest
     {
         public long ProjectId { get; set; }
+        public string? Region { get; set; }
+        public string? CountryCode { get; set; }
         public string? Operator { get; set; }
         public string? PolygonIds { get; set; }
         public int Limit { get; set; } = 50000;
@@ -12,6 +14,8 @@
     public class LteBuildingRowsRequest
     {
         public long ProjectId { get; set; }
+        public string? Region { get; set; }
+        public string? CountryCode { get; set; }
         public int Limit { get; set; } = 50000;
         public int Offset { get; set; } = 0;
     }
