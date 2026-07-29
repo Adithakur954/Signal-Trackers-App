@@ -74,6 +74,43 @@ namespace SignalTracker.Controllers
             return int.TryParse(raw, out var uid) ? uid : 0;
         }
 
+        private string GetCurrentCountryScope()
+        {
+            string? country = null;
+
+            if (Request.Query.TryGetValue("country_code", out var queryCountry))
+                country = queryCountry.ToString();
+            if (string.IsNullOrWhiteSpace(country) &&
+                Request.Query.TryGetValue("countryCode", out var queryCountryCamel))
+                country = queryCountryCamel.ToString();
+            if (string.IsNullOrWhiteSpace(country) &&
+                Request.Query.TryGetValue("region", out var queryRegion))
+                country = queryRegion.ToString();
+            if (string.IsNullOrWhiteSpace(country) &&
+                Request.Headers.TryGetValue("x-country-code", out var headerCountry))
+                country = headerCountry.ToString();
+            if (string.IsNullOrWhiteSpace(country))
+                country = User.FindFirstValue("country_code");
+            if (string.IsNullOrWhiteSpace(country) && HttpContext.Session != null)
+                country = HttpContext.Session.GetString("country_code");
+
+            return NormalizeCountryScope(country);
+        }
+
+        private static string NormalizeCountryScope(string? country)
+        {
+            if (string.IsNullOrWhiteSpace(country))
+                return "default";
+
+            var normalized = country.Trim().ToUpperInvariant();
+            return normalized switch
+            {
+                "TW" or "TWN" or "TAIWAN" => "tw",
+                "IN" or "IND" or "INDIA" => "in",
+                _ => normalized.ToLowerInvariant()
+            };
+        }
+
         private async Task<bool> CanUseGridFeatureAsync()
         {
             if (_userScope.IsSuperAdmin(User))
@@ -516,7 +553,7 @@ namespace SignalTracker.Controllers
                     // Invalidate potentially cached read calls
                     if (_redis != null && _redis.IsConnected)
                     {
-                        try { await _redis.DeleteByPatternAsync($"gridanalytics*:{projectId}:{regionId ?? 0}:*"); } catch { }
+                        try { await _redis.DeleteByPatternAsync($"gridanalytics*:{GetCurrentCountryScope()}:{projectId}:{regionId ?? 0}:*"); } catch { }
                     }
 
                     sw.Stop();
@@ -746,7 +783,7 @@ namespace SignalTracker.Controllers
                 var effectiveScenarioId = isScenarioGridVersion
                     ? await ResolveScenarioIdAsync(conn, projectId, scenario_id)
                     : null;
-                string cacheKey = $"gridanalytics:v2:{projectId}:{regionId ?? 0}:{normalizedVersion}:{effectiveScenarioId?.ToString() ?? "none"}";
+                string cacheKey = $"gridanalytics:v2:{GetCurrentCountryScope()}:{projectId}:{regionId ?? 0}:{normalizedVersion}:{effectiveScenarioId?.ToString() ?? "none"}";
                 if (_redis != null && _redis.IsConnected)
                 {
                     try
@@ -1270,9 +1307,18 @@ namespace SignalTracker.Controllers
             {
                 var p = pair.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
                 if (p.Length >= 2
-                    && double.TryParse(p[0], NumberStyles.Any, CultureInfo.InvariantCulture, out double lon)
-                    && double.TryParse(p[1], NumberStyles.Any, CultureInfo.InvariantCulture, out double lat))
-                    pts.Add((lat, lon));
+                    && double.TryParse(p[0], NumberStyles.Any, CultureInfo.InvariantCulture, out double first)
+                    && double.TryParse(p[1], NumberStyles.Any, CultureInfo.InvariantCulture, out double second))
+                {
+                    if (IsValidLatLon(second, first))
+                    {
+                        pts.Add((second, first));
+                    }
+                    else if (IsValidLatLon(first, second))
+                    {
+                        pts.Add((first, second));
+                    }
+                }
             }
             return pts;
         }

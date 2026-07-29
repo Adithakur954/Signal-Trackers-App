@@ -4,6 +4,8 @@
     {
         public long ProjectId { get; set; }
         public string JobId { get; set; } = string.Empty;
+        public string? Region { get; set; }
+        public string? CountryCode { get; set; }
         public List<LtePredictionOptimisedRow> Rows { get; set; } = new();
     }
 

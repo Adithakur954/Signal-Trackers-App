@@ -914,8 +914,9 @@ namespace SignalTracker.Services
 
             var limit = Math.Clamp(request.Limit, 1, 50000);
             var offset = Math.Max(request.Offset, 0);
-            var region = string.IsNullOrWhiteSpace(request.Region) ? "india" : request.Region.Trim().ToLowerInvariant();
-            var cacheKey = BuildCacheKey("lte_geo", request.ProjectId, region, limit, offset);
+            var region = ResolveRegionOrCountry(request.Region, request.CountryCode) ?? "india";
+            region = region.Trim().ToLowerInvariant();
+            var cacheKey = BuildCacheKey("lte_geo_v2", request.ProjectId, region, limit, offset);
 
             return await GetCachedOrLoadRowsAsync(
                 cacheKey,
@@ -923,14 +924,18 @@ namespace SignalTracker.Services
                 offset,
                 async () =>
                 {
-                    var conn = _db.Database.GetDbConnection();
-                    if (conn.State != ConnectionState.Open)
+                    var contextToUse = CreateDbContextForRegion(region, request.CountryCode);
+                    var ownsContext = contextToUse != _db;
+                    try
                     {
-                        await conn.OpenAsync(cancellationToken);
-                    }
+                        var conn = contextToUse.Database.GetDbConnection();
+                        if (conn.State != ConnectionState.Open)
+                        {
+                            await conn.OpenAsync(cancellationToken);
+                        }
 
-                    await using var command = conn.CreateCommand();
-                    command.CommandText = @"
+                        await using var command = conn.CreateCommand();
+                        command.CommandText = @"
                 SELECT
                     project_id,
                     region,
@@ -972,13 +977,21 @@ namespace SignalTracker.Services
                 ORDER BY nodeb_id_cell_id, lat, lon
                 LIMIT @lim OFFSET @off;";
 
-                    PythonBridgeDbTool.AddParam(command, "@pid", request.ProjectId);
-                    PythonBridgeDbTool.AddParam(command, "@region", region);
-                    PythonBridgeDbTool.AddParam(command, "@lim", limit);
-                    PythonBridgeDbTool.AddParam(command, "@off", offset);
+                        PythonBridgeDbTool.AddParam(command, "@pid", request.ProjectId);
+                        PythonBridgeDbTool.AddParam(command, "@region", region);
+                        PythonBridgeDbTool.AddParam(command, "@lim", limit);
+                        PythonBridgeDbTool.AddParam(command, "@off", offset);
 
-                    await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-                    return await PythonBridgeDbTool.ReadRowsAsync(reader, cancellationToken);
+                        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                        return await PythonBridgeDbTool.ReadRowsAsync(reader, cancellationToken);
+                    }
+                    finally
+                    {
+                        if (ownsContext)
+                        {
+                            await contextToUse.DisposeAsync();
+                        }
+                    }
                 },
                 cancellationToken);
         }
@@ -1645,36 +1658,40 @@ namespace SignalTracker.Services
                 return 0;
             }
 
-            var conn = _db.Database.GetDbConnection();
-            if (conn.State != ConnectionState.Open)
+            var contextToUse = CreateDbContextForRegion(request.Region, request.CountryCode);
+            var ownsContext = contextToUse != _db;
+            try
             {
-                await conn.OpenAsync(cancellationToken);
-            }
+                var conn = contextToUse.Database.GetDbConnection();
+                if (conn.State != ConnectionState.Open)
+                {
+                    await conn.OpenAsync(cancellationToken);
+                }
 
-            await EnsureOptimisedResultsBridgeColumnsAsync(conn, transaction: null, cancellationToken);
-            await using var transaction = await BeginTransactionWithReconnectAsync(
-                conn,
-                nameof(SaveLtePredictionOptimisedResultsAsync),
-                cancellationToken);
-            var inserted = 0;
-            var publicScenarioId = rows.FirstOrDefault(row => row.public_scenario_id.HasValue)?.public_scenario_id;
-            if (publicScenarioId.HasValue && publicScenarioId.Value > 0)
-            {
-                await using var deleteCommand = conn.CreateCommand();
-                deleteCommand.Transaction = transaction;
-                deleteCommand.CommandText = @"
+                await EnsureOptimisedResultsBridgeColumnsAsync(conn, transaction: null, cancellationToken);
+                await using var transaction = await BeginTransactionWithReconnectAsync(
+                    conn,
+                    nameof(SaveLtePredictionOptimisedResultsAsync),
+                    cancellationToken);
+                var inserted = 0;
+                var publicScenarioId = rows.FirstOrDefault(row => row.public_scenario_id.HasValue)?.public_scenario_id;
+                if (publicScenarioId.HasValue && publicScenarioId.Value > 0)
+                {
+                    await using var deleteCommand = conn.CreateCommand();
+                    deleteCommand.Transaction = transaction;
+                    deleteCommand.CommandText = @"
                     DELETE FROM lte_prediction_optimised_results
                     WHERE project_id = @project_id
                       AND public_scenario_id = @public_scenario_id;";
-                PythonBridgeDbTool.AddParam(deleteCommand, "@project_id", request.ProjectId);
-                PythonBridgeDbTool.AddParam(deleteCommand, "@public_scenario_id", publicScenarioId.Value);
-                await deleteCommand.ExecuteNonQueryAsync(cancellationToken);
-            }
+                    PythonBridgeDbTool.AddParam(deleteCommand, "@project_id", request.ProjectId);
+                    PythonBridgeDbTool.AddParam(deleteCommand, "@public_scenario_id", publicScenarioId.Value);
+                    await deleteCommand.ExecuteNonQueryAsync(cancellationToken);
+                }
 
-            foreach (var batch in rows.Chunk(BaselineResultInsertBatchSize))
-            {
-                await using var command = conn.CreateCommand();
-                command.Transaction = transaction;
+                foreach (var batch in rows.Chunk(BaselineResultInsertBatchSize))
+                {
+                    await using var command = conn.CreateCommand();
+                    command.Transaction = transaction;
 
                 var valuesSql = new List<string>();
                 for (var i = 0; i < batch.Length; i++)
@@ -1716,11 +1733,19 @@ namespace SignalTracker.Services
                      nodeb_id_cell_id, scenario_id, public_scenario_id)
                     VALUES {string.Join(", ", valuesSql)};";
 
-                inserted += await command.ExecuteNonQueryAsync(cancellationToken);
-            }
+                    inserted += await command.ExecuteNonQueryAsync(cancellationToken);
+                }
 
-            await transaction.CommitAsync(cancellationToken);
-            return inserted;
+                await transaction.CommitAsync(cancellationToken);
+                return inserted;
+            }
+            finally
+            {
+                if (ownsContext)
+                {
+                    await contextToUse.DisposeAsync();
+                }
+            }
         }
 
         public async Task<int> SaveLtePredictionBaselineResultsAsync(
@@ -1734,20 +1759,8 @@ namespace SignalTracker.Services
                 return 0;
             }
 
-            // Select correct database based on region parameter
-            ApplicationDbContext contextToUse = _db;
-            bool ownsContext = false;
-
-            if (!string.IsNullOrWhiteSpace(request.Region))
-            {
-                var connectionName = GetConnectionNameByRegion(request.Region);
-                var regionDb = CreateDbContext(connectionName);
-                if (regionDb != null)
-                {
-                    contextToUse = regionDb;
-                    ownsContext = true;
-                }
-            }
+            var contextToUse = CreateDbContextForRegion(request.Region, request.CountryCode);
+            var ownsContext = contextToUse != _db;
 
             try
             {
@@ -1899,60 +1912,71 @@ namespace SignalTracker.Services
                 return 0;
             }
 
-            var conn = _db.Database.GetDbConnection();
-            if (conn.State != ConnectionState.Open)
+            var contextToUse = CreateDbContextForRegion(request.Region, request.CountryCode);
+            var ownsContext = contextToUse != _db;
+            try
             {
-                await conn.OpenAsync(cancellationToken);
-            }
-
-            await using var transaction = await BeginTransactionWithReconnectAsync(
-                conn,
-                nameof(SaveLtePredictionGeoFeaturesAsync),
-                cancellationToken);
-            var inserted = 0;
-            var totalStopwatch = Stopwatch.StartNew();
-            var deleteStopwatch = new Stopwatch();
-            var insertStopwatch = new Stopwatch();
-            var batchIndex = 0;
-            var batchCount = (int)Math.Ceiling(rows.Count / (double)GeoFeatureInsertBatchSize);
-            if (request.ReplaceExisting)
-            {
-                deleteStopwatch.Start();
-                var normalizedScopes = rows
-                    .Select(row => new
-                    {
-                        ProjectId = Convert.ToInt64(RowValue(row, "project_id") ?? request.ProjectId),
-                        Region = (Convert.ToString(RowValue(row, "region") ?? request.Region ?? "india") ?? "india").Trim().ToLowerInvariant()
-                    })
-                    .Where(scope => scope.ProjectId > 0 && !string.IsNullOrWhiteSpace(scope.Region))
-                    .Distinct()
-                    .ToList();
-
-                foreach (var scope in normalizedScopes)
+                var conn = contextToUse.Database.GetDbConnection();
+                if (conn.State != ConnectionState.Open)
                 {
-                    await using var deleteCommand = conn.CreateCommand();
-                    deleteCommand.Transaction = transaction;
-                    deleteCommand.CommandText = @"
+                    await conn.OpenAsync(cancellationToken);
+                }
+
+                await using var transaction = await BeginTransactionWithReconnectAsync(
+                    conn,
+                    nameof(SaveLtePredictionGeoFeaturesAsync),
+                    cancellationToken);
+                var inserted = 0;
+                var totalStopwatch = Stopwatch.StartNew();
+                var deleteStopwatch = new Stopwatch();
+                var insertStopwatch = new Stopwatch();
+                var batchIndex = 0;
+                var batchCount = (int)Math.Ceiling(rows.Count / (double)GeoFeatureInsertBatchSize);
+                if (request.ReplaceExisting)
+                {
+                    deleteStopwatch.Start();
+                    var normalizedScopes = rows
+                        .Select(row => new
+                        {
+                            ProjectId = Convert.ToInt64(RowValue(row, "project_id") ?? request.ProjectId),
+                            Region = ResolveRegionOrCountry(Convert.ToString(RowValue(row, "region")), request.CountryCode)
+                                ?? ResolveRegionOrCountry(request.Region, request.CountryCode)
+                                ?? "india"
+                        })
+                        .Where(scope => scope.ProjectId > 0 && !string.IsNullOrWhiteSpace(scope.Region))
+                        .Select(scope => new
+                        {
+                            scope.ProjectId,
+                            Region = scope.Region.Trim().ToLowerInvariant()
+                        })
+                        .Distinct()
+                        .ToList();
+
+                    foreach (var scope in normalizedScopes)
+                    {
+                        await using var deleteCommand = conn.CreateCommand();
+                        deleteCommand.Transaction = transaction;
+                        deleteCommand.CommandText = @"
                         DELETE FROM lte_prediction_geo_features
                         WHERE project_id = @project_id
                           AND region = @region;";
-                    PythonBridgeDbTool.AddParam(deleteCommand, "@project_id", scope.ProjectId);
-                    PythonBridgeDbTool.AddParam(deleteCommand, "@region", scope.Region);
-                    await deleteCommand.ExecuteNonQueryAsync(cancellationToken);
+                        PythonBridgeDbTool.AddParam(deleteCommand, "@project_id", scope.ProjectId);
+                        PythonBridgeDbTool.AddParam(deleteCommand, "@region", scope.Region);
+                        await deleteCommand.ExecuteNonQueryAsync(cancellationToken);
+                    }
+                    deleteStopwatch.Stop();
                 }
-                deleteStopwatch.Stop();
-            }
 
-            foreach (var batch in rows.Chunk(GeoFeatureInsertBatchSize))
-            {
-                batchIndex++;
-                await using var insertCommand = conn.CreateCommand();
-                insertCommand.Transaction = transaction;
-                var valuesSql = new List<string>();
-                for (var i = 0; i < batch.Length; i++)
+                foreach (var batch in rows.Chunk(GeoFeatureInsertBatchSize))
                 {
-                    var row = batch[i];
-                    valuesSql.Add($@"(@project_id{i}, @baseline_job_id{i}, @region{i}, @operator{i}, @grid_id{i}, @lat{i}, @lon{i},
+                    batchIndex++;
+                    await using var insertCommand = conn.CreateCommand();
+                    insertCommand.Transaction = transaction;
+                    var valuesSql = new List<string>();
+                    for (var i = 0; i < batch.Length; i++)
+                    {
+                        var row = batch[i];
+                        valuesSql.Add($@"(@project_id{i}, @baseline_job_id{i}, @region{i}, @operator{i}, @grid_id{i}, @lat{i}, @lon{i},
                      @nodeb_id_cell_id{i}, @proxy_site_id{i}, @clutter_class{i}, @morphology_cluster{i},
                      @building_count{i}, @building_area_ratio{i}, @avg_building_area_m2{i}, @road_length_m{i},
                      @green_ratio{i}, @water_ratio{i}, @los_blocker_count{i}, @los_blocked_ratio{i},
@@ -1962,10 +1986,13 @@ namespace SignalTracker.Services
                      @nearest_site_distance_m{i}, @mean_nearest3_site_distance_m{i}, @azimuth_delta_deg{i},
                      @polygon_alignment{i}, @building_alignment{i}, @geo_source{i}, @created_at{i}, @updated_at{i})");
 
-                    var region = Convert.ToString(RowValue(row, "region") ?? request.Region ?? "india")!.ToLowerInvariant();
-                    PythonBridgeDbTool.AddParam(insertCommand, $"@project_id{i}", RowValue(row, "project_id") ?? request.ProjectId);
-                    PythonBridgeDbTool.AddParam(insertCommand, $"@baseline_job_id{i}", RowValue(row, "baseline_job_id") ?? request.JobId);
-                    PythonBridgeDbTool.AddParam(insertCommand, $"@region{i}", region);
+                        var region = ResolveRegionOrCountry(Convert.ToString(RowValue(row, "region")), request.CountryCode)
+                            ?? ResolveRegionOrCountry(request.Region, request.CountryCode)
+                            ?? "india";
+                        region = region.Trim().ToLowerInvariant();
+                        PythonBridgeDbTool.AddParam(insertCommand, $"@project_id{i}", RowValue(row, "project_id") ?? request.ProjectId);
+                        PythonBridgeDbTool.AddParam(insertCommand, $"@baseline_job_id{i}", RowValue(row, "baseline_job_id") ?? request.JobId);
+                        PythonBridgeDbTool.AddParam(insertCommand, $"@region{i}", region);
                     PythonBridgeDbTool.AddParam(insertCommand, $"@operator{i}", RowValue(row, "operator"));
                     PythonBridgeDbTool.AddParam(insertCommand, $"@grid_id{i}", RowValue(row, "grid_id"));
                     PythonBridgeDbTool.AddParam(insertCommand, $"@lat{i}", RowValue(row, "lat"));
@@ -2048,7 +2075,15 @@ namespace SignalTracker.Services
                 totalStopwatch.ElapsedMilliseconds,
                 rows.Count,
                 GeoFeatureInsertBatchSize);
-            return inserted;
+                return inserted;
+            }
+            finally
+            {
+                if (ownsContext)
+                {
+                    await contextToUse.DisposeAsync();
+                }
+            }
         }
 
         public async Task<int> DeleteLtePredictionGeoFeaturesAsync(
@@ -2062,20 +2097,24 @@ namespace SignalTracker.Services
                 return 0;
             }
 
-            var conn = _db.Database.GetDbConnection();
-            if (conn.State != ConnectionState.Open)
+            var contextToUse = CreateDbContextForRegion(request.Region, request.CountryCode);
+            var ownsContext = contextToUse != _db;
+            try
             {
-                await conn.OpenAsync(cancellationToken);
-            }
+                var conn = contextToUse.Database.GetDbConnection();
+                if (conn.State != ConnectionState.Open)
+                {
+                    await conn.OpenAsync(cancellationToken);
+                }
 
-            await using var transaction = await conn.BeginTransactionAsync(cancellationToken);
-            var deleted = 0;
+                await using var transaction = await conn.BeginTransactionAsync(cancellationToken);
+                var deleted = 0;
 
-            foreach (var row in rows)
-            {
-                await using var command = conn.CreateCommand();
-                command.Transaction = transaction;
-                command.CommandText = @"
+                foreach (var row in rows)
+                {
+                    await using var command = conn.CreateCommand();
+                    command.Transaction = transaction;
+                    command.CommandText = @"
                     DELETE FROM lte_prediction_geo_features
                     WHERE project_id = @project_id
                       AND region = @region
@@ -2083,17 +2122,28 @@ namespace SignalTracker.Services
                       AND lat = @lat
                       AND lon = @lon;";
 
-                PythonBridgeDbTool.AddParam(command, "@project_id", RowValue(row, "project_id") ?? request.ProjectId);
-                PythonBridgeDbTool.AddParam(command, "@region", RowValue(row, "region") ?? request.Region ?? "india");
-                PythonBridgeDbTool.AddParam(command, "@nodeb_id_cell_id", RowValue(row, "nodeb_id_cell_id"));
-                PythonBridgeDbTool.AddParam(command, "@lat", RowValue(row, "lat"));
-                PythonBridgeDbTool.AddParam(command, "@lon", RowValue(row, "lon"));
+                    var region = ResolveRegionOrCountry(Convert.ToString(RowValue(row, "region")), request.CountryCode)
+                        ?? ResolveRegionOrCountry(request.Region, request.CountryCode)
+                        ?? "india";
+                    PythonBridgeDbTool.AddParam(command, "@project_id", RowValue(row, "project_id") ?? request.ProjectId);
+                    PythonBridgeDbTool.AddParam(command, "@region", region.Trim().ToLowerInvariant());
+                    PythonBridgeDbTool.AddParam(command, "@nodeb_id_cell_id", RowValue(row, "nodeb_id_cell_id"));
+                    PythonBridgeDbTool.AddParam(command, "@lat", RowValue(row, "lat"));
+                    PythonBridgeDbTool.AddParam(command, "@lon", RowValue(row, "lon"));
 
-                deleted += await command.ExecuteNonQueryAsync(cancellationToken);
+                    deleted += await command.ExecuteNonQueryAsync(cancellationToken);
+                }
+
+                await transaction.CommitAsync(cancellationToken);
+                return deleted;
             }
-
-            await transaction.CommitAsync(cancellationToken);
-            return deleted;
+            finally
+            {
+                if (ownsContext)
+                {
+                    await contextToUse.DisposeAsync();
+                }
+            }
         }
 
         public async Task<int> GetNextRfOptimizationScenarioIdAsync(

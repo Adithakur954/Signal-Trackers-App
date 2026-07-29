@@ -78,7 +78,7 @@ namespace SignalTracker.Services
                 country = context.Session.GetString("country_code");
             }
 
-            country = country?.Trim();
+            country = NormalizeCountryOrRegion(country);
 
             if (string.Equals(country, "TW", StringComparison.OrdinalIgnoreCase))
             {
@@ -86,6 +86,22 @@ namespace SignalTracker.Services
             }
 
             return GetConfiguredConnectionString("MySqlConnection");
+        }
+
+        private static string? NormalizeCountryOrRegion(string? country)
+        {
+            if (string.IsNullOrWhiteSpace(country))
+            {
+                return null;
+            }
+
+            var normalized = country.Trim().ToUpperInvariant();
+            return normalized switch
+            {
+                "TW" or "TWN" or "TAIWAN" => "TW",
+                "IN" or "IND" or "INDIA" => "IN",
+                _ => normalized
+            };
         }
 
         private string GetConfiguredConnectionString(string name)

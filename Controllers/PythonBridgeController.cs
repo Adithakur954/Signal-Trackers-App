@@ -140,6 +140,11 @@ namespace SignalTracker.Controllers
             {
                 return BadRequest(new { Status = 0, Message = "ProjectId is required." });
             }
+            if (string.IsNullOrWhiteSpace(request.CountryCode) &&
+                Request.Query.TryGetValue("country_code", out var countryCode))
+            {
+                request.CountryCode = countryCode.ToString();
+            }
 
             var result = await _pythonBridgeService.GetLtePredictionGeoFeaturesAsync(
                 request,
@@ -368,6 +373,11 @@ namespace SignalTracker.Controllers
             {
                 return Ok(new { Status = 1, Inserted = 0 });
             }
+            if (string.IsNullOrWhiteSpace(request.CountryCode) &&
+                Request.Query.TryGetValue("country_code", out var countryCode))
+            {
+                request.CountryCode = countryCode.ToString();
+            }
 
             var inserted = await _pythonBridgeService.SaveLtePredictionOptimisedResultsAsync(
                 request,
@@ -391,6 +401,11 @@ namespace SignalTracker.Controllers
             if (request.Rows == null || request.Rows.Count == 0)
             {
                 return Ok(new { Status = 1, Inserted = 0 });
+            }
+            if (string.IsNullOrWhiteSpace(request.CountryCode) &&
+                Request.Query.TryGetValue("country_code", out var countryCode))
+            {
+                request.CountryCode = countryCode.ToString();
             }
 
             var inserted = await _pythonBridgeService.SaveLtePredictionBaselineResultsAsync(
@@ -416,6 +431,11 @@ namespace SignalTracker.Controllers
             {
                 return Ok(new { Status = 1, Inserted = 0 });
             }
+            if (string.IsNullOrWhiteSpace(request.CountryCode) &&
+                Request.Query.TryGetValue("country_code", out var countryCode))
+            {
+                request.CountryCode = countryCode.ToString();
+            }
 
             var inserted = await _pythonBridgeService.SaveLtePredictionGeoFeaturesAsync(
                 request,
@@ -439,6 +459,11 @@ namespace SignalTracker.Controllers
             if (request.Rows == null || request.Rows.Count == 0)
             {
                 return Ok(new { Status = 1, Deleted = 0 });
+            }
+            if (string.IsNullOrWhiteSpace(request.CountryCode) &&
+                Request.Query.TryGetValue("country_code", out var countryCode))
+            {
+                request.CountryCode = countryCode.ToString();
             }
 
             var deleted = await _pythonBridgeService.DeleteLtePredictionGeoFeaturesAsync(

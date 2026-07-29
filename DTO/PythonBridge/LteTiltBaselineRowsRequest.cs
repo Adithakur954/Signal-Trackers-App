@@ -23,6 +23,7 @@
     {
         public long ProjectId { get; set; }
         public string? Region { get; set; }
+        public string? CountryCode { get; set; }
         public int Limit { get; set; } = 5000;
         public int Offset { get; set; } = 0;
     }
