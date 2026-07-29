@@ -1,14 +1,17 @@
-﻿using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.CookiePolicy;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.HttpOverrides;
 using SignalTracker.Security;
+using SignalTracker.Models;
 
 namespace SignalTracker.Configuration;
 
 public static class SecurityServiceExtensions
 {
     public const string CorsPolicyName = "AllowReactApp";
+    private const string UserLoginLockKeyPrefix = "auth:login-lock:user:";
 
     public static void AddSignalTrackerCors(this IServiceCollection services, IConfiguration configuration, IWebHostEnvironment environment)
     {
@@ -87,6 +90,30 @@ public static class SecurityServiceExtensions
                 {
                     RequestSecurity.ApplyPerRequestCookieSettings(ctx.HttpContext, ctx.CookieOptions);
                     return Task.CompletedTask;
+                };
+
+                options.Events.OnValidatePrincipal = async ctx =>
+                {
+                    var userId = ctx.Principal?.FindFirst("UserId")?.Value;
+                    var cookieLockValue = ctx.Principal?.FindFirst("LoginLockValue")?.Value;
+
+                    if (string.IsNullOrWhiteSpace(userId) || string.IsNullOrWhiteSpace(cookieLockValue))
+                    {
+                        return;
+                    }
+
+                    var redis = ctx.HttpContext.RequestServices.GetService<RedisService>();
+                    if (redis?.IsConnected != true)
+                    {
+                        return;
+                    }
+
+                    var currentLockValue = await redis.GetStringAsync($"{UserLoginLockKeyPrefix}{userId}");
+                    if (!string.Equals(currentLockValue, cookieLockValue, StringComparison.Ordinal))
+                    {
+                        ctx.RejectPrincipal();
+                        await ctx.HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+                    }
                 };
             });
 
@@ -174,5 +201,7 @@ public static class SecurityServiceExtensions
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
     }
 }
+
+
 
 

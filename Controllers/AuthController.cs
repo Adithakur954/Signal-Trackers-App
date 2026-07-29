@@ -140,6 +140,119 @@ namespace SignalTracker.Controllers
             }
         }
 
+        private sealed class ActiveLoginInfo
+        {
+            public int UserId { get; set; }
+            public string Email { get; set; } = string.Empty;
+            public string LoginTimeUtc { get; set; } = string.Empty;
+            public string IpAddress { get; set; } = string.Empty;
+            public string UserAgent { get; set; } = string.Empty;
+            public string Device { get; set; } = string.Empty;
+        }
+
+        private ActiveLoginInfo BuildActiveLoginInfo(LoginUserDto user, string? clientIp)
+        {
+            var userAgent = Request.Headers.UserAgent.ToString();
+            var ipAddress = string.IsNullOrWhiteSpace(clientIp)
+                ? HttpContext.Connection.RemoteIpAddress?.ToString() ?? string.Empty
+                : clientIp.Trim();
+            var forwardedFor = Request.Headers["X-Forwarded-For"].FirstOrDefault();
+            if (string.IsNullOrWhiteSpace(clientIp) && !string.IsNullOrWhiteSpace(forwardedFor))
+            {
+                ipAddress = forwardedFor.Split(',')[0].Trim();
+            }
+
+            return new ActiveLoginInfo
+            {
+                UserId = user.id,
+                Email = user.email,
+                LoginTimeUtc = DateTimeOffset.UtcNow.ToString("O"),
+                IpAddress = ipAddress,
+                UserAgent = userAgent,
+                Device = GetDeviceLabel(userAgent)
+            };
+        }
+
+        private static string BuildLoginLockValue(ActiveLoginInfo info)
+        {
+            return string.Join("|", new[]
+            {
+                info.UserId.ToString(),
+                Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(info.Email ?? string.Empty)),
+                info.LoginTimeUtc ?? string.Empty,
+                Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(info.IpAddress ?? string.Empty)),
+                Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(info.UserAgent ?? string.Empty)),
+                Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(info.Device ?? string.Empty))
+            });
+        }
+
+        private static object? ParseLoginLockValue(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return null;
+
+            var parts = value.Split('|');
+            if (parts.Length >= 6)
+            {
+                return new
+                {
+                    user_id = int.TryParse(parts[0], out var parsedUserId) ? parsedUserId : 0,
+                    email = DecodeBase64(parts[1]),
+                    login_time_utc = parts[2],
+                    ip_address = DecodeBase64(parts[3]),
+                    user_agent = DecodeBase64(parts[4]),
+                    device = DecodeBase64(parts[5])
+                };
+            }
+
+            var legacyParts = value.Split(':');
+            return new
+            {
+                user_id = legacyParts.Length > 0 && int.TryParse(legacyParts[0], out var legacyUserId) ? legacyUserId : 0,
+                email = legacyParts.Length > 1 ? legacyParts[1] : string.Empty,
+                login_time_utc = legacyParts.Length > 2 ? string.Join(":", legacyParts.Skip(2)) : string.Empty,
+                ip_address = string.Empty,
+                user_agent = string.Empty,
+                device = "Unknown device"
+            };
+        }
+
+        private static string DecodeBase64(string value)
+        {
+            try
+            {
+                return System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(value));
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        private static string GetDeviceLabel(string? userAgent)
+        {
+            if (string.IsNullOrWhiteSpace(userAgent))
+                return "Unknown device";
+
+            var ua = userAgent.ToLowerInvariant();
+            var browser =
+                ua.Contains("edg/") ? "Edge" :
+                ua.Contains("chrome/") ? "Chrome" :
+                ua.Contains("firefox/") ? "Firefox" :
+                ua.Contains("safari/") ? "Safari" :
+                "Browser";
+
+            var platform =
+                ua.Contains("windows") ? "Windows" :
+                ua.Contains("android") ? "Android" :
+                ua.Contains("iphone") || ua.Contains("ipad") ? "iOS" :
+                ua.Contains("mac os") || ua.Contains("macintosh") ? "macOS" :
+                ua.Contains("linux") ? "Linux" :
+                "Device";
+
+            return $"{browser} on {platform}";
+        }
+
         [HttpPost("login")]
         [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("Auth")]
         public async Task<IActionResult> Login([FromBody] LoginRequest model)
@@ -216,7 +329,8 @@ namespace SignalTracker.Controllers
                 return Unauthorized(new { message = "Invalid email or password" });
             }
 
-            var lockValue = $"{user.id}:{user.email}:{DateTimeOffset.UtcNow:O}";
+            var activeLoginInfo = BuildActiveLoginInfo(user, model.IP);
+            var lockValue = BuildLoginLockValue(activeLoginInfo);
             var userLockKey = BuildUserLoginLockKey(user.id);
             var loginLockAcquired = false;
             if (_redis?.IsConnected == true)
@@ -245,7 +359,14 @@ namespace SignalTracker.Controllers
                     var lockResult = await _redis.TrySetStringWhenNotExistsAsync(userLockKey, lockValue, UserLoginLockTtlSeconds);
                     if (lockResult == RedisSetWhenNotExistsResult.AlreadyExists)
                     {
-                        return Unauthorized(new { message = "Sorry, someone is already logged in. Please try again later." });
+                        var activeLogin = ParseLoginLockValue(await _redis.GetStringAsync(userLockKey));
+                        return Unauthorized(new
+                        {
+                            message = "Sorry, someone is already logged in. Please logout from old devices.",
+                            already_logged_in = true,
+                            can_force_logout = true,
+                            active_login = activeLogin
+                        });
                     }
                     if (lockResult == RedisSetWhenNotExistsResult.Unavailable)
                     {
@@ -285,7 +406,8 @@ namespace SignalTracker.Controllers
                     new Claim("UserId", user.id.ToString()),
                     new Claim("UserTypeId", user.m_user_type_id.ToString()),
                     new Claim("CompanyId", user.company_id?.ToString() ?? "0"),
-                    new Claim("company_id", user.company_id?.ToString() ?? "0")
+                    new Claim("company_id", user.company_id?.ToString() ?? "0"),
+                    new Claim("LoginLockValue", lockValue)
                 };
 
                 var claimsIdentity = new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme);
@@ -460,6 +582,7 @@ namespace SignalTracker.Controllers
     {
         public string Email { get; set; } = default!;
         public string Password { get; set; } = default!;
+        public string? IP { get; set; }
         public string? country_code { get; set; }
         public bool? ForceLogin { get; set; }
     }
