@@ -85,6 +85,48 @@ internal class Program
         }
     }
 
+    private static void EnsureSitePredictionColorColumnExists(WebApplication app)
+    {
+        try
+        {
+            using var scope = app.Services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var conn = db.Database.GetDbConnection();
+            var shouldClose = conn.State != ConnectionState.Open;
+            if (shouldClose)
+                conn.Open();
+
+            try
+            {
+                using var exists = conn.CreateCommand();
+                exists.CommandText = @"
+                    SELECT COUNT(*)
+                    FROM information_schema.columns
+                    WHERE table_schema = DATABASE()
+                      AND table_name = 'site_prediction'
+                      AND column_name = 'site_color';";
+
+                var count = Convert.ToInt32(exists.ExecuteScalar());
+                if (count > 0)
+                    return;
+
+                using var add = conn.CreateCommand();
+                add.CommandText = "ALTER TABLE site_prediction ADD COLUMN site_color VARCHAR(50) NULL;";
+                add.ExecuteNonQuery();
+                Console.WriteLine("Added missing column site_prediction.site_color.");
+            }
+            finally
+            {
+                if (shouldClose)
+                    conn.Close();
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Could not ensure column site_prediction.site_color: {ex.Message}");
+        }
+    }
+
     private static void Main(string[] args)
     {
         var builder = WebApplication.CreateBuilder(args);
@@ -323,6 +365,7 @@ internal class Program
         // ----------------------------------------------------
         var app = builder.Build();
         EnsureProjectGridSizeColumnExists(app);
+        EnsureSitePredictionColorColumnExists(app);
 
         // ----------------------------------------------------
         // MIDDLEWARE PIPELINE

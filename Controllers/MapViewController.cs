@@ -2183,6 +2183,60 @@ public class AvailablePolygonsResponse
             await EnsureSitePredictionTextColumnAsync(conn, "site_prediction_optimized", "site_name");
         }
 
+        private async Task EnsureSitePredictionColorColumnAsync(DbConnection conn)
+        {
+            await using var existsCmd = conn.CreateCommand();
+            existsCmd.CommandText = @"
+                SELECT COUNT(*)
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = 'site_prediction'
+                  AND COLUMN_NAME = 'site_color';";
+
+            var exists = Convert.ToInt32(await existsCmd.ExecuteScalarAsync());
+            if (exists > 0)
+                return;
+
+            await using var alterCmd = conn.CreateCommand();
+            alterCmd.CommandText = "ALTER TABLE `site_prediction` ADD COLUMN `site_color` VARCHAR(50) NULL;";
+            await alterCmd.ExecuteNonQueryAsync();
+        }
+
+        public sealed class SitePredictionClusterColorRequest
+        {
+            public long? ProjectId { get; set; }
+            public long? projectId { get; set; }
+            public string? Cluster { get; set; }
+            public string? cluster { get; set; }
+            public string? SiteColor { get; set; }
+            public string? siteColor { get; set; }
+            public string? site_color { get; set; }
+            public string? ColorCode { get; set; }
+            public string? colorCode { get; set; }
+            public string? SiteColorCode { get; set; }
+            public string? siteColorCode { get; set; }
+            public string? Color { get; set; }
+            public string? color { get; set; }
+        }
+
+        private static string? FirstNonBlank(params string?[] values)
+        {
+            foreach (var value in values)
+            {
+                if (!string.IsNullOrWhiteSpace(value))
+                    return value.Trim();
+            }
+            return null;
+        }
+
+        private static bool IsSupportedColorCode(string value)
+        {
+            var color = value.Trim();
+            return Regex.IsMatch(color, "^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$") ||
+                   Regex.IsMatch(color, "^rgba?\\([^)]{1,80}\\)$", RegexOptions.IgnoreCase) ||
+                   Regex.IsMatch(color, "^hsla?\\([^)]{1,80}\\)$", RegexOptions.IgnoreCase);
+        }
+
         private static bool TryParseNodeIdForNumericColumn(string? raw, out double parsedValue)
         {
             parsedValue = 0;
@@ -8952,6 +9006,130 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             [FromQuery] int? scenario = null)
         {
             return GetSitePrediction(projectId, site, cell_id, cluster, provider, technology, band, pci, limit, offset, "combined", 0, scenario);
+        }
+
+        [HttpPost, Route("SaveSitePredictionClusterColor")]
+        public async Task<IActionResult> SaveSitePredictionClusterColor([FromBody] SitePredictionClusterColorRequest request)
+        {
+            var cluster = FirstNonBlank(request?.Cluster, request?.cluster)?.Trim();
+            var siteColor = FirstNonBlank(
+                request?.ColorCode,
+                request?.colorCode,
+                request?.SiteColorCode,
+                request?.siteColorCode,
+                request?.SiteColor,
+                request?.siteColor,
+                request?.site_color,
+                request?.Color,
+                request?.color)?.Trim();
+            var projectId = request?.ProjectId ?? request?.projectId;
+
+            if (string.IsNullOrWhiteSpace(cluster))
+                return BadRequest(new { Status = 0, Message = "Cluster is required." });
+
+            if (string.IsNullOrWhiteSpace(siteColor))
+                return BadRequest(new { Status = 0, Message = "Color code is required." });
+
+            if (!IsSupportedColorCode(siteColor))
+                return BadRequest(new { Status = 0, Message = "Send a valid color code like #ff0000, rgb(255,0,0), or hsl(0,100%,50%). Do not send color names like Red." });
+
+            var conn = db.Database.GetDbConnection();
+            if (conn.State != ConnectionState.Open)
+                await conn.OpenAsync();
+
+            try
+            {
+                await EnsureSitePredictionColorColumnAsync(conn);
+
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = @"
+                    UPDATE site_prediction
+                    SET site_color = @siteColor
+                    WHERE cluster IS NOT NULL
+                      AND TRIM(cluster) <> ''
+                      AND LOWER(TRIM(cluster)) = LOWER(TRIM(@cluster))
+                      AND (@projectId IS NULL OR tbl_project_id = @projectId);";
+                AddParam(cmd, "@siteColor", siteColor);
+                AddParam(cmd, "@cluster", cluster);
+                AddParam(cmd, "@projectId", projectId.HasValue && projectId.Value > 0 ? projectId.Value : DBNull.Value);
+
+                var updated = await cmd.ExecuteNonQueryAsync();
+                if (updated <= 0)
+                {
+                    return NotFound(new
+                    {
+                        Status = 0,
+                        Message = "No site prediction rows found for the supplied cluster.",
+                        Data = new { cluster, site_color = siteColor, projectId }
+                    });
+                }
+
+                return Ok(new
+                {
+                    Status = 1,
+                    Message = "Site prediction cluster color saved.",
+                    Data = new
+                    {
+                        cluster,
+                        site_color = siteColor,
+                        projectId,
+                        rowsUpdated = updated
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { Status = 0, Message = SafeException.Get(ex) });
+            }
+        }
+
+        [HttpGet, Route("GetSitePredictionClusterColors")]
+        public async Task<IActionResult> GetSitePredictionClusterColors([FromQuery] long? projectId = null)
+        {
+            var conn = db.Database.GetDbConnection();
+            if (conn.State != ConnectionState.Open)
+                await conn.OpenAsync();
+
+            try
+            {
+                await EnsureSitePredictionColorColumnAsync(conn);
+
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = @"
+                    SELECT
+                        TRIM(cluster) AS cluster,
+                        MAX(NULLIF(TRIM(site_color), '')) AS site_color,
+                        COUNT(*) AS row_count
+                    FROM site_prediction
+                    WHERE cluster IS NOT NULL
+                      AND TRIM(cluster) <> ''
+                      AND (@projectId IS NULL OR tbl_project_id = @projectId)
+                    GROUP BY TRIM(cluster)
+                    ORDER BY TRIM(cluster);";
+                AddParam(cmd, "@projectId", projectId.HasValue && projectId.Value > 0 ? projectId.Value : DBNull.Value);
+
+                var rows = new List<object>();
+                await using var reader = await cmd.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
+                {
+                    rows.Add(new
+                    {
+                        cluster = reader.IsDBNull(0) ? "" : reader.GetString(0),
+                        site_color = reader.IsDBNull(1) ? null : reader.GetString(1),
+                        row_count = reader.IsDBNull(2) ? 0 : Convert.ToInt32(reader.GetValue(2))
+                    });
+                }
+
+                return Ok(new
+                {
+                    Status = 1,
+                    Data = rows
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { Status = 0, Message = SafeException.Get(ex) });
+            }
         }
 
         [HttpGet, Route("GetSitePrediction")]

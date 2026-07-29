@@ -857,6 +857,7 @@ public class IndoorOutdoorLogDto
     public string? SINR { get; set; }
 
     public string? cluster { get; set; }
+    public string? site_color { get; set; }
     public string? technology { get; set; }
 }
 
