@@ -60,6 +60,7 @@ protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
         public DbSet<tbl_session> tbl_session => Set<tbl_session>();
         public DbSet<tbl_network_log> tbl_network_log => Set<tbl_network_log>();
         public DbSet<tbl_network_log_neighbour> tbl_network_log_neighbour => Set<tbl_network_log_neighbour>();
+        public DbSet<tbl_sub_session> tbl_sub_session => Set<tbl_sub_session>();
 
         // ======= Prediction & Thresholds =======
         public DbSet<tbl_prediction_data> tbl_prediction_data => Set<tbl_prediction_data>();
@@ -187,6 +188,12 @@ protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
                 e.HasKey(x => x.id);
                 e.ToTable("tbl_network_log_neighbour");
                 e.Ignore(x => x.speed);
+            });
+
+            modelBuilder.Entity<tbl_sub_session>(e =>
+            {
+                e.HasKey(x => x.id);
+                e.ToTable("tbl_sub_session");
             });
 
             modelBuilder.Entity<tbl_prediction_data>(entity =>

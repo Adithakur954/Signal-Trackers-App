@@ -39,6 +39,7 @@ namespace SignalTracker.Controllers
         private const int MapViewCacheTtlSeconds = 300;
         private static volatile bool NetworkLogUpdatedAtColumnEnsured;
         private static volatile bool ObsoleteNetworkLogCachesInvalidated;
+        private static readonly ConcurrentDictionary<string, Lazy<Task<NetworkLogFullResponse>>> NetworkLogPageBuilds = new();
         private static readonly string[] MapViewCacheInvalidationPatterns =
         {
             "mapview:*",
@@ -346,6 +347,7 @@ namespace SignalTracker.Controllers
         }
 
         [HttpPost, AllowAnonymous, PublicApiKey, Route("user_signup")]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("PublicApi")]
         public async Task<JsonResult> user_signup([FromBody] UserModel model)
         {
             var message = new ReturnAPIResponse();
@@ -416,6 +418,7 @@ namespace SignalTracker.Controllers
         }
 
         [HttpPost, AllowAnonymous, PublicApiKey, Route("start_session")]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("PublicApi")]
         public async Task<JsonResult> start_session([FromBody] SessionStartModel model)
         {
             var message = new ReturnAPIResponse();
@@ -455,6 +458,7 @@ namespace SignalTracker.Controllers
         }
 
         [HttpPost, AllowAnonymous, PublicApiKey, Route("end_session")]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("PublicApi")]
         public async Task<JsonResult> end_session([FromBody] SessionEndModel model)
         {
             var message = new ReturnAPIResponse();
@@ -1218,8 +1222,18 @@ public class ProjectPolygonItem
         {
             await using var inspect = conn.CreateCommand();
             inspect.CommandText = @"
-                SELECT DATA_TYPE, COALESCE(CHARACTER_MAXIMUM_LENGTH, 0)
-                FROM INFORMATION_SCHEMA.COLUMNS
+                SELECT
+                    c.DATA_TYPE,
+                    COALESCE(c.CHARACTER_MAXIMUM_LENGTH, 0),
+                    COALESCE(c.CHARACTER_SET_NAME, ''),
+                    EXISTS (
+                        SELECT 1
+                        FROM INFORMATION_SCHEMA.STATISTICS s
+                        WHERE s.TABLE_SCHEMA = c.TABLE_SCHEMA
+                          AND s.TABLE_NAME = c.TABLE_NAME
+                          AND s.COLUMN_NAME = c.COLUMN_NAME
+                    ) AS has_index
+                FROM INFORMATION_SCHEMA.COLUMNS c
                 WHERE TABLE_SCHEMA = DATABASE()
                   AND TABLE_NAME = 'map_regions'
                   AND COLUMN_NAME = 'session_id'
@@ -1227,22 +1241,49 @@ public class ProjectPolygonItem
 
             string dataType = "";
             long maxLength = 0;
+            string characterSet = "";
+            bool hasIndex = false;
             await using (var reader = await inspect.ExecuteReaderAsync())
             {
                 if (await reader.ReadAsync())
                 {
                     dataType = Convert.ToString(reader.GetValue(0))?.ToLowerInvariant() ?? "";
                     maxLength = Convert.ToInt64(reader.GetValue(1));
+                    characterSet = Convert.ToString(reader.GetValue(2))?.ToLowerInvariant() ?? "";
+                    hasIndex = Convert.ToInt32(reader.GetValue(3)) == 1;
                 }
             }
 
-            if (dataType is "text" or "mediumtext" or "longtext" || maxLength >= 1024)
+            if (dataType is "text" or "mediumtext" or "longtext")
+            {
+                return;
+            }
+
+            var bytesPerCharacter = characterSet switch
+            {
+                "utf8mb4" => 4,
+                "utf8" => 3,
+                "utf8mb3" => 3,
+                "ucs2" => 2,
+                "utf16" => 4,
+                "utf16le" => 4,
+                "utf32" => 4,
+                _ => 1,
+            };
+
+            var targetLength = 1024L;
+            if (hasIndex)
+            {
+                targetLength = Math.Min(targetLength, 3072L / Math.Max(1, bytesPerCharacter));
+            }
+
+            if (targetLength <= 0 || maxLength >= targetLength)
             {
                 return;
             }
 
             await using var alter = conn.CreateCommand();
-            alter.CommandText = "ALTER TABLE map_regions MODIFY COLUMN session_id VARCHAR(1024) NULL;";
+            alter.CommandText = $"ALTER TABLE map_regions MODIFY COLUMN session_id VARCHAR({targetLength}) NULL;";
             await alter.ExecuteNonQueryAsync();
         }
 
@@ -2179,6 +2220,60 @@ public class AvailablePolygonsResponse
             await EnsureSitePredictionTextColumnAsync(conn, "site_prediction_optimized", "site_name");
         }
 
+        private async Task EnsureSitePredictionColorColumnAsync(DbConnection conn)
+        {
+            await using var existsCmd = conn.CreateCommand();
+            existsCmd.CommandText = @"
+                SELECT COUNT(*)
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = 'site_prediction'
+                  AND COLUMN_NAME = 'site_color';";
+
+            var exists = Convert.ToInt32(await existsCmd.ExecuteScalarAsync());
+            if (exists > 0)
+                return;
+
+            await using var alterCmd = conn.CreateCommand();
+            alterCmd.CommandText = "ALTER TABLE `site_prediction` ADD COLUMN `site_color` VARCHAR(50) NULL;";
+            await alterCmd.ExecuteNonQueryAsync();
+        }
+
+        public sealed class SitePredictionClusterColorRequest
+        {
+            public long? ProjectId { get; set; }
+            public long? projectId { get; set; }
+            public string? Cluster { get; set; }
+            public string? cluster { get; set; }
+            public string? SiteColor { get; set; }
+            public string? siteColor { get; set; }
+            public string? site_color { get; set; }
+            public string? ColorCode { get; set; }
+            public string? colorCode { get; set; }
+            public string? SiteColorCode { get; set; }
+            public string? siteColorCode { get; set; }
+            public string? Color { get; set; }
+            public string? color { get; set; }
+        }
+
+        private static string? FirstNonBlank(params string?[] values)
+        {
+            foreach (var value in values)
+            {
+                if (!string.IsNullOrWhiteSpace(value))
+                    return value.Trim();
+            }
+            return null;
+        }
+
+        private static bool IsSupportedColorCode(string value)
+        {
+            var color = value.Trim();
+            return Regex.IsMatch(color, "^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$") ||
+                   Regex.IsMatch(color, "^rgba?\\([^)]{1,80}\\)$", RegexOptions.IgnoreCase) ||
+                   Regex.IsMatch(color, "^hsla?\\([^)]{1,80}\\)$", RegexOptions.IgnoreCase);
+        }
+
         private static bool TryParseNodeIdForNumericColumn(string? raw, out double parsedValue)
         {
             parsedValue = 0;
@@ -2720,6 +2815,9 @@ public class MapFilter1
     public long? project_id { get; set; }
     public bool force_refresh { get; set; }
     public bool ForceRefresh { get; set; }
+    public DateTime? cursor_timestamp { get; set; }
+    public int? cursor_id { get; set; }
+    public bool include_summary { get; set; } = true;
 
     public List<long> GetSessionIds()
     {
@@ -2749,6 +2847,10 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
         var page = filters.page <= 0 ? 1 : filters.page;
         var pageOffset = (page - 1) * limit;
         var forceRefresh = filters.force_refresh || filters.ForceRefresh;
+        var cursorKey = filters.cursor_timestamp.HasValue && filters.cursor_id.HasValue && filters.cursor_id.Value > 0
+            ? $":cursor:{filters.cursor_timestamp.Value.Ticks}:{filters.cursor_id.Value}"
+            : "";
+        var summaryKey = filters.include_summary ? ":summary:1" : ":summary:0";
         string connString = db.Database.GetConnectionString();
         string providerNormalized = null;
         await InvalidateObsoleteNetworkLogCachesAsync();
@@ -2766,7 +2868,7 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
             filters.project_id,
             "latest"
         );
-        string latestPageCacheKey = $"{latestCacheKey}:page:{page}:limit:{limit}";
+        string latestPageCacheKey = $"{latestCacheKey}:page:{page}:limit:{limit}{cursorKey}{summaryKey}";
         Response.Headers["X-Cache"] = forceRefresh ? "BYPASS" : "MISS";
 
         string dataVersion = await GetNetworkLogDataVersionAsync(
@@ -2785,7 +2887,7 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
             filters.project_id,
             dataVersion
         );
-        string pageCacheKey = $"{cacheKey}:page:{page}:limit:{limit}";
+        string pageCacheKey = $"{cacheKey}:page:{page}:limit:{limit}{cursorKey}{summaryKey}";
 
         // A cache hit is valid only when its key contains the current DB version.
         // This makes inserts visible on the first request after they are committed.
@@ -2815,14 +2917,40 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
             }
         }
 
-        var cacheModel = await BuildNetworkLogPageCacheAsync(
-            connString,
-            sessionIds,
-            providerNormalized,
-            filters,
-            limit,
-            pageOffset,
-            dataVersion);
+        var buildLazy = forceRefresh
+            ? null
+            : NetworkLogPageBuilds.GetOrAdd(pageCacheKey, _ => new Lazy<Task<NetworkLogFullResponse>>(
+                () => BuildNetworkLogPageCacheAsync(
+                    connString,
+                    sessionIds,
+                    providerNormalized,
+                    filters,
+                    limit,
+                    pageOffset,
+                    dataVersion),
+                LazyThreadSafetyMode.ExecutionAndPublication));
+
+        NetworkLogFullResponse cacheModel;
+        try
+        {
+            cacheModel = buildLazy == null
+                ? await BuildNetworkLogPageCacheAsync(
+                    connString,
+                    sessionIds,
+                    providerNormalized,
+                    filters,
+                    limit,
+                    pageOffset,
+                    dataVersion)
+                : await buildLazy.Value;
+        }
+        finally
+        {
+            if (buildLazy != null)
+            {
+                NetworkLogPageBuilds.TryRemove(pageCacheKey, out _);
+            }
+        }
 
         var responseObj = ToNetworkLogResponseObject(cacheModel, sessionIds.Count, forceRefresh ? "BYPASS" : "MISS");
 
@@ -2898,18 +3026,47 @@ private async Task<NetworkLogFullResponse> BuildNetworkLogPageCacheAsync(
     int pageOffset,
     string dataVersion)
 {
-    async Task<(List<NetworkLogCacheRow> fullData, Dictionary<string, object> appSummary, CombinedStatsDto stats)> FetchBundleAsync(MapFilter1 activeFilters)
+    var includeSummary = filters.include_summary && filters.page <= 1;
+
+    async Task<NetworkLogFullResponse> FetchPageAsync(MapFilter1 activeFilters)
     {
+        if (!includeSummary)
+        {
+            return new NetworkLogFullResponse
+            {
+                data = await GetMainDataOnlyRaw(connString, sessionIds, provider, activeFilters, limit, pageOffset),
+                app_summary = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase),
+                io_summary = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase),
+                tpt_volume = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase),
+                TotalCount = 0,
+                Sessions = new List<SessionCountDto>(),
+                CachedAt = DateTime.UtcNow,
+                DataVersion = dataVersion
+            };
+        }
+
         var taskData = GetMainDataOnlyRaw(connString, sessionIds, provider, activeFilters, limit, pageOffset);
         var taskApps = GetAppSummaryRaw(connString, sessionIds, provider, activeFilters);
         var taskStats = GetCombinedStatsRaw(connString, sessionIds, provider, activeFilters);
         await Task.WhenAll(taskData, taskApps, taskStats);
-        return (taskData.Result, taskApps.Result, taskStats.Result);
+        var stats = taskStats.Result;
+
+        return new NetworkLogFullResponse
+        {
+            data = taskData.Result,
+            app_summary = taskApps.Result,
+            io_summary = stats.IoSummary,
+            tpt_volume = stats.Volume,
+            TotalCount = (int)stats.Sessions.Sum(x => x.Count),
+            Sessions = stats.Sessions,
+            CachedAt = DateTime.UtcNow,
+            DataVersion = dataVersion
+        };
     }
 
-    var bundle = await FetchBundleAsync(filters);
+    var cacheModel = await FetchPageAsync(filters);
 
-    if (bundle.fullData.Count == 0 && filters.project_id.HasValue && filters.project_id.Value > 0)
+    if (cacheModel.data.Count == 0 && filters.project_id.HasValue && filters.project_id.Value > 0)
     {
         var fallbackFilters = new MapFilter1
         {
@@ -2919,23 +3076,14 @@ private async Task<NetworkLogFullResponse> BuildNetworkLogPageCacheAsync(
             NetworkType = filters.NetworkType,
             StartDate = filters.StartDate,
             EndDate = filters.EndDate,
-            project_id = null
+            project_id = null,
+            cursor_timestamp = filters.cursor_timestamp,
+            cursor_id = filters.cursor_id
         };
-        bundle = await FetchBundleAsync(fallbackFilters);
+        cacheModel = await FetchPageAsync(fallbackFilters);
     }
 
-    var calculatedTotalCount = bundle.stats.Sessions.Sum(x => x.Count);
-    return new NetworkLogFullResponse
-    {
-        data = bundle.fullData,
-        app_summary = bundle.appSummary,
-        io_summary = bundle.stats.IoSummary,
-        tpt_volume = bundle.stats.Volume,
-        TotalCount = (int)calculatedTotalCount,
-        Sessions = bundle.stats.Sessions,
-        CachedAt = DateTime.UtcNow,
-        DataVersion = dataVersion
-    };
+    return cacheModel;
 }
 
 private static object ToNetworkLogResponseObject(
@@ -2943,6 +3091,8 @@ private static object ToNetworkLogResponseObject(
     int sessionCount,
     string cacheState)
 {
+    var lastRow = cacheModel.data.LastOrDefault(row => row.timestamp.HasValue);
+
     return new
     {
         data = cacheModel.data,
@@ -2954,7 +3104,9 @@ private static object ToNetworkLogResponseObject(
         sessions = cacheModel.Sessions,
         cachedAt = cacheModel.CachedAt,
         cache_state = cacheState,
-        data_version = cacheModel.DataVersion
+        data_version = cacheModel.DataVersion,
+        next_cursor_timestamp = lastRow?.timestamp,
+        next_cursor_id = lastRow?.id
     };
 }
 
@@ -3157,23 +3309,7 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
     var srcLong = string.Format(CultureInfo.InvariantCulture, cleanedLongTemplate, "src");
     var bpTechKey = string.Format(CultureInfo.InvariantCulture, techKeyTemplate, "bp");
     var srcTechKey = string.Format(CultureInfo.InvariantCulture, techKeyTemplate, "src");
-    string sql = $@"
-        WITH base_page AS (
-            SELECT
-                id, session_id, timestamp, lat, lon, battery, Speed, level, apps, num_cells,
-                network, m_alpha_short, m_alpha_long,
-                pci, rssi, rsrp, rsrq, sinr, mos, jitter, latency, tac,
-                packet_loss, dl_tpt, ul_tpt, band, image_path, indoor_outdoor, nodeb_id, cell_id,
-                primary_cell_info_1, earfcn
-            FROM tbl_network_log
-            WHERE {whereClause}
-            ORDER BY timestamp
-            LIMIT @limit OFFSET @offset
-        )
-        SELECT
-            bp.id, bp.session_id, bp.timestamp, bp.lat, bp.lon, bp.battery, bp.Speed, bp.level, bp.apps, bp.num_cells,
-            bp.network,
-            COALESCE(
+    var providerNameSql = $@"COALESCE(
                 {bpShort},
                 {bpLong},
                 (
@@ -3224,7 +3360,33 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
                     ORDER BY src.id ASC
                     LIMIT 1
                 )
-            ) AS provider_name,
+            )";
+    var dataWhereClause = whereClause;
+    if (filters.cursor_timestamp.HasValue && filters.cursor_id.HasValue && filters.cursor_id.Value > 0)
+    {
+        dataWhereClause += " AND (timestamp > @cursorTimestamp OR (timestamp = @cursorTimestamp AND id > @cursorId))";
+        parameters["@cursorTimestamp"] = filters.cursor_timestamp.Value;
+        parameters["@cursorId"] = filters.cursor_id.Value;
+        offset = 0;
+    }
+
+    string sql = $@"
+        WITH base_page AS (
+            SELECT
+                id, session_id, timestamp, lat, lon, battery, Speed, level, apps, num_cells,
+                network, m_alpha_short, m_alpha_long,
+                pci, rssi, rsrp, rsrq, sinr, mos, jitter, latency, tac,
+                packet_loss, dl_tpt, ul_tpt, band, image_path, indoor_outdoor, nodeb_id, cell_id,
+                primary_cell_info_1, earfcn
+            FROM tbl_network_log
+            WHERE {dataWhereClause}
+            ORDER BY timestamp, id
+            LIMIT @limit OFFSET @offset
+        )
+        SELECT
+            bp.id, bp.session_id, bp.timestamp, bp.lat, bp.lon, bp.battery, bp.Speed, bp.level, bp.apps, bp.num_cells,
+            bp.network,
+            {providerNameSql} AS provider_name,
             bp.pci, bp.rssi, bp.rsrp, bp.rsrq, bp.sinr, bp.mos, bp.jitter, bp.latency, bp.tac,
             bp.packet_loss, bp.dl_tpt, bp.ul_tpt,
             bp.band,
@@ -3243,7 +3405,7 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
             END AS connection_type,
             bp.primary_cell_info_1, bp.earfcn
         FROM base_page bp
-        ORDER BY bp.timestamp;";
+        ORDER BY bp.timestamp, bp.id;";
 
     var rows = new List<NetworkLogCacheRow>();
     using var cmd = new MySqlCommand(sql, conn);
@@ -4489,8 +4651,7 @@ public async Task<IActionResult> GetCombinedProviderNetworkTime(
 }
 
 
-// cdf value calcuation s 
-[AllowAnonymous]
+// cdf value calcuation s
 [HttpGet("kpi-distribution")]
 public async Task<IActionResult> GetKpiDistribution(
     [FromQuery] string sessionIds,
@@ -4499,7 +4660,19 @@ public async Task<IActionResult> GetKpiDistribution(
     if (string.IsNullOrWhiteSpace(sessionIds))
         return BadRequest("sessionIds are required");
 
-    string ids = sessionIds;
+    var sessionIdList = sessionIds
+        .Split(',', StringSplitOptions.RemoveEmptyEntries)
+        .Select(id => int.TryParse(id.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ? parsed : 0)
+        .Where(id => id > 0)
+        .Distinct()
+        .OrderBy(id => id)
+        .Take(100)
+        .ToList();
+
+    if (sessionIdList.Count == 0)
+        return BadRequest("Invalid sessionIds");
+
+    string ids = string.Join(",", sessionIdList);
     var cacheKey = BuildMapViewCacheKey("kpi-distribution", ids, kpi ?? "all");
     var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
     if (cached != null)
@@ -4519,6 +4692,11 @@ public async Task<IActionResult> GetKpiDistribution(
 
     async Task<List<KpiDistributionRow>> RunQuery(string expr, string rawColumn)
     {
+        var parameters = sessionIdList
+            .Select((id, index) => new MySqlParameter($"@sid{index}", id))
+            .ToArray();
+        var sessionPlaceholders = string.Join(",", parameters.Select(p => p.ParameterName));
+
         string sql = $@"
         SELECT
             value,
@@ -4532,7 +4710,7 @@ public async Task<IActionResult> GetKpiDistribution(
                 SUM(COUNT(*)) OVER (ORDER BY CAST({expr} AS SIGNED)) AS cumulative_count,
                 SUM(COUNT(*)) OVER () AS total_samples
             FROM tbl_network_log
-            WHERE session_id IN ({ids})
+            WHERE session_id IN ({sessionPlaceholders})
               AND {rawColumn} IS NOT NULL
             GROUP BY CAST({expr} AS SIGNED)
         ) t
@@ -4540,7 +4718,7 @@ public async Task<IActionResult> GetKpiDistribution(
         ";
 
         return await db.KpiDistributionRows
-            .FromSqlRaw(sql)
+            .FromSqlRaw(sql, parameters)
             .AsNoTracking()
             .ToListAsync();
     }
@@ -7650,6 +7828,7 @@ public JsonResult GetPredictionLog(
         // =========================================================
 
         [HttpPost, AllowAnonymous, PublicApiKey, Route("UploadImage")]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("Upload")]
         public async Task<IActionResult> UploadImage(IFormFile file)
         {
             if (file == null || file.Length == 0)
@@ -7680,6 +7859,7 @@ public JsonResult GetPredictionLog(
         }
 
         [HttpPost, AllowAnonymous, PublicApiKey, Route("UploadImageLegacy")]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("Upload")]
         public async Task<IActionResult> UploadImageLegacy(IFormFile file)
         {
             if (file == null || file.Length == 0)
@@ -7718,6 +7898,7 @@ public JsonResult GetPredictionLog(
         }
 
         [HttpPost, AllowAnonymous, PublicApiKey, Route("log_networkAsync")]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("MobileIngestion")]
         public async Task<JsonResult> log_networkAsync([FromBody] NetworkLogPostModel model)
         {
             var message = new ReturnMessage();
@@ -8862,6 +9043,130 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             [FromQuery] int? scenario = null)
         {
             return GetSitePrediction(projectId, site, cell_id, cluster, provider, technology, band, pci, limit, offset, "combined", 0, scenario);
+        }
+
+        [HttpPost, Route("SaveSitePredictionClusterColor")]
+        public async Task<IActionResult> SaveSitePredictionClusterColor([FromBody] SitePredictionClusterColorRequest request)
+        {
+            var cluster = FirstNonBlank(request?.Cluster, request?.cluster)?.Trim();
+            var siteColor = FirstNonBlank(
+                request?.ColorCode,
+                request?.colorCode,
+                request?.SiteColorCode,
+                request?.siteColorCode,
+                request?.SiteColor,
+                request?.siteColor,
+                request?.site_color,
+                request?.Color,
+                request?.color)?.Trim();
+            var projectId = request?.ProjectId ?? request?.projectId;
+
+            if (string.IsNullOrWhiteSpace(cluster))
+                return BadRequest(new { Status = 0, Message = "Cluster is required." });
+
+            if (string.IsNullOrWhiteSpace(siteColor))
+                return BadRequest(new { Status = 0, Message = "Color code is required." });
+
+            if (!IsSupportedColorCode(siteColor))
+                return BadRequest(new { Status = 0, Message = "Send a valid color code like #ff0000, rgb(255,0,0), or hsl(0,100%,50%). Do not send color names like Red." });
+
+            var conn = db.Database.GetDbConnection();
+            if (conn.State != ConnectionState.Open)
+                await conn.OpenAsync();
+
+            try
+            {
+                await EnsureSitePredictionColorColumnAsync(conn);
+
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = @"
+                    UPDATE site_prediction
+                    SET site_color = @siteColor
+                    WHERE cluster IS NOT NULL
+                      AND TRIM(cluster) <> ''
+                      AND LOWER(TRIM(cluster)) = LOWER(TRIM(@cluster))
+                      AND (@projectId IS NULL OR tbl_project_id = @projectId);";
+                AddParam(cmd, "@siteColor", siteColor);
+                AddParam(cmd, "@cluster", cluster);
+                AddParam(cmd, "@projectId", projectId.HasValue && projectId.Value > 0 ? projectId.Value : DBNull.Value);
+
+                var updated = await cmd.ExecuteNonQueryAsync();
+                if (updated <= 0)
+                {
+                    return NotFound(new
+                    {
+                        Status = 0,
+                        Message = "No site prediction rows found for the supplied cluster.",
+                        Data = new { cluster, site_color = siteColor, projectId }
+                    });
+                }
+
+                return Ok(new
+                {
+                    Status = 1,
+                    Message = "Site prediction cluster color saved.",
+                    Data = new
+                    {
+                        cluster,
+                        site_color = siteColor,
+                        projectId,
+                        rowsUpdated = updated
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { Status = 0, Message = SafeException.Get(ex) });
+            }
+        }
+
+        [HttpGet, Route("GetSitePredictionClusterColors")]
+        public async Task<IActionResult> GetSitePredictionClusterColors([FromQuery] long? projectId = null)
+        {
+            var conn = db.Database.GetDbConnection();
+            if (conn.State != ConnectionState.Open)
+                await conn.OpenAsync();
+
+            try
+            {
+                await EnsureSitePredictionColorColumnAsync(conn);
+
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = @"
+                    SELECT
+                        TRIM(cluster) AS cluster,
+                        MAX(NULLIF(TRIM(site_color), '')) AS site_color,
+                        COUNT(*) AS row_count
+                    FROM site_prediction
+                    WHERE cluster IS NOT NULL
+                      AND TRIM(cluster) <> ''
+                      AND (@projectId IS NULL OR tbl_project_id = @projectId)
+                    GROUP BY TRIM(cluster)
+                    ORDER BY TRIM(cluster);";
+                AddParam(cmd, "@projectId", projectId.HasValue && projectId.Value > 0 ? projectId.Value : DBNull.Value);
+
+                var rows = new List<object>();
+                await using var reader = await cmd.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
+                {
+                    rows.Add(new
+                    {
+                        cluster = reader.IsDBNull(0) ? "" : reader.GetString(0),
+                        site_color = reader.IsDBNull(1) ? null : reader.GetString(1),
+                        row_count = reader.IsDBNull(2) ? 0 : Convert.ToInt32(reader.GetValue(2))
+                    });
+                }
+
+                return Ok(new
+                {
+                    Status = 1,
+                    Data = rows
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { Status = 0, Message = SafeException.Get(ex) });
+            }
         }
 
         [HttpGet, Route("GetSitePrediction")]
@@ -11799,6 +12104,9 @@ private async Task<List<object>> GetProjectsFromRawSqlAsync(
     using var conn = new MySqlConnection(connString);
     await conn.OpenAsync();
     var projectColumns = await GetTableColumnSetAsync(conn, "tbl_project");
+    var gridSizeSelect = projectColumns.Contains("grid_size")
+        ? "p.grid_size"
+        : "NULL AS grid_size";
     var logGridSelect = projectColumns.Contains("log_grid")
         ? "p.log_grid"
         : "NULL AS log_grid";
@@ -11822,7 +12130,7 @@ private async Task<List<object>> GetProjectsFromRawSqlAsync(
             p.band,
             p.earfcn,
             p.apps,
-            p.grid_size,
+            {gridSizeSelect},
             {logGridSelect},
             {siteSizeSelect},
             p.created_on,
@@ -11909,6 +12217,9 @@ private async Task<List<object>> GetProjectsFallbackAsync(
     await conn.OpenAsync();
 
     var projectColumns = await GetTableColumnSetAsync(conn, "tbl_project");
+    var gridSizeSelect = projectColumns.Contains("grid_size")
+        ? "p.grid_size"
+        : "NULL AS grid_size";
     var logGridSelect = projectColumns.Contains("log_grid")
         ? "p.log_grid"
         : "NULL AS log_grid";
@@ -11932,7 +12243,7 @@ private async Task<List<object>> GetProjectsFallbackAsync(
             p.band,
             p.earfcn,
             p.apps,
-            p.grid_size,
+            {gridSizeSelect},
             {logGridSelect},
             {siteSizeSelect},
             p.created_on,

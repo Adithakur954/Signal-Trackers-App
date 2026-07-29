@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.IO.Compression;
+using System.Data.Common;
 using System.Net.Http;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -35,7 +36,23 @@ namespace SignalTracker.Controllers
             _httpClientFactory = httpClientFactory;
         }
 
+        private static async Task<string> SaveUploadToTempFileAsync(IFormFile upload, CancellationToken ct)
+        {
+            var tempPath = Path.Combine(Path.GetTempPath(), $"signaltracker-report-{Guid.NewGuid():N}.zip");
+            await using var output = new FileStream(
+                tempPath,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                bufferSize: 128 * 1024,
+                useAsync: true);
+
+            await upload.CopyToAsync(output, ct);
+            return tempPath;
+        }
+
         [HttpGet("Generate")]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("Report")]
         public Task<IActionResult> GenerateFromQuery(
             [FromQuery] int projectId,
             [FromQuery] string? sessionIds = null,
@@ -60,6 +77,7 @@ namespace SignalTracker.Controllers
         }
 
         [HttpPost("Generate")]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("Report")]
         public async Task<IActionResult> Generate([FromBody] WalkTestExcelReportRequest request)
         {
             if (request == null)
@@ -111,6 +129,7 @@ namespace SignalTracker.Controllers
         //   SessionIdOverride -> optional, forces the session id used for image lookup
         //   BandFilter/Bands -> optional, one or more selected bands; ALL/empty = no filter
         [HttpPost("GenerateFromZip")]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("Report")]
         [Consumes("multipart/form-data")]
         [RequestSizeLimit(200_000_000)]
         public async Task<IActionResult> GenerateFromZip([FromForm] ZipReportUploadRequest request)
@@ -118,9 +137,16 @@ namespace SignalTracker.Controllers
             if (request.LogZip == null || request.LogZip.Length == 0)
                 return BadRequest(new { Message = "A log zip file is required." });
 
-            using var zipStream = new MemoryStream();
-            await request.LogZip.CopyToAsync(zipStream, HttpContext.RequestAborted);
-            zipStream.Position = 0;
+            var tempZipPath = await SaveUploadToTempFileAsync(request.LogZip, HttpContext.RequestAborted);
+            try
+            {
+            await using var zipStream = new FileStream(
+                tempZipPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                bufferSize: 128 * 1024,
+                useAsync: true);
 
             using var archive = new ZipArchive(zipStream, ZipArchiveMode.Read, leaveOpen: true);
 
@@ -180,10 +206,16 @@ namespace SignalTracker.Controllers
             var bytes = SimpleXlsxWriter.Write(workbook);
             var filename = $"Walk_Test_Report_Zip_{sessionId}_{DateTime.Now:yyyy-MM-dd}.xlsx";
             return File(bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename);
+            }
+            finally
+            {
+                System.IO.File.Delete(tempZipPath);
+            }
         }
 
         // POST api/ExcelReport/DiscoverBands
         [HttpPost("DiscoverBands")]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("Report")]
         [Consumes("multipart/form-data")]
         [RequestSizeLimit(200_000_000)]
         public async Task<IActionResult> DiscoverBands([FromForm] ZipBandDiscoveryRequest request)
@@ -191,9 +223,16 @@ namespace SignalTracker.Controllers
             if (request.LogZip == null || request.LogZip.Length == 0)
                 return BadRequest(new { Message = "A log zip file is required." });
 
-            using var zipStream = new MemoryStream();
-            await request.LogZip.CopyToAsync(zipStream, HttpContext.RequestAborted);
-            zipStream.Position = 0;
+            var tempZipPath = await SaveUploadToTempFileAsync(request.LogZip, HttpContext.RequestAborted);
+            try
+            {
+            await using var zipStream = new FileStream(
+                tempZipPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                bufferSize: 128 * 1024,
+                useAsync: true);
 
             using var archive = new ZipArchive(zipStream, ZipArchiveMode.Read, leaveOpen: true);
 
@@ -220,6 +259,11 @@ namespace SignalTracker.Controllers
                 TotalRows = rows.Count,
                 AvailableBands = bandSummary
             });
+            }
+            finally
+            {
+                System.IO.File.Delete(tempZipPath);
+            }
         }
 
         private static IReadOnlyDictionary<string, byte[]?> BuildImageBytesByUrlFromZip(
@@ -1009,40 +1053,10 @@ namespace SignalTracker.Controllers
 
         private async Task<List<WalkTestSiteSummaryRow>> QuerySiteSummaryRowsAsync(int projectId)
         {
-            var optimizedRows = await _db.site_prediction_optimized
-                .AsNoTracking()
-                .Where(x => x.tbl_project_id == projectId)
-                .OrderByDescending(x => x.updated_at ?? x.created_at)
-                .ThenBy(x => x.id)
-                .Select(x => new WalkTestSiteSummaryRow
-                {
-                    Source = "Optimized",
-                    SourceId = x.site_prediction_id,
-                    Version = x.version,
-                    Status = x.status,
-                    Site = x.site,
-                    SiteName = x.site_name,
-                    Sector = x.sector,
-                    CellId = x.cell_id,
-                    SecId = x.sec_id,
-                    Latitude = x.latitude,
-                    Longitude = x.longitude,
-                    Tac = x.tac,
-                    Pci = x.pci,
-                    Azimuth = x.azimuth,
-                    Height = x.height,
-                    Band = x.band,
-                    Earfcn = x.earfcn,
-                    Bw = x.bw,
-                    MTilt = x.m_tilt,
-                    ETilt = x.e_tilt,
-                    TxPower = x.maximum_transmission_power_of_resource,
-                    ReferenceSignalPower = x.reference_signal_power,
-                    Frequency = x.frequency,
-                    Cluster = x.cluster,
-                    Technology = x.technology
-                })
-                .ToListAsync(HttpContext.RequestAborted);
+            var optimizedRows = await QuerySiteSummaryRowsRawAsync(
+                projectId,
+                isOptimized: true,
+                excludedSourceIds: null);
 
             var optimizedSourceIds = optimizedRows
                 .Select(x => x.SourceId)
@@ -1050,44 +1064,10 @@ namespace SignalTracker.Controllers
                 .Distinct()
                 .ToList();
 
-            var baseQuery = _db.site_prediction
-                .AsNoTracking()
-                .Where(x => x.tbl_project_id == projectId);
-
-            if (optimizedSourceIds.Count > 0)
-                baseQuery = baseQuery.Where(x => !optimizedSourceIds.Contains(x.id));
-
-            var baseRows = await baseQuery
-                .OrderBy(x => x.site)
-                .ThenBy(x => x.sector)
-                .ThenBy(x => x.cell_id)
-                .Select(x => new WalkTestSiteSummaryRow
-                {
-                    Source = "Original",
-                    SourceId = x.id,
-                    Site = x.site,
-                    SiteName = x.site_name,
-                    Sector = x.sector,
-                    CellId = x.cell_id,
-                    SecId = x.sec_id,
-                    Latitude = x.latitude,
-                    Longitude = x.longitude,
-                    Tac = x.tac,
-                    Pci = x.pci,
-                    Azimuth = x.azimuth,
-                    Height = x.height,
-                    Band = x.band,
-                    Earfcn = x.earfcn,
-                    Bw = x.bw,
-                    MTilt = x.m_tilt,
-                    ETilt = x.e_tilt,
-                    TxPower = x.maximum_transmission_power_of_resource,
-                    ReferenceSignalPower = x.reference_signal_power,
-                    Frequency = x.frequency,
-                    Cluster = x.cluster,
-                    Technology = x.technology
-                })
-                .ToListAsync(HttpContext.RequestAborted);
+            var baseRows = await QuerySiteSummaryRowsRawAsync(
+                projectId,
+                isOptimized: false,
+                excludedSourceIds: optimizedSourceIds);
 
             return optimizedRows
                 .Concat(baseRows)
@@ -1095,6 +1075,141 @@ namespace SignalTracker.Controllers
                 .ThenBy(x => x.Sector)
                 .ThenBy(x => x.CellId ?? int.MaxValue)
                 .ToList();
+        }
+
+        private async Task<List<WalkTestSiteSummaryRow>> QuerySiteSummaryRowsRawAsync(
+            int projectId,
+            bool isOptimized,
+            IReadOnlyCollection<int>? excludedSourceIds)
+        {
+            var conn = _db.Database.GetDbConnection();
+            if (conn.State != System.Data.ConnectionState.Open)
+                await conn.OpenAsync(HttpContext.RequestAborted);
+
+            await using var command = conn.CreateCommand();
+            var table = isOptimized ? "site_prediction_optimized" : "site_prediction";
+            var sourceIdColumn = isOptimized ? "site_prediction_id" : "id";
+            var versionSelect = isOptimized ? "version" : "NULL AS version";
+            var statusSelect = isOptimized ? "status" : "NULL AS status";
+            var orderBy = isOptimized
+                ? "ORDER BY COALESCE(updated_at, created_at) DESC, id"
+                : "ORDER BY site, sector, cell_id";
+
+            var excludeClause = "";
+            if (!isOptimized && excludedSourceIds?.Count > 0)
+            {
+                var names = new List<string>();
+                var index = 0;
+                foreach (var id in excludedSourceIds)
+                {
+                    var name = $"@excluded{index++}";
+                    names.Add(name);
+                    AddCommandParameter(command, name, id);
+                }
+                excludeClause = $" AND id NOT IN ({string.Join(",", names)})";
+            }
+
+            command.CommandText = $@"
+                SELECT
+                    {sourceIdColumn} AS source_id,
+                    {versionSelect},
+                    {statusSelect},
+                    site, site_name, sector, cell_id, sec_id,
+                    latitude, longitude, tac, pci, azimuth, height, band, earfcn, bw,
+                    m_tilt, e_tilt, tx_power, reference_signal_power, frequency, cluster, technology
+                FROM {table}
+                WHERE tbl_project_id = @projectId{excludeClause}
+                {orderBy};";
+            AddCommandParameter(command, "@projectId", projectId);
+
+            var rows = new List<WalkTestSiteSummaryRow>();
+            await using var reader = await command.ExecuteReaderAsync(HttpContext.RequestAborted);
+            while (await reader.ReadAsync(HttpContext.RequestAborted))
+            {
+                rows.Add(new WalkTestSiteSummaryRow
+                {
+                    Source = isOptimized ? "Optimized" : "Original",
+                    SourceId = ReadReportInt(reader, "source_id") ?? 0,
+                    Version = ReadReportInt(reader, "version"),
+                    Status = ReadReportString(reader, "status"),
+                    Site = ReadReportInt(reader, "site"),
+                    SiteName = ReadReportInt(reader, "site_name"),
+                    Sector = ReadReportString(reader, "sector"),
+                    CellId = ReadReportInt(reader, "cell_id"),
+                    SecId = ReadReportInt(reader, "sec_id"),
+                    Latitude = ReadReportDouble(reader, "latitude"),
+                    Longitude = ReadReportDouble(reader, "longitude"),
+                    Tac = ReadReportInt(reader, "tac"),
+                    Pci = ReadReportInt(reader, "pci"),
+                    Azimuth = ReadReportInt(reader, "azimuth"),
+                    Height = ReadReportInt(reader, "height"),
+                    Band = ReadReportInt(reader, "band"),
+                    Earfcn = ReadReportInt(reader, "earfcn"),
+                    Bw = ReadReportInt(reader, "bw"),
+                    MTilt = ReadReportInt(reader, "m_tilt"),
+                    ETilt = ReadReportInt(reader, "e_tilt"),
+                    TxPower = ReadReportDouble(reader, "tx_power"),
+                    ReferenceSignalPower = ReadReportDouble(reader, "reference_signal_power"),
+                    Frequency = ReadReportString(reader, "frequency"),
+                    Cluster = ReadReportString(reader, "cluster"),
+                    Technology = ReadReportString(reader, "technology")
+                });
+            }
+
+            return rows;
+        }
+
+        private static void AddCommandParameter(DbCommand command, string name, object? value)
+        {
+            var parameter = command.CreateParameter();
+            parameter.ParameterName = name;
+            parameter.Value = value ?? DBNull.Value;
+            command.Parameters.Add(parameter);
+        }
+
+        private static string? ReadReportString(DbDataReader reader, string name)
+        {
+            var ordinal = reader.GetOrdinal(name);
+            return reader.IsDBNull(ordinal)
+                ? null
+                : Convert.ToString(reader.GetValue(ordinal), CultureInfo.InvariantCulture);
+        }
+
+        private static int? ReadReportInt(DbDataReader reader, string name)
+        {
+            var ordinal = reader.GetOrdinal(name);
+            if (reader.IsDBNull(ordinal)) return null;
+
+            var value = reader.GetValue(ordinal);
+            if (value is int i) return i;
+            if (value is long l) return l > int.MaxValue || l < int.MinValue ? null : (int)l;
+            if (value is decimal dec) return dec > int.MaxValue || dec < int.MinValue ? null : (int)dec;
+            if (value is double dbl) return dbl > int.MaxValue || dbl < int.MinValue ? null : (int)dbl;
+
+            var text = Convert.ToString(value, CultureInfo.InvariantCulture)?.Trim();
+            if (string.IsNullOrWhiteSpace(text)) return null;
+            if (int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)) return parsed;
+            return double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsedDouble) &&
+                   parsedDouble <= int.MaxValue &&
+                   parsedDouble >= int.MinValue
+                ? (int)parsedDouble
+                : null;
+        }
+
+        private static double? ReadReportDouble(DbDataReader reader, string name)
+        {
+            var ordinal = reader.GetOrdinal(name);
+            if (reader.IsDBNull(ordinal)) return null;
+
+            var value = reader.GetValue(ordinal);
+            if (value is double d) return d;
+            if (value is float f) return f;
+            if (value is decimal dec) return (double)dec;
+
+            var text = Convert.ToString(value, CultureInfo.InvariantCulture)?.Trim();
+            return double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)
+                ? parsed
+                : null;
         }
 
         private static XlsxWorkbook BuildWorkbook(
@@ -1474,7 +1589,9 @@ namespace SignalTracker.Controllers
                 : null;
         }
 
+        private const int MaxSwatchCacheEntries = 256;
         private static readonly ConcurrentDictionary<string, byte[]> SwatchCache = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly ConcurrentQueue<string> SwatchCacheOrder = new();
 
         private static byte[] GenerateColorSwatchPng(string hex)
         {
@@ -1510,8 +1627,18 @@ namespace SignalTracker.Controllers
             using var ms = new MemoryStream();
             image.SaveAsPng(ms);
             var bytes = ms.ToArray();
-            SwatchCache[key] = bytes;
+            AddSwatchToCache(key, bytes);
             return bytes;
+        }
+
+        private static void AddSwatchToCache(string key, byte[] bytes)
+        {
+            if (!SwatchCache.TryAdd(key, bytes))
+                return;
+
+            SwatchCacheOrder.Enqueue(key);
+            while (SwatchCache.Count > MaxSwatchCacheEntries && SwatchCacheOrder.TryDequeue(out var oldKey))
+                SwatchCache.TryRemove(oldKey, out _);
         }
 
         private static (byte R, byte G, byte B) ParseHexColor(string hex)

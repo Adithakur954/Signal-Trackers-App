@@ -305,7 +305,6 @@ namespace SignalTracker.Controllers
 
         // GET: /ExcelUpload/DownloadExcel
         [HttpGet("DownloadExcel")]
-        [AllowAnonymous]
         public IActionResult DownloadExcel(int fileType, string? fileName)
         {
             var root = _env.ContentRootPath;
@@ -428,6 +427,7 @@ namespace SignalTracker.Controllers
 
         // POST: /ExcelUpload/UploadExcelFile
         [HttpPost("UploadExcelFile")]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("Upload")]
         [RequestSizeLimit(524_288_000)]
         [RequestFormLimits(MultipartBodyLengthLimit = 524_288_000, ValueLengthLimit = int.MaxValue, MultipartHeadersLengthLimit = int.MaxValue)]
         public async Task<IActionResult> UploadExcelFile(

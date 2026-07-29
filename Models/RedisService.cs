@@ -272,7 +272,9 @@ namespace SignalTracker.Models
 
             try
             {
-                var keys = new HashSet<RedisKey>();
+                const int batchSize = 500;
+                var batch = new List<RedisKey>(batchSize);
+                long deleted = 0;
 
                 foreach (var endpoint in _multiplexer.GetEndPoints())
                 {
@@ -280,18 +282,19 @@ namespace SignalTracker.Models
 
                     await foreach (var key in server.KeysAsync(pattern: v))
                     {
-                        keys.Add(key);
+                        batch.Add(key);
+                        if (batch.Count >= batchSize)
+                        {
+                            if (_db != null)
+                                deleted += await WithTimeoutAsync(_db.KeyDeleteAsync(batch.ToArray()), 0L);
+                            batch.Clear();
+                        }
                     }
                 }
 
-                if (keys.Count == 0)
-                    return 0;
-
-                long deleted = 0;
-                foreach (var key in keys)
+                if (batch.Count > 0 && _db != null)
                 {
-                    if (_db != null && await WithTimeoutAsync(_db.KeyDeleteAsync(key, flags: CommandFlags.FireAndForget), true))
-                        deleted++;
+                    deleted += await WithTimeoutAsync(_db.KeyDeleteAsync(batch.ToArray()), 0L);
                 }
 
                 return deleted;

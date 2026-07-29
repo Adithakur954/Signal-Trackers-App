@@ -141,6 +141,7 @@ namespace SignalTracker.Controllers
         }
 
         [HttpPost("login")]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("Auth")]
         public async Task<IActionResult> Login([FromBody] LoginRequest model)
         {
             if (model == null || string.IsNullOrWhiteSpace(model.Email) || string.IsNullOrWhiteSpace(model.Password))

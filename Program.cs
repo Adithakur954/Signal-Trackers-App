@@ -1,15 +1,33 @@
 ﻿using Microsoft.AspNetCore.Http.Features;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.OpenApi.Models;
 using SignalTracker.Configuration;
 using SignalTracker.Middleware;
 using SignalTracker.Models;
 using SignalTracker.Security;
 using SignalTracker.Services;
+using SignalTracker.Services.ZipImport;
 using StackExchange.Redis;
+using System.Data;
+using System.Threading.RateLimiting;
 
 internal class Program
 {
+    private static string GetRateLimitPartitionKey(HttpContext context, bool preferUser = true)
+    {
+        if (preferUser)
+        {
+            var userId = context.User?.FindFirst("UserId")?.Value
+                ?? context.User?.FindFirst("user_id")?.Value;
+
+            if (!string.IsNullOrWhiteSpace(userId))
+                return $"user:{userId}";
+        }
+
+        return $"ip:{context.Connection.RemoteIpAddress?.ToString() ?? "unknown"}";
+    }
+
     private static void WarnIfConnectionStringMissing(IConfiguration configuration, string name)
     {
         var connectionString = MySqlConnectionStringHelper.EnsureZeroDateTimeHandling(
@@ -23,6 +41,90 @@ internal class Program
         Console.WriteLine(
             $"Missing database connection string '{name}'. " +
             $"Set 'ConnectionStrings:{name}' in configuration or environment variable 'ConnectionStrings__{name}'.");
+    }
+
+    private static void EnsureProjectGridSizeColumnExists(WebApplication app)
+    {
+        try
+        {
+            using var scope = app.Services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var conn = db.Database.GetDbConnection();
+            var shouldClose = conn.State != ConnectionState.Open;
+            if (shouldClose)
+                conn.Open();
+
+            try
+            {
+                using var exists = conn.CreateCommand();
+                exists.CommandText = @"
+                    SELECT COUNT(*)
+                    FROM information_schema.columns
+                    WHERE table_schema = DATABASE()
+                      AND table_name = 'tbl_project'
+                      AND column_name = 'grid_size';";
+
+                var count = Convert.ToInt32(exists.ExecuteScalar());
+                if (count > 0)
+                    return;
+
+                using var add = conn.CreateCommand();
+                add.CommandText = "ALTER TABLE tbl_project ADD COLUMN grid_size VARCHAR(50) NULL;";
+                add.ExecuteNonQuery();
+                Console.WriteLine("Added missing column tbl_project.grid_size.");
+            }
+            finally
+            {
+                if (shouldClose)
+                    conn.Close();
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Could not ensure column tbl_project.grid_size: {ex.Message}");
+        }
+    }
+
+    private static void EnsureSitePredictionColorColumnExists(WebApplication app)
+    {
+        try
+        {
+            using var scope = app.Services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var conn = db.Database.GetDbConnection();
+            var shouldClose = conn.State != ConnectionState.Open;
+            if (shouldClose)
+                conn.Open();
+
+            try
+            {
+                using var exists = conn.CreateCommand();
+                exists.CommandText = @"
+                    SELECT COUNT(*)
+                    FROM information_schema.columns
+                    WHERE table_schema = DATABASE()
+                      AND table_name = 'site_prediction'
+                      AND column_name = 'site_color';";
+
+                var count = Convert.ToInt32(exists.ExecuteScalar());
+                if (count > 0)
+                    return;
+
+                using var add = conn.CreateCommand();
+                add.CommandText = "ALTER TABLE site_prediction ADD COLUMN site_color VARCHAR(50) NULL;";
+                add.ExecuteNonQuery();
+                Console.WriteLine("Added missing column site_prediction.site_color.");
+            }
+            finally
+            {
+                if (shouldClose)
+                    conn.Close();
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Could not ensure column site_prediction.site_color: {ex.Message}");
+        }
     }
 
     private static void Main(string[] args)
@@ -46,6 +148,7 @@ internal class Program
         builder.Services.AddScoped<LicenseFeatureService>();
         builder.Services.AddScoped<PythonBridgeService>();
         builder.Services.AddScoped<SitePredictionService>();
+        builder.Services.AddScoped<ZipImportService>();
         builder.Services.AddScoped<IOtpService, OtpService>();
         builder.Services.AddScoped<IUserDeletionService, UserDeletionService>();
         builder.Services.AddHttpClient<ISmsService, SmsService>();
@@ -77,6 +180,73 @@ internal class Program
                 Version = "v1",
                 Description = "OpenAPI documentation for Signal Tracker API endpoints."
             });
+        });
+        builder.Services.AddRateLimiter(o =>
+        {
+            o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+            o.AddPolicy("Auth", context => RateLimitPartition.GetFixedWindowLimiter(
+                GetRateLimitPartitionKey(context, preferUser: false),
+                _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = 20,
+                    Window = TimeSpan.FromMinutes(1),
+                    QueueLimit = 0
+                }));
+
+            o.AddPolicy("PasswordRecovery", context => RateLimitPartition.GetFixedWindowLimiter(
+                GetRateLimitPartitionKey(context, preferUser: false),
+                _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = 15,
+                    Window = TimeSpan.FromMinutes(3),
+                    QueueLimit = 0
+                }));
+
+            o.AddPolicy("Otp", context => RateLimitPartition.GetFixedWindowLimiter(
+                GetRateLimitPartitionKey(context, preferUser: false),
+                _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = 5,
+                    Window = TimeSpan.FromMinutes(1),
+                    QueueLimit = 0
+                }));
+
+            o.AddPolicy("Upload", context => RateLimitPartition.GetFixedWindowLimiter(
+                GetRateLimitPartitionKey(context),
+                _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = 15,
+                    Window = TimeSpan.FromMinutes(30),
+                    QueueLimit = 0
+                }));
+
+            o.AddPolicy("Report", context => RateLimitPartition.GetFixedWindowLimiter(
+                GetRateLimitPartitionKey(context),
+                _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = 12,
+                    Window = TimeSpan.FromMinutes(5),
+                    QueueLimit = 0
+                }));
+
+            o.AddPolicy("MobileIngestion", context => RateLimitPartition.GetFixedWindowLimiter(
+                GetRateLimitPartitionKey(context, preferUser: false),
+                _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = 1200,
+                    Window = TimeSpan.FromMinutes(1),
+                    QueueLimit = 0
+                }));
+
+            o.AddPolicy("PublicApi", context => RateLimitPartition.GetFixedWindowLimiter(
+                GetRateLimitPartitionKey(context, preferUser: false),
+                _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = 120,
+                    Window = TimeSpan.FromMinutes(1),
+                    QueueLimit = 0
+                }));
         });
 
         // ----------------------------------------------------
@@ -194,6 +364,8 @@ internal class Program
         // BUILD APP
         // ----------------------------------------------------
         var app = builder.Build();
+        EnsureProjectGridSizeColumnExists(app);
+        EnsureSitePredictionColorColumnExists(app);
 
         // ----------------------------------------------------
         // MIDDLEWARE PIPELINE
@@ -237,6 +409,7 @@ internal class Program
         });
 
         app.UseRouting();
+        app.UseRateLimiter();
         app.UseCors(SecurityServiceExtensions.CorsPolicyName);
         app.UseWebSockets();
         app.UseCookiePolicy();

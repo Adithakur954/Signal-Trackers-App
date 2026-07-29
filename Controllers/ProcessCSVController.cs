@@ -19,6 +19,7 @@ using System.Globalization;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
@@ -254,6 +255,18 @@ namespace SignalTracker.Controllers
 
             [Name("tbl_sub_session_cs_id")]
             public string? TblSubSessionCsId { get; set; }
+
+            [Name("Sub Session Id", "sub_session_id")]
+            public string? SubSessionId { get; set; }
+
+            [Name("Sub Session Details", "sub_session_details")]
+            public string? SubSessionDetails { get; set; }
+
+            [Name("CS")]
+            public string? CS { get; set; }
+
+            [Name("PS")]
+            public string? PS { get; set; }
         }
 
         private sealed class PredictionDtatModel
@@ -555,6 +568,7 @@ namespace SignalTracker.Controllers
         // =====================================================================
         /// <summary>Upload a Site Prediction CSV (or ZIP of CSVs) and process it (fileType=15).</summary>
         [HttpPost("upload/site-prediction")]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("Upload")]
 [Consumes("multipart/form-data")]
 public IActionResult UploadSitePrediction(
     IFormFile file,
@@ -792,6 +806,9 @@ public IActionResult UploadSitePrediction(
                         uploadedSuccessSheetList.Clear();
                         rowInserted = 0;
                         rowUpdated = 0;
+
+                        if (fileType == 1)
+                            EnsureNetworkLogExtraJsonColumns();
 
                         // outer transaction only for fileType=1 to keep session + logs atomic
                         using var outerTx = fileType == 1 ? db.Database.BeginTransaction() : null;
@@ -1271,6 +1288,14 @@ public IActionResult UploadSitePrediction(
             bool hasAnyRecord = false;
             var networkLogsToInsert = new List<tbl_network_log>();
             var neighbourLogsToInsert = new List<tbl_network_log_neighbour>();
+            var subSessionsByKey = new Dictionary<string, tbl_sub_session>(StringComparer.Ordinal);
+            var existingSubSessionIds = LoadExistingSubSessionIds(sessionId);
+            var nextGeneratedSubSessionId = GetNextSubSessionId(sessionId);
+            var subSessionUserId = db.tbl_session
+                .AsNoTracking()
+                .Where(x => x.id == sessionId)
+                .Select(x => x.user_id)
+                .FirstOrDefault();
 
             foreach (var row in csv.GetRecords<NetworkLogModel>())
             {
@@ -1328,12 +1353,15 @@ public IActionResult UploadSitePrediction(
 	                // Avoid per-row DB lookup to keep large uploads fast.
 	                var entity = new tbl_network_log();
 
-	                entity.session_id = sessionId;
-	                entity.company_id = companyId;
-	                entity.timestamp  = timestamp;
-	                entity.lat        = ParseFloat(row.Latitude);
+                entity.session_id = sessionId;
+                entity.company_id = companyId;
+                entity.timestamp  = timestamp;
+                entity.lat        = ParseFloat(row.Latitude);
                 entity.lon        = ParseFloat(row.Longitude);
+                entity.altitude   = ParseFloat(row.Altitude);
+                entity.indoor_outdoor = row.IndoorOutdoor;
                 entity.battery    = ParseInt(row.Battery);
+                entity.extra_json = BuildNetworkLogExtraJson(row);
 
                 entity.dls        = row.dls;
                 entity.uls        = row.uls;
@@ -1453,11 +1481,43 @@ public IActionResult UploadSitePrediction(
 
                 entity.bler = row.BLER;
 
-                entity.primary_cell_info_1 = row.primary_cell_info_1;
+                entity.primary_cell_info_1 = FirstNonBlank(
+                    row.primary_cell_info_1,
+                    ReadSubSessionJsonValue(row.UnsentData ?? "", "primary_cell_info_1", "CellInfo_1", "cellinfo_1"));
                 entity.primary_cell_info_2 = row.primary_cell_info_2;
                 entity.primary_cell_info_3 = row.primary_cell_info_3;
                 if (!string.IsNullOrWhiteSpace(row.ThroughputDetails))
                     entity.all_neigbor_cell_info = row.ThroughputDetails;
+
+                var csSubSessionId = AddOrUpdateSubSessionCandidate(
+                    subSessionsByKey,
+                    existingSubSessionIds,
+                    row.CS,
+                    type: 2,
+                    sessionId,
+                    subSessionUserId,
+                    ref nextGeneratedSubSessionId,
+                    row.SubSessionId,
+                    timestamp,
+                    entity.lat,
+                    entity.lon);
+                if (csSubSessionId.HasValue)
+                    entity.tbl_sub_session_cs_id = csSubSessionId.Value;
+
+                var psSubSessionId = AddOrUpdateSubSessionCandidate(
+                    subSessionsByKey,
+                    existingSubSessionIds,
+                    row.PS,
+                    type: 1,
+                    sessionId,
+                    subSessionUserId,
+                    ref nextGeneratedSubSessionId,
+                    row.SubSessionId,
+                    timestamp,
+                    entity.lat,
+                    entity.lon);
+                if (psSubSessionId.HasValue)
+                    entity.tbl_sub_session_ps_id = psSubSessionId.Value;
 
                 if (IsPrimaryNo(row.Primary))
                     neighbourLogsToInsert.Add(ToNeighbourLog(entity));
@@ -1474,7 +1534,7 @@ public IActionResult UploadSitePrediction(
 
 	            if (isColValValid)
 	            {
-                    if (networkLogsToInsert.Count > 0 || neighbourLogsToInsert.Count > 0)
+                    if (networkLogsToInsert.Count > 0 || neighbourLogsToInsert.Count > 0 || subSessionsByKey.Count > 0)
                     {
                         var previousAutoDetectChanges = db.ChangeTracker.AutoDetectChangesEnabled;
                         try
@@ -1484,6 +1544,8 @@ public IActionResult UploadSitePrediction(
                                 db.tbl_network_log.AddRange(networkLogsToInsert);
                             if (neighbourLogsToInsert.Count > 0)
                                 db.tbl_network_log_neighbour.AddRange(neighbourLogsToInsert);
+                            if (subSessionsByKey.Count > 0)
+                                db.tbl_sub_session.AddRange(subSessionsByKey.Values);
                             db.SaveChanges();
                         }
                         finally
@@ -1550,6 +1612,293 @@ public IActionResult UploadSitePrediction(
                    normalized.Equals("0", StringComparison.OrdinalIgnoreCase);
         }
 
+        private Dictionary<string, long> LoadExistingSubSessionIds(int sessionId)
+        {
+            return db.tbl_sub_session
+                .AsNoTracking()
+                .Where(x => x.session_id == sessionId && x.type != null && x.json_data != null)
+                .Select(x => new { x.session_id, x.type, x.sub_session_id, x.json_data })
+                .AsEnumerable()
+                .Select(x => new
+                {
+                    Key = BuildSubSessionImportKey(
+                        x.session_id.GetValueOrDefault(),
+                        x.type.GetValueOrDefault(),
+                        NormalizeSubSessionPayloadJson(x.json_data) ?? string.Empty),
+                    Id = (long?)x.sub_session_id
+                })
+                .Where(x => !string.IsNullOrWhiteSpace(x.Key) && x.Id.HasValue && x.Id.Value > 0)
+                .GroupBy(x => x.Key, StringComparer.Ordinal)
+                .ToDictionary(x => x.Key, x => x.First().Id!.Value, StringComparer.Ordinal);
+        }
+
+        private int GetNextSubSessionId(int sessionId)
+        {
+            var max = db.tbl_sub_session
+                .AsNoTracking()
+                .Where(x => x.session_id == sessionId)
+                .Select(x => x.sub_session_id)
+                .AsEnumerable()
+                .Where(x => x.HasValue)
+                .Select(x => x!.Value)
+                .DefaultIfEmpty(0)
+                .Max();
+
+            return Math.Max(1, max + 1);
+        }
+
+        private static long? AddOrUpdateSubSessionCandidate(
+            Dictionary<string, tbl_sub_session> pending,
+            Dictionary<string, long> existingIds,
+            string? rawPayload,
+            byte type,
+            int sessionId,
+            int userId,
+            ref int nextGeneratedSubSessionId,
+            string? rawSubSessionId,
+            DateTime timestamp,
+            float? lat,
+            float? lon)
+        {
+            var normalizedJson = NormalizeSubSessionPayloadJson(rawPayload);
+            if (string.IsNullOrWhiteSpace(normalizedJson))
+                return null;
+
+            var key = BuildSubSessionImportKey(sessionId, type, normalizedJson);
+            if (existingIds.TryGetValue(key, out var existingId))
+                return existingId;
+
+            if (!pending.TryGetValue(key, out var entity))
+            {
+                var subSessionId = ParsePositiveInt(rawSubSessionId) ?? nextGeneratedSubSessionId++;
+                entity = new tbl_sub_session
+                {
+                    user_id = userId > 0 ? userId : null,
+                    session_id = sessionId,
+                    sub_session_id = subSessionId,
+                    type = type,
+                    start_time = timestamp,
+                    end_time = ResolveSubSessionEndTime(timestamp, normalizedJson),
+                    json_data = normalizedJson,
+                    status = ResolveSubSessionStatus(normalizedJson),
+                    start_lat = lat,
+                    start_lon = lon,
+                    end_lat = lat,
+                    end_lon = lon
+                };
+                pending[key] = entity;
+            }
+
+            if (!entity.start_time.HasValue || timestamp < entity.start_time.Value)
+            {
+                entity.start_time = timestamp;
+                entity.start_lat = lat;
+                entity.start_lon = lon;
+            }
+
+            var payloadEndTime = entity.start_time.HasValue
+                ? ResolveSubSessionEndTime(entity.start_time.Value, normalizedJson)
+                : null;
+            if (payloadEndTime.HasValue && (!entity.end_time.HasValue || payloadEndTime.Value > entity.end_time.Value))
+                entity.end_time = payloadEndTime.Value;
+            if (!entity.end_time.HasValue || timestamp > entity.end_time.Value)
+                entity.end_time = timestamp;
+            entity.end_lat = lat;
+            entity.end_lon = lon;
+
+            return entity.sub_session_id;
+        }
+
+        private static string BuildSubSessionImportKey(int sessionId, byte type, string normalizedJson)
+        {
+            if (string.IsNullOrWhiteSpace(normalizedJson)) return "";
+            var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(normalizedJson.Trim()));
+            return $"{sessionId}|{type}|{Convert.ToHexString(bytes)}";
+        }
+
+        private static string? NormalizeSubSessionPayloadJson(string? raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return null;
+
+            var text = raw.Trim().Trim('"');
+            text = text.Replace("\"\"", "\"", StringComparison.Ordinal);
+            if (!text.StartsWith("{", StringComparison.Ordinal) && text.Contains(':', StringComparison.Ordinal))
+                text = "{" + text + "}";
+
+            var candidate = text
+                .Replace(';', ',')
+                .Replace('\'', '"');
+
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(candidate);
+                if (doc.RootElement.ValueKind == System.Text.Json.JsonValueKind.Object)
+                {
+                    var dict = new SortedDictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var prop in doc.RootElement.EnumerateObject())
+                    {
+                        dict[prop.Name] = prop.Value.ValueKind == System.Text.Json.JsonValueKind.String
+                            ? prop.Value.GetString()
+                            : prop.Value.ToString();
+                    }
+                    return System.Text.Json.JsonSerializer.Serialize(dict);
+                }
+            }
+            catch
+            {
+            }
+
+            return System.Text.Json.JsonSerializer.Serialize(new SortedDictionary<string, object?>
+            {
+                ["raw"] = raw.Trim()
+            });
+        }
+
+        private static byte? ResolveSubSessionStatus(string normalizedJson)
+        {
+            var status = ReadSubSessionJsonValue(normalizedJson, "result_status", "connection_status", "call_status", "status");
+            if (string.IsNullOrWhiteSpace(status)) return null;
+
+            var normalized = status.Trim().ToLowerInvariant();
+            if (normalized is "connected" or "retained") return 1;
+            if (normalized is "failed" or "not connected" or "notconnected" or "not_connected") return 2;
+            return null;
+        }
+
+        private static DateTime? ResolveSubSessionEndTime(DateTime startTime, string normalizedJson)
+        {
+            var durationText = ReadSubSessionJsonValue(normalizedJson, "duration_ms", "duration");
+            return double.TryParse(durationText, NumberStyles.Any, CultureInfo.InvariantCulture, out var durationMs) && durationMs > 0
+                ? startTime.AddMilliseconds(durationMs)
+                : startTime;
+        }
+
+        private static string? ReadSubSessionJsonValue(string normalizedJson, params string[] names)
+        {
+            if (string.IsNullOrWhiteSpace(normalizedJson)) return null;
+
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(normalizedJson);
+                if (doc.RootElement.ValueKind != System.Text.Json.JsonValueKind.Object) return null;
+
+                foreach (var name in names)
+                {
+                    foreach (var prop in doc.RootElement.EnumerateObject())
+                    {
+                        if (prop.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+                            return prop.Value.ValueKind == System.Text.Json.JsonValueKind.String
+                                ? prop.Value.GetString()
+                                : prop.Value.ToString();
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            return null;
+        }
+
+        private static string? FirstNonBlank(params string?[] values)
+        {
+            foreach (var value in values)
+            {
+                if (!string.IsNullOrWhiteSpace(value))
+                    return value.Trim();
+            }
+            return null;
+        }
+
+        private static string? BuildNetworkLogExtraJson(NetworkLogModel row)
+        {
+            var data = new SortedDictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+            AddExtraValue(data, "altitude", row.Altitude);
+            AddExtraValue(data, "phone_heading", row.PhoneHeading);
+            AddExtraValue(data, "image_name", row.ImageName);
+            AddExtraValue(data, "unsent_data", row.UnsentData);
+            AddExtraValue(data, "sub_session_id", row.SubSessionId);
+            AddExtraValue(data, "sub_session_details", row.SubSessionDetails);
+            AddExtraValue(data, "cs", row.CS);
+            AddExtraValue(data, "ps", row.PS);
+
+            return data.Count == 0 ? null : System.Text.Json.JsonSerializer.Serialize(data);
+        }
+
+        private static void AddExtraValue(IDictionary<string, object?> data, string key, string? value)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+                data[key] = value.Trim();
+        }
+
+        private void EnsureNetworkLogExtraJsonColumns()
+        {
+            EnsureTextColumn("tbl_network_log", "extra_json");
+            EnsureTextColumn("tbl_network_log_neighbour", "extra_json");
+            EnsureColumn("tbl_network_log", "altitude", "DOUBLE NULL");
+            EnsureColumn("tbl_network_log_neighbour", "altitude", "DOUBLE NULL");
+            EnsureColumn("tbl_network_log", "tbl_sub_session_ps_id", "BIGINT NULL");
+            EnsureColumn("tbl_network_log", "tbl_sub_session_cs_id", "BIGINT NULL");
+            EnsureColumn("tbl_network_log_neighbour", "tbl_sub_session_ps_id", "BIGINT NULL");
+            EnsureColumn("tbl_network_log_neighbour", "tbl_sub_session_cs_id", "BIGINT NULL");
+        }
+
+        private void EnsureTextColumn(string tableName, string columnName)
+        {
+            EnsureColumn(tableName, columnName, "LONGTEXT NULL");
+        }
+
+        private void EnsureColumn(string tableName, string columnName, string columnDefinition)
+        {
+            var conn = db.Database.GetDbConnection();
+            var shouldClose = conn.State != ConnectionState.Open;
+            if (shouldClose)
+                conn.Open();
+
+            try
+            {
+                using var exists = conn.CreateCommand();
+                exists.CommandText = @"
+                    SELECT COUNT(*)
+                    FROM information_schema.columns
+                    WHERE table_schema = DATABASE()
+                      AND table_name = @tableName
+                      AND column_name = @columnName;";
+                var tableParam = exists.CreateParameter();
+                tableParam.ParameterName = "@tableName";
+                tableParam.Value = tableName;
+                exists.Parameters.Add(tableParam);
+                var columnParam = exists.CreateParameter();
+                columnParam.ParameterName = "@columnName";
+                columnParam.Value = columnName;
+                exists.Parameters.Add(columnParam);
+
+                var count = Convert.ToInt32(exists.ExecuteScalar(), CultureInfo.InvariantCulture);
+                if (count > 0) return;
+
+                using var alter = conn.CreateCommand();
+                alter.CommandText = $"ALTER TABLE `{tableName.Replace("`", "``")}` ADD COLUMN `{columnName.Replace("`", "``")}` {columnDefinition};";
+                alter.ExecuteNonQuery();
+            }
+            finally
+            {
+                if (shouldClose)
+                    conn.Close();
+            }
+        }
+
+        private static int? ParseNullableInt(string? value)
+        {
+            return ParsePositiveInt(value);
+        }
+
+        private static int? ParsePositiveInt(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return null;
+            if (int.TryParse(value.Trim(), NumberStyles.Any, CultureInfo.InvariantCulture, out var parsed) && parsed > 0) return parsed;
+            return null;
+        }
+
         private static tbl_network_log_neighbour ToNeighbourLog(tbl_network_log source)
         {
             return new tbl_network_log_neighbour
@@ -1563,6 +1912,7 @@ public IActionResult UploadSitePrediction(
                 timestamp = source.timestamp,
                 lat = source.lat,
                 lon = source.lon,
+                altitude = source.altitude,
                 battery = source.battery,
                 dls = source.dls,
                 uls = source.uls,
@@ -1600,6 +1950,9 @@ public IActionResult UploadSitePrediction(
                 all_neigbor_cell_info = source.all_neigbor_cell_info,
                 image_path = source.image_path,
                 polygon_id = source.polygon_id,
+                tbl_sub_session_ps_id = source.tbl_sub_session_ps_id,
+                tbl_sub_session_cs_id = source.tbl_sub_session_cs_id,
+                extra_json = source.extra_json,
                 Speed = source.Speed
             };
         }

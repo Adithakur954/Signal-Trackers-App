@@ -39,6 +39,7 @@ namespace SignalTracker.Controllers
         }
 
         [HttpPost("Generate")]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("Report")]
         public async Task<IActionResult> Generate([FromBody] UnifiedMapPdfRequest request)
         {
             if (request == null)
@@ -76,7 +77,11 @@ namespace SignalTracker.Controllers
             var mapImages = mapImagesTask.Result;
 
             if (rows.Count == 0)
-                return BadRequest(new { Message = "No drive logs found for the selected sessions." });
+                return NotFound(new
+                {
+                    Message = $"For this project we don't have data.",
+                    ProjectId = request.ProjectId
+                });
 
             var report = UnifiedMapReportFactory.Create(
                 request,
@@ -485,13 +490,39 @@ namespace SignalTracker.Controllers
         private static int? ReadInt(DbDataReader reader, string name)
         {
             var ordinal = reader.GetOrdinal(name);
-            return reader.IsDBNull(ordinal) ? null : Convert.ToInt32(reader.GetValue(ordinal), CultureInfo.InvariantCulture);
+            if (reader.IsDBNull(ordinal)) return null;
+
+            var value = reader.GetValue(ordinal);
+            if (value is int i) return i;
+            if (value is long l) return l > int.MaxValue || l < int.MinValue ? null : (int)l;
+            if (value is decimal dec) return dec > int.MaxValue || dec < int.MinValue ? null : (int)dec;
+            if (value is double dbl) return dbl > int.MaxValue || dbl < int.MinValue ? null : (int)dbl;
+            if (value is float f) return f > int.MaxValue || f < int.MinValue ? null : (int)f;
+
+            var text = Convert.ToString(value, CultureInfo.InvariantCulture)?.Trim();
+            if (string.IsNullOrWhiteSpace(text)) return null;
+            if (int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)) return parsed;
+            return double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsedDouble) &&
+                   parsedDouble <= int.MaxValue &&
+                   parsedDouble >= int.MinValue
+                ? (int)parsedDouble
+                : null;
         }
 
         private static float? ReadFloat(DbDataReader reader, string name)
         {
             var ordinal = reader.GetOrdinal(name);
-            return reader.IsDBNull(ordinal) ? null : Convert.ToSingle(reader.GetValue(ordinal), CultureInfo.InvariantCulture);
+            if (reader.IsDBNull(ordinal)) return null;
+
+            var value = reader.GetValue(ordinal);
+            if (value is float f) return f;
+            if (value is double d) return (float)d;
+            if (value is decimal dec) return (float)dec;
+
+            var text = Convert.ToString(value, CultureInfo.InvariantCulture)?.Trim();
+            return float.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)
+                ? parsed
+                : null;
         }
 
         private static float? ClampKpi(float? value, float min, float max)
@@ -1847,7 +1878,9 @@ namespace SignalTracker.Controllers
         private const int GpsOpenStreetSourceMaxTileZoom = 19;
         private const int GpsSatelliteSourceMaxTileZoom = 18;
         private const double GpsPreviewTileFitRatio = 1.00;
+        private const int MaxMapTileCacheEntries = 512;
         private static readonly ConcurrentDictionary<string, byte[]> MapTileCache = new();
+        private static readonly ConcurrentQueue<string> MapTileCacheOrder = new();
         private static readonly HttpClient MapHttpClient = CreateMapHttpClient();
 
         private static HttpClient CreateMapHttpClient()
@@ -2119,13 +2152,23 @@ namespace SignalTracker.Controllers
                 if (bytes.Length == 0) return null;
                 if (satellite && IsUnavailableSatelliteTile(bytes)) return null;
 
-                MapTileCache.TryAdd(key, bytes);
+                AddMapTileToCache(key, bytes);
                 return bytes;
             }
             catch
             {
                 return null;
             }
+        }
+
+        private static void AddMapTileToCache(string key, byte[] bytes)
+        {
+            if (!MapTileCache.TryAdd(key, bytes))
+                return;
+
+            MapTileCacheOrder.Enqueue(key);
+            while (MapTileCache.Count > MaxMapTileCacheEntries && MapTileCacheOrder.TryDequeue(out var oldKey))
+                MapTileCache.TryRemove(oldKey, out _);
         }
 
         private static bool IsUnavailableSatelliteTile(byte[] bytes)

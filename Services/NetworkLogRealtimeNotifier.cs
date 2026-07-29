@@ -8,6 +8,8 @@ namespace SignalTracker.Services;
 
 public sealed class NetworkLogRealtimeNotifier
 {
+    private const int MaxInboundMessageBytes = 16 * 1024;
+
     private sealed class Subscription
     {
         public required WebSocket Socket { get; init; }
@@ -73,8 +75,17 @@ public sealed class NetworkLogRealtimeNotifier
             _subscriptions.TryRemove(id, out _);
             if (socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
             {
-                await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closed", CancellationToken.None);
+                try
+                {
+                    await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closed", CancellationToken.None);
+                }
+                catch
+                {
+                    // The transport may already be gone; removal from _subscriptions is the important cleanup.
+                }
             }
+
+            socket.Dispose();
         }
     }
 
@@ -142,6 +153,8 @@ public sealed class NetworkLogRealtimeNotifier
                 return null;
 
             stream.Write(buffer, 0, result.Count);
+            if (stream.Length > MaxInboundMessageBytes)
+                return null;
         }
         while (!result.EndOfMessage);
 

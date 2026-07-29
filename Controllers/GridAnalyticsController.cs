@@ -48,8 +48,7 @@ namespace SignalTracker.Controllers
             var configuredKey =
                 _configuration["PythonBridge:ApiKey"]
                 ?? Environment.GetEnvironmentVariable("PYTHON_BRIDGE_API_KEY")
-                ?? Environment.GetEnvironmentVariable("SIGNAL_TRACKERS_BRIDGE_KEY")
-                ?? "s-tracer-local-bridge";
+                ?? Environment.GetEnvironmentVariable("SIGNAL_TRACKERS_BRIDGE_KEY");
 
             if (string.IsNullOrWhiteSpace(configuredKey))
             {
@@ -277,24 +276,20 @@ namespace SignalTracker.Controllers
                             return Unauthorized(new { Status = 0, Message = "Project does not belong to your company." });
                     }
 
-                    if (gridSize.HasValue && gridSize.Value > 0)
-                    {
-                        await using var cmdUpdateGrid = conn.CreateCommand();
-                        cmdUpdateGrid.CommandText = "UPDATE tbl_project SET grid_size = @gridSize WHERE id = @pid";
-                        AddParam(
-                            cmdUpdateGrid,
-                            "@gridSize",
-                            gridSize.Value.ToString(CultureInfo.InvariantCulture)
-                        );
-                        AddParam(cmdUpdateGrid, "@pid", projectId);
-                        await cmdUpdateGrid.ExecuteNonQueryAsync();
-                    }
-
                     // â”€â”€ 5. FETCH PREDICTION DATA (raw ADO.NET) â”€â”€
                     // Use optimized + baseline-only logic similar to GetSitePredictionOptimised.
                     // Baseline rows are included only when there is no matching optimized row
                     // across stable identifiers (nodeb_id_cell_id, node_b_id+cell_id, site_id+cell_id)
                     // with lat/lon + cell_id fallback matching.
+                    if (gridSize.HasValue && gridSize.Value > 0)
+                    {
+                        await using var cmdUpdateGrid = conn.CreateCommand();
+                        cmdUpdateGrid.CommandText = "UPDATE tbl_project SET grid_size = @gridSize WHERE id = @pid";
+                        AddParam(cmdUpdateGrid, "@gridSize", gridSize.Value.ToString(CultureInfo.InvariantCulture));
+                        AddParam(cmdUpdateGrid, "@pid", projectId);
+                        await cmdUpdateGrid.ExecuteNonQueryAsync();
+                    }
+
                     var resolvedScenarioId = await ResolveScenarioIdAsync(conn, projectId, scenario_id);
                     var baselinePts = await FetchPredictionData(conn, "lte_prediction_baseline_results", projectId);
                     var optimizedRawPts = await FetchPredictionData(

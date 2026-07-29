@@ -17,6 +17,7 @@ namespace SignalTracker.Controllers
         }
 
         [HttpPost("send-otp")]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("Otp")]
         public async Task<IActionResult> SendOtp([FromBody] SendDataDeletionOtpRequest model, CancellationToken ct)
         {
             var result = await _otpService.SendDeletionOtpAsync(model.phone_number, HttpContext, ct);
@@ -32,6 +33,7 @@ namespace SignalTracker.Controllers
         }
 
         [HttpPost("verify-otp")]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("Otp")]
         public async Task<IActionResult> VerifyOtp([FromBody] VerifyDataDeletionOtpRequest model, CancellationToken ct)
         {
             var result = await _otpService.VerifyDeletionOtpAsync(model.phone_number, model.otp, HttpContext, ct);
