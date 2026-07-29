@@ -1222,8 +1222,18 @@ public class ProjectPolygonItem
         {
             await using var inspect = conn.CreateCommand();
             inspect.CommandText = @"
-                SELECT DATA_TYPE, COALESCE(CHARACTER_MAXIMUM_LENGTH, 0)
-                FROM INFORMATION_SCHEMA.COLUMNS
+                SELECT
+                    c.DATA_TYPE,
+                    COALESCE(c.CHARACTER_MAXIMUM_LENGTH, 0),
+                    COALESCE(c.CHARACTER_SET_NAME, ''),
+                    EXISTS (
+                        SELECT 1
+                        FROM INFORMATION_SCHEMA.STATISTICS s
+                        WHERE s.TABLE_SCHEMA = c.TABLE_SCHEMA
+                          AND s.TABLE_NAME = c.TABLE_NAME
+                          AND s.COLUMN_NAME = c.COLUMN_NAME
+                    ) AS has_index
+                FROM INFORMATION_SCHEMA.COLUMNS c
                 WHERE TABLE_SCHEMA = DATABASE()
                   AND TABLE_NAME = 'map_regions'
                   AND COLUMN_NAME = 'session_id'
@@ -1231,22 +1241,49 @@ public class ProjectPolygonItem
 
             string dataType = "";
             long maxLength = 0;
+            string characterSet = "";
+            bool hasIndex = false;
             await using (var reader = await inspect.ExecuteReaderAsync())
             {
                 if (await reader.ReadAsync())
                 {
                     dataType = Convert.ToString(reader.GetValue(0))?.ToLowerInvariant() ?? "";
                     maxLength = Convert.ToInt64(reader.GetValue(1));
+                    characterSet = Convert.ToString(reader.GetValue(2))?.ToLowerInvariant() ?? "";
+                    hasIndex = Convert.ToInt32(reader.GetValue(3)) == 1;
                 }
             }
 
-            if (dataType is "text" or "mediumtext" or "longtext" || maxLength >= 1024)
+            if (dataType is "text" or "mediumtext" or "longtext")
+            {
+                return;
+            }
+
+            var bytesPerCharacter = characterSet switch
+            {
+                "utf8mb4" => 4,
+                "utf8" => 3,
+                "utf8mb3" => 3,
+                "ucs2" => 2,
+                "utf16" => 4,
+                "utf16le" => 4,
+                "utf32" => 4,
+                _ => 1,
+            };
+
+            var targetLength = 1024L;
+            if (hasIndex)
+            {
+                targetLength = Math.Min(targetLength, 3072L / Math.Max(1, bytesPerCharacter));
+            }
+
+            if (targetLength <= 0 || maxLength >= targetLength)
             {
                 return;
             }
 
             await using var alter = conn.CreateCommand();
-            alter.CommandText = "ALTER TABLE map_regions MODIFY COLUMN session_id VARCHAR(1024) NULL;";
+            alter.CommandText = $"ALTER TABLE map_regions MODIFY COLUMN session_id VARCHAR({targetLength}) NULL;";
             await alter.ExecuteNonQueryAsync();
         }
 
