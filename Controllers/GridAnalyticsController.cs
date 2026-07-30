@@ -143,7 +143,6 @@ namespace SignalTracker.Controllers
 
             var sw = Stopwatch.StartNew();
 
-            // â”€â”€ 1. AUTH & COMPANY SCOPING â”€â”€
             int targetCompanyId = _userScope.GetTargetCompanyId(User, company_id);
             bool isSuperAdmin = _userScope.IsSuperAdmin(User);
             if (!isSuperAdmin && targetCompanyId == 0)
@@ -162,7 +161,6 @@ namespace SignalTracker.Controllers
 
                 try
                 {
-                    // â”€â”€ ENSURE TABLE EXISTS â”€â”€
                     await using (var cmdCreate = conn.CreateCommand())
                     {
                         cmdCreate.CommandText = @"
@@ -212,7 +210,6 @@ namespace SignalTracker.Controllers
                         await cmdCreate.ExecuteNonQueryAsync();
                     }
 
-                    // Ensure newly introduced min/diff_min columns exist for older deployments.
                     var requiredColumns = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
                     {
                         ["baseline_min_rsrp"] = "DOUBLE",
@@ -265,7 +262,6 @@ namespace SignalTracker.Controllers
                         await cmdAlter.ExecuteNonQueryAsync();
                     }
 
-                    // Ensure index for fetch path (project_id + region_id).
                     bool hasProjectRegionIndex = false;
                     await using (var cmdIdxCheck = conn.CreateCommand())
                     {
@@ -287,19 +283,9 @@ namespace SignalTracker.Controllers
                         await cmdCreateIdx.ExecuteNonQueryAsync();
                     }
 
-                    // â”€â”€ 3. FETCH grid_size FROM tbl_project â”€â”€
                     double gridSizeMeters = gridSize ?? 0;
                     if (gridSizeMeters <= 0)
-                    {
-                        await using var cmdProj = conn.CreateCommand();
-                        cmdProj.CommandText = "SELECT grid_size FROM tbl_project WHERE id = @pid";
-                        AddParam(cmdProj, "@pid", projectId);
-                        var gsRaw = await cmdProj.ExecuteScalarAsync();
-                        if (gsRaw != null && gsRaw != DBNull.Value)
-                            double.TryParse(gsRaw.ToString(), NumberStyles.Any, CultureInfo.InvariantCulture, out gridSizeMeters);
-                    }
-                    if (gridSizeMeters <= 0)
-                        return BadRequest(new { Status = 0, Message = "grid_size not available. Pass gridSize query param (meters)." });
+                        return BadRequest(new { Status = 0, Message = "Pass gridSize query param (meters)." });
 
                     // â”€â”€ 4. SECURITY: project belongs to company â”€â”€
                     if (targetCompanyId > 0)
@@ -318,16 +304,7 @@ namespace SignalTracker.Controllers
                     // Baseline rows are included only when there is no matching optimized row
                     // across stable identifiers (nodeb_id_cell_id, node_b_id+cell_id, site_id+cell_id)
                     // with lat/lon + cell_id fallback matching.
-                    if (gridSize.HasValue && gridSize.Value > 0)
-                    {
-                        await using var cmdUpdateGrid = conn.CreateCommand();
-                        cmdUpdateGrid.CommandText = "UPDATE tbl_project SET grid_size = @gridSize WHERE id = @pid";
-                        AddParam(cmdUpdateGrid, "@gridSize", gridSize.Value.ToString(CultureInfo.InvariantCulture));
-                        AddParam(cmdUpdateGrid, "@pid", projectId);
-                        await cmdUpdateGrid.ExecuteNonQueryAsync();
-                    }
-
-                    var resolvedScenarioId = await ResolveScenarioIdAsync(conn, projectId, scenario_id);
+var resolvedScenarioId = await ResolveScenarioIdAsync(conn, projectId, scenario_id);
                     var baselinePts = await FetchPredictionData(conn, "lte_prediction_baseline_results", projectId);
                     var optimizedRawPts = await FetchPredictionData(
                         conn,
@@ -585,62 +562,8 @@ namespace SignalTracker.Controllers
         }
 
         // =====================================================================
-        // POST api/GridAnalytics/SetProjectGridSize
-        // Saves manual grid size preference to tbl_project.grid_size
-        // =====================================================================
-        [HttpPost("SetProjectGridSize")]
-        public async Task<IActionResult> SetProjectGridSize(
-            [FromQuery] int projectId,
-            [FromQuery] double gridSize,
-            [FromQuery] int? company_id = null)
-        {
-            if (!await CanUseGridFeatureAsync())
-                return StatusCode(403, new { Status = 0, Message = "Feature disabled in license: grid_fetch", Code = "FEATURE_NOT_ENABLED" });
-
-            int targetCompanyId = _userScope.GetTargetCompanyId(User, company_id);
-            bool isSuperAdmin = _userScope.IsSuperAdmin(User);
-            if (!isSuperAdmin && targetCompanyId == 0)
-                return Unauthorized(new { Status = 0, Message = "Unauthorized. Unable to resolve company context." });
-
-            if (projectId <= 0)
-                return BadRequest(new { Status = 0, Message = "Invalid projectId." });
-
-            if (double.IsNaN(gridSize) || double.IsInfinity(gridSize) || gridSize <= 0)
-                return BadRequest(new { Status = 0, Message = "gridSize must be a positive number." });
-
-            try
-            {
-                var project = await _db.tbl_project.FirstOrDefaultAsync(p => p.id == projectId);
-                if (project == null)
-                    return NotFound(new { Status = 0, Message = "Project not found." });
-
-                if (!isSuperAdmin && targetCompanyId > 0 && project.company_id != targetCompanyId)
-                    return Unauthorized(new { Status = 0, Message = "Project does not belong to your company." });
-
-                project.grid_size = gridSize.ToString(CultureInfo.InvariantCulture);
-                await _db.SaveChangesAsync();
-
-                return Ok(new
-                {
-                    Status = 1,
-                    Message = "Project grid size updated.",
-                    Data = new
-                    {
-                        project_id = projectId,
-                        grid_size_meters = gridSize
-                    }
-                });
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, new { Status = 0, Message = "Error: " + SafeException.Get(ex) });
-            }
-        }
-
-        // =====================================================================
         // POST api/GridAnalytics/SetProjectLogGrid
         // Saves the log (drive-test) grid size preference to tbl_project.log_grid
-        // This is separate from grid_size (used for the site/prediction grid).
         // =====================================================================
         [HttpPost("SetProjectLogGrid")]
         public async Task<IActionResult> SetProjectLogGrid(
@@ -1000,8 +923,7 @@ namespace SignalTracker.Controllers
                         "maximum_transmission_power_of_resource",
                         "real_transmit_power_of_resource",
                         "reference_signal_power",
-                        "cellsize", "frequency", "band",
-                        "uplink_center_frequency", "downlink_frequency",
+                        "frequency", "band",
                         "earfcn", "cluster", "Technology"
                     };
 
@@ -1032,11 +954,11 @@ namespace SignalTracker.Controllers
                             sp.tx_power AS baseline_maximum_transmission_power_of_resource,
                             sp.real_transmit_power_of_resource AS baseline_real_transmit_power_of_resource,
                             sp.reference_signal_power AS baseline_reference_signal_power,
-                            sp.cellsize AS baseline_cellsize,
+                            NULL AS baseline_cellsize,
                             sp.frequency AS baseline_frequency,
                             sp.band AS baseline_band,
-                            sp.uplink_center_frequency AS baseline_uplink_center_frequency,
-                            sp.downlink_frequency AS baseline_downlink_frequency,
+                            NULL AS baseline_uplink_center_frequency,
+                            NULL AS baseline_downlink_frequency,
                             sp.earfcn AS baseline_earfcn,
                             sp.cluster AS baseline_cluster,
                             sp.Technology AS baseline_Technology,
@@ -2240,5 +2162,6 @@ WHERE spo.tbl_project_id = @pid;";
         }
     }
 }
+
 
 

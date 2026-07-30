@@ -592,10 +592,10 @@ public IActionResult UploadSitePrediction(
         string[] expectedHeaders = new string[]
         {
             // ---------- site prediction columns ----------
-            "site","site_name","sector","cell_id","sec_id","longitude","latitude","tac","pci","azimuth",
+            "site","site_name","sector","cell_id","longitude","latitude","tac","pci","azimuth",
             "height","bw","m_tilt","e_tilt","maximum_transmission_power_of_resource",
-            "real_transmit_power_of_resource","reference_signal_power","cellsize","frequency","band",
-            "uplink_center_frequency","downlink_frequency","earfcn",
+            "real_transmit_power_of_resource","reference_signal_power","frequency","band",
+            "earfcn",
 
             // ---------- old network log (IP) columns ----------
             "Timestamp","SourceIP","DestinationIP","SourcePort","DestinationPort",
@@ -700,13 +700,14 @@ public IActionResult UploadSitePrediction(
             var items = q.OrderBy(r => r.id)
                          .Skip(skip)
                          .Take(take)
+                         .AsEnumerable()
                          .Select(r => new
                          {
                              r.id,
                              site = r.site ?? r.site_name,   // null-safe site value
                              r.sector,
                              r.cell_id,
-                             r.sec_id,
+                             sec_id = (int?)null,
 
                              network   = ResolveOperator(r), // operator name
                              r.earfcn,
@@ -719,7 +720,7 @@ public IActionResult UploadSitePrediction(
                          })
                          .ToList();
 
-            return Ok(new { total, skip, take, count = items.Count, items });
+            return Ok(new { total, skip, take, count = items.Count(), items });
         }
 
         // =====================================================================
@@ -2327,10 +2328,10 @@ public bool ProcessSitePredictionSheet(
         string[] expectedHeaders = new string[]
         {
             // ---------- site prediction columns ----------
-            "site","site_name","sector","cell_id","sec_id","longitude","latitude","tac","pci","azimuth",
+            "site","site_name","sector","cell_id","longitude","latitude","tac","pci","azimuth",
             "height","bw","m_tilt","e_tilt","maximum_transmission_power_of_resource",
-            "real_transmit_power_of_resource","reference_signal_power","cellsize","frequency","band",
-            "uplink_center_frequency","downlink_frequency","earfcn",
+            "real_transmit_power_of_resource","reference_signal_power","frequency","band",
+            "earfcn",
              
 
             // ---------- old network log (IP) columns ----------
@@ -2398,8 +2399,6 @@ public bool ProcessSitePredictionSheet(
             foreach (var row in records)
             {
                 var parsedCellId = ParseCompositeCellId(row.cell_id);
-                var parsedSecId = TryInt(row.sec_id) ?? TryInt(row.sector) ?? parsedCellId;
-
                 var temp = new site_prediction
                 {
                     earfcn = TryInt(row.earfcn),
@@ -2417,7 +2416,6 @@ public bool ProcessSitePredictionSheet(
                     sector = row.sector,
 
                     cell_id = parsedCellId,
-                    sec_id = parsedSecId,
 
                     longitude = TryDouble(row.longitude),
                     latitude = TryDouble(row.latitude),
@@ -2438,12 +2436,9 @@ public bool ProcessSitePredictionSheet(
                     reference_signal_power =
                         TryDouble(row.reference_signal_power),
 
-                    cellsize  = row.cellsize,
                     frequency = row.frequency,
                     band      = TryInt(row.band),
 
-                    uplink_center_frequency = row.uplink_center_frequency,
-                    downlink_frequency      = row.downlink_frequency,
                     earfcn                  = TryInt(row.earfcn),
 
                     // existing network log fields you were already storing

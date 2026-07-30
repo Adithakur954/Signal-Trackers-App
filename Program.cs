@@ -43,7 +43,7 @@ internal class Program
             $"Set 'ConnectionStrings:{name}' in configuration or environment variable 'ConnectionStrings__{name}'.");
     }
 
-    private static void EnsureProjectGridSizeColumnExists(WebApplication app)
+    private static void DropProjectGridSizeColumn(WebApplication app)
     {
         try
         {
@@ -65,13 +65,13 @@ internal class Program
                       AND column_name = 'grid_size';";
 
                 var count = Convert.ToInt32(exists.ExecuteScalar());
-                if (count > 0)
+                if (count <= 0)
                     return;
 
-                using var add = conn.CreateCommand();
-                add.CommandText = "ALTER TABLE tbl_project ADD COLUMN grid_size VARCHAR(50) NULL;";
-                add.ExecuteNonQuery();
-                Console.WriteLine("Added missing column tbl_project.grid_size.");
+                using var drop = conn.CreateCommand();
+                drop.CommandText = "ALTER TABLE tbl_project DROP COLUMN grid_size;";
+                drop.ExecuteNonQuery();
+                Console.WriteLine("Dropped removed column tbl_project.grid_size.");
             }
             finally
             {
@@ -81,7 +81,7 @@ internal class Program
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Could not ensure column tbl_project.grid_size: {ex.Message}");
+            Console.WriteLine($"Could not drop column tbl_project.grid_size: {ex.Message}");
         }
     }
 
@@ -124,6 +124,64 @@ internal class Program
         catch (Exception ex)
         {
             Console.WriteLine($"Could not ensure column site_prediction.site_color: {ex.Message}");
+        }
+    }
+
+    private static void DropRemovedSitePredictionColumns(WebApplication app)
+    {
+        var removedColumns = new[]
+        {
+            "sec_id",
+            "cellsize",
+            "uplink_center_frequency",
+            "downlink_frequency"
+        };
+
+        try
+        {
+            using var scope = app.Services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var conn = db.Database.GetDbConnection();
+            var shouldClose = conn.State != ConnectionState.Open;
+            if (shouldClose)
+                conn.Open();
+
+            try
+            {
+                foreach (var column in removedColumns)
+                {
+                    using var exists = conn.CreateCommand();
+                    exists.CommandText = @"
+                        SELECT COUNT(*)
+                        FROM information_schema.columns
+                        WHERE table_schema = DATABASE()
+                          AND table_name = 'site_prediction'
+                          AND column_name = @columnName;";
+
+                    var param = exists.CreateParameter();
+                    param.ParameterName = "@columnName";
+                    param.Value = column;
+                    exists.Parameters.Add(param);
+
+                    var count = Convert.ToInt32(exists.ExecuteScalar());
+                    if (count <= 0)
+                        continue;
+
+                    using var drop = conn.CreateCommand();
+                    drop.CommandText = $"ALTER TABLE `site_prediction` DROP COLUMN `{column}`;";
+                    drop.ExecuteNonQuery();
+                    Console.WriteLine($"Dropped removed column site_prediction.{column}.");
+                }
+            }
+            finally
+            {
+                if (shouldClose)
+                    conn.Close();
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Could not drop removed site_prediction columns: {ex.Message}");
         }
     }
 
@@ -364,8 +422,9 @@ internal class Program
         // BUILD APP
         // ----------------------------------------------------
         var app = builder.Build();
-        EnsureProjectGridSizeColumnExists(app);
+        DropProjectGridSizeColumn(app);
         EnsureSitePredictionColorColumnExists(app);
+        DropRemovedSitePredictionColumns(app);
 
         // ----------------------------------------------------
         // MIDDLEWARE PIPELINE
