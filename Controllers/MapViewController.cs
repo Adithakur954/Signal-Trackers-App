@@ -2242,18 +2242,14 @@ public class AvailablePolygonsResponse
         public sealed class SitePredictionClusterColorRequest
         {
             public long? ProjectId { get; set; }
-            public long? projectId { get; set; }
             public string? Cluster { get; set; }
-            public string? cluster { get; set; }
-            public string? SiteColor { get; set; }
-            public string? siteColor { get; set; }
-            public string? site_color { get; set; }
             public string? ColorCode { get; set; }
-            public string? colorCode { get; set; }
+            public string? SiteColor { get; set; }
             public string? SiteColorCode { get; set; }
-            public string? siteColorCode { get; set; }
             public string? Color { get; set; }
-            public string? color { get; set; }
+
+            [System.Text.Json.Serialization.JsonExtensionData]
+            public Dictionary<string, System.Text.Json.JsonElement>? Extra { get; set; }
         }
 
         private static string? FirstNonBlank(params string?[] values)
@@ -2264,6 +2260,37 @@ public class AvailablePolygonsResponse
                     return value.Trim();
             }
             return null;
+        }
+
+        private static string? GetExtraString(SitePredictionClusterColorRequest? request, params string[] keys)
+        {
+            if (request?.Extra == null || keys.Length == 0)
+                return null;
+
+            foreach (var key in keys)
+            {
+                var match = request.Extra.FirstOrDefault(x => string.Equals(x.Key, key, StringComparison.OrdinalIgnoreCase));
+                if (string.IsNullOrWhiteSpace(match.Key))
+                    continue;
+
+                if (match.Value.ValueKind == System.Text.Json.JsonValueKind.String)
+                    return match.Value.GetString();
+
+                if (match.Value.ValueKind != System.Text.Json.JsonValueKind.Null &&
+                    match.Value.ValueKind != System.Text.Json.JsonValueKind.Undefined)
+                {
+                    return match.Value.ToString();
+                }
+            }
+
+            return null;
+        }
+
+        private static long? TryParseLong(string? value)
+        {
+            return long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)
+                ? parsed
+                : null;
         }
 
         private static bool IsSupportedColorCode(string value)
@@ -9031,18 +9058,23 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
         [HttpPost, Route("SaveSitePredictionClusterColor")]
         public async Task<IActionResult> SaveSitePredictionClusterColor([FromBody] SitePredictionClusterColorRequest request)
         {
-            var cluster = FirstNonBlank(request?.Cluster, request?.cluster)?.Trim();
+            var cluster = FirstNonBlank(
+                request?.Cluster,
+                GetExtraString(request, "cluster", "Cluster"))?.Trim();
             var siteColor = FirstNonBlank(
                 request?.ColorCode,
-                request?.colorCode,
                 request?.SiteColorCode,
-                request?.siteColorCode,
                 request?.SiteColor,
-                request?.siteColor,
-                request?.site_color,
                 request?.Color,
-                request?.color)?.Trim();
-            var projectId = request?.ProjectId ?? request?.projectId;
+                GetExtraString(
+                    request,
+                    "colorCode",
+                    "siteColorCode",
+                    "site_color_code",
+                    "siteColor",
+                    "site_color",
+                    "color"))?.Trim();
+            var projectId = request?.ProjectId ?? TryParseLong(GetExtraString(request, "projectId", "project_id"));
 
             if (string.IsNullOrWhiteSpace(cluster))
                 return BadRequest(new { Status = 0, Message = "Cluster is required." });
