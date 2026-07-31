@@ -2920,6 +2920,7 @@ public async Task<IActionResult> GetSessions(
     [FromQuery] int page = 1,
     [FromQuery] int pageSize = 10,
     [FromQuery] string? search = null,
+    [FromQuery(Name = "type")] string? sessionType = null,
     [FromQuery] string? sessionId = null,
     [FromQuery] string? userDetails = null,
     [FromQuery] string? startDate = null,
@@ -2954,6 +2955,7 @@ public async Task<IActionResult> GetSessions(
     static string CleanFilter(string? value) => (value ?? string.Empty).Trim();
 
     search = CleanFilter(search);
+    sessionType = CleanFilter(sessionType);
     sessionId = CleanFilter(sessionId);
     userDetails = CleanFilter(userDetails);
     startDate = CleanFilter(startDate);
@@ -2968,7 +2970,7 @@ public async Task<IActionResult> GetSessions(
     fromDate = CleanFilter(fromDate);
     toDate = CleanFilter(toDate);
 
-    var cacheKey = $"sessions:list:v2:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:p:{page}:ps:{pageSize}:q:{search}:sid:{sessionId}:ud:{userDetails}:sd:{startDate}:st:{startTime}:ed:{endDate}:et:{endTime}:sl:{startLocation}:el:{endLocation}:d:{distance}:cf:{captureFrequency}:r:{sessionRemarks}:from:{fromDate}:to:{toDate}";
+    var cacheKey = $"sessions:list:v2:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:p:{page}:ps:{pageSize}:q:{search}:type:{sessionType}:sid:{sessionId}:ud:{userDetails}:sd:{startDate}:st:{startTime}:ed:{endDate}:et:{endTime}:sl:{startLocation}:el:{endLocation}:d:{distance}:cf:{captureFrequency}:r:{sessionRemarks}:from:{fromDate}:to:{toDate}";
     var cached = await TryGetCachedObjectAsync<SessionsPageResponse>(cacheKey);
     if (cached != null)
     {
@@ -3048,6 +3050,12 @@ public async Task<IActionResult> GetSessions(
                 (s.mobile != null && EF.Functions.Like(s.mobile, like)) ||
                 (s.start_address != null && EF.Functions.Like(s.start_address, like)) ||
                 (s.end_address != null && EF.Functions.Like(s.end_address, like)));
+        }
+
+        if (!string.IsNullOrWhiteSpace(sessionType))
+        {
+            var like = $"%{sessionType}%";
+            query = query.Where(s => s.type != null && EF.Functions.Like(s.type, like));
         }
 
         if (!string.IsNullOrWhiteSpace(sessionId))
@@ -7086,5 +7094,4 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
         }
     }
 }
-
 
