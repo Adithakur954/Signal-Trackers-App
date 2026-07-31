@@ -1044,18 +1044,6 @@ public string? level { get; set; }
         public string? volte_call { get; set; }
         public string? lte_bler_json { get; set; }
         public string? mos_json { get; set; }
-        [Column("2g")]
-        [JsonPropertyName("2g")]
-        public string? two_g { get; set; }
-        [Column("3g")]
-        [JsonPropertyName("3g")]
-        public string? three_g { get; set; }
-        [Column("4g")]
-        [JsonPropertyName("4g")]
-        public string? four_g { get; set; }
-        [Column("5g")]
-        [JsonPropertyName("5g")]
-        public string? five_g { get; set; }
 
         public int? is_default { get; set; }
 

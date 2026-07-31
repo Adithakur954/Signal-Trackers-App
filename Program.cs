@@ -127,58 +127,6 @@ internal class Program
         }
     }
 
-    private static void EnsureThresholdTechnologyColumnsExist(WebApplication app)
-    {
-        var columns = new[] { "2g", "3g", "4g", "5g" };
-
-        try
-        {
-            using var scope = app.Services.CreateScope();
-            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
-            var conn = db.Database.GetDbConnection();
-            var shouldClose = conn.State != ConnectionState.Open;
-            if (shouldClose)
-                conn.Open();
-
-            try
-            {
-                foreach (var column in columns)
-                {
-                    using var exists = conn.CreateCommand();
-                    exists.CommandText = @"
-                        SELECT COUNT(*)
-                        FROM information_schema.columns
-                        WHERE table_schema = DATABASE()
-                          AND table_name = 'thresholds'
-                          AND column_name = @column;";
-
-                    var parameter = exists.CreateParameter();
-                    parameter.ParameterName = "@column";
-                    parameter.Value = column;
-                    exists.Parameters.Add(parameter);
-
-                    var count = Convert.ToInt32(exists.ExecuteScalar());
-                    if (count > 0)
-                        continue;
-
-                    using var add = conn.CreateCommand();
-                    add.CommandText = $"ALTER TABLE thresholds ADD COLUMN `{column}` TEXT NULL;";
-                    add.ExecuteNonQuery();
-                    Console.WriteLine($"Added missing column thresholds.{column}.");
-                }
-            }
-            finally
-            {
-                if (shouldClose)
-                    conn.Close();
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Could not ensure thresholds technology columns: {ex.Message}");
-        }
-    }
-
     private static void DropRemovedSitePredictionColumns(WebApplication app)
     {
         var removedColumns = new[]
@@ -476,7 +424,6 @@ internal class Program
         var app = builder.Build();
         DropProjectGridSizeColumn(app);
         EnsureSitePredictionColorColumnExists(app);
-        EnsureThresholdTechnologyColumnsExist(app);
         DropRemovedSitePredictionColumns(app);
 
         // ----------------------------------------------------

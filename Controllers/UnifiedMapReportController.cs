@@ -1112,7 +1112,7 @@ namespace SignalTracker.Controllers
                 Source = source,
                 CoverageHoleLimit =
                     setting.coveragehole_value ??
-                    ParseDouble(setting.coveragehole_json) ??
+                    ParseCoverageHoleLimit(setting.coveragehole_json) ??
                     fallback.CoverageHoleLimit,
                 Rsrp = ParseRanges(setting.rsrp_json, fallback.Rsrp),
                 Rsrq = ParseRanges(setting.rsrq_json, fallback.Rsrq),
@@ -1211,9 +1211,23 @@ namespace SignalTracker.Controllers
             try
             {
                 using var doc = JsonDocument.Parse(json);
-                if (doc.RootElement.ValueKind != JsonValueKind.Array) return fallback;
+                var thresholdElement = doc.RootElement;
+                if (thresholdElement.ValueKind == JsonValueKind.Object)
+                {
+                    foreach (var key in new[] { "4g", "4G", "5g", "5G", "3g", "3G", "2g", "2G" })
+                    {
+                        if (thresholdElement.TryGetProperty(key, out var techElement) &&
+                            techElement.ValueKind == JsonValueKind.Array)
+                        {
+                            thresholdElement = techElement;
+                            break;
+                        }
+                    }
+                }
 
-                var ranges = ParseThresholdArray(doc.RootElement, valueMode: false);
+                if (thresholdElement.ValueKind != JsonValueKind.Array) return fallback;
+
+                var ranges = ParseThresholdArray(thresholdElement, valueMode: false);
                 return ranges.Count > 0 ? ranges : fallback;
             }
             catch
@@ -1485,6 +1499,33 @@ namespace SignalTracker.Controllers
             return match.Success && double.TryParse(match.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var number)
                 ? number
                 : null;
+        }
+
+        private static double? ParseCoverageHoleLimit(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return null;
+
+            try
+            {
+                using var doc = JsonDocument.Parse(value);
+                if (doc.RootElement.ValueKind == JsonValueKind.Object)
+                {
+                    foreach (var key in new[] { "4g", "4G", "5g", "5G", "3g", "3G", "2g", "2G" })
+                    {
+                        if (doc.RootElement.TryGetProperty(key, out var element))
+                        {
+                            var parsed = element.ValueKind == JsonValueKind.Number
+                                ? element.GetDouble()
+                                : ParseDouble(element.ToString());
+
+                            if (parsed.HasValue) return parsed;
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            return ParseDouble(value);
         }
     }
 
