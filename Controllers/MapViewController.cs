@@ -70,6 +70,34 @@ namespace SignalTracker.Controllers
             return $"mapview:{NormalizeCacheKeyPart(endpoint)}:{string.Join(":", tokens)}";
         }
 
+        private string GetProjectListCacheScope()
+        {
+            string? country = null;
+
+            if (HttpContext.Request.Query.TryGetValue("country_code", out var queryCountry))
+            {
+                country = queryCountry.ToString();
+            }
+
+            if (string.IsNullOrWhiteSpace(country) &&
+                HttpContext.Request.Headers.TryGetValue("x-country-code", out var headerCountry))
+            {
+                country = headerCountry.ToString();
+            }
+
+            if (string.IsNullOrWhiteSpace(country))
+            {
+                country = User.FindFirst("country_code")?.Value;
+            }
+
+            if (string.IsNullOrWhiteSpace(country) && HttpContext.Session != null)
+            {
+                country = HttpContext.Session.GetString("country_code");
+            }
+
+            return NormalizeCacheKeyPart(string.IsNullOrWhiteSpace(country) ? "IN" : country);
+        }
+
         private static string NormalizeCacheKeyPart(object? value)
         {
             if (value == null)
@@ -12082,7 +12110,7 @@ public async Task<IActionResult> GetProjects([FromQuery] int? company_id = null)
             });
         }
 
-        var cacheKey = BuildMapViewCacheKey("projects", targetCompanyId, useUserScope ? currentUserId : 0);
+        var cacheKey = BuildMapViewCacheKey("projects", GetProjectListCacheScope(), targetCompanyId, useUserScope ? currentUserId : 0);
         var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
         if (cached != null)
             return Json(cached);
