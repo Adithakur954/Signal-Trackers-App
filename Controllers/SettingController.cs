@@ -145,6 +145,10 @@ public IActionResult SaveThreshold([FromBody] thresholds model)
             existing.volte_call = model.volte_call;
             existing.lte_bler_json = model.lte_bler_json;
             existing.mos_json = model.mos_json;
+            existing.two_g = model.two_g;
+            existing.three_g = model.three_g;
+            existing.four_g = model.four_g;
+            existing.five_g = model.five_g;
             existing.coveragehole_json = model.coveragehole_json;
             existing.coveragehole_value = model.coveragehole_value;
             existing.tac= model.tac;
