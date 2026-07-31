@@ -2880,8 +2880,60 @@ public async Task<IActionResult> OutdoorCount(
             return cachedData;
         }
 
+        public class SessionsPageResponse
+        {
+            public List<SessionListItem> Data { get; set; } = new();
+            public int TotalCount { get; set; }
+            public int Page { get; set; }
+            public int PageSize { get; set; }
+            public int TotalPages { get; set; }
+        }
+
+        public class SessionListItem
+        {
+            public int? id { get; set; }
+            public string? session_name { get; set; }
+            public int? company_id { get; set; }
+            public DateTime? start_time { get; set; }
+            public DateTime? end_time { get; set; }
+            public string? notes { get; set; }
+            public float? start_lat { get; set; }
+            public float? start_lon { get; set; }
+            public double? end_lat { get; set; }
+            public double? end_lon { get; set; }
+            public double? capture_frequency { get; set; }
+            public float? distance_km { get; set; }
+            public string? start_address { get; set; }
+            public string? end_address { get; set; }
+            public string? type { get; set; }
+            public string? CreatedBy { get; set; }
+            public string? mobile { get; set; }
+            public string? make { get; set; }
+            public string? model { get; set; }
+            public string? os { get; set; }
+            public string? operator_name { get; set; }
+        }
+
         [HttpGet("GetSessions")]
-public async Task<IActionResult> GetSessions([FromQuery] int? company_id = null)
+public async Task<IActionResult> GetSessions(
+    [FromQuery] int? company_id = null,
+    [FromQuery] int page = 1,
+    [FromQuery] int pageSize = 10,
+    [FromQuery] string? search = null,
+    [FromQuery(Name = "type")] string? sessionType = null,
+    [FromQuery] string? sessionId = null,
+    [FromQuery] string? userDetails = null,
+    [FromQuery] string? startDate = null,
+    [FromQuery] string? startTime = null,
+    [FromQuery] string? endDate = null,
+    [FromQuery] string? endTime = null,
+    [FromQuery] string? startLocation = null,
+    [FromQuery] string? endLocation = null,
+    [FromQuery] string? distance = null,
+    [FromQuery] string? captureFrequency = null,
+    [FromQuery] string? sessionRemarks = null,
+    [FromQuery] string? fromDate = null,
+    [FromQuery] string? toDate = null)
 {
     
     int targetCompanyId = GetTargetCompanyId(company_id);
@@ -2897,15 +2949,40 @@ public async Task<IActionResult> GetSessions([FromQuery] int? company_id = null)
         });
     }
 
-    var cacheKey = $"sessions:list:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}";
-    var cached = await TryGetCachedObjectAsync<List<object>>(cacheKey);
+    page = Math.Max(1, page);
+    pageSize = Math.Clamp(pageSize, 1, 100);
+
+    static string CleanFilter(string? value) => (value ?? string.Empty).Trim();
+
+    search = CleanFilter(search);
+    sessionType = CleanFilter(sessionType);
+    sessionId = CleanFilter(sessionId);
+    userDetails = CleanFilter(userDetails);
+    startDate = CleanFilter(startDate);
+    startTime = CleanFilter(startTime);
+    endDate = CleanFilter(endDate);
+    endTime = CleanFilter(endTime);
+    startLocation = CleanFilter(startLocation);
+    endLocation = CleanFilter(endLocation);
+    distance = CleanFilter(distance);
+    captureFrequency = CleanFilter(captureFrequency);
+    sessionRemarks = CleanFilter(sessionRemarks);
+    fromDate = CleanFilter(fromDate);
+    toDate = CleanFilter(toDate);
+
+    var cacheKey = $"sessions:list:v2:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:p:{page}:ps:{pageSize}:q:{search}:type:{sessionType}:sid:{sessionId}:ud:{userDetails}:sd:{startDate}:st:{startTime}:ed:{endDate}:et:{endTime}:sl:{startLocation}:el:{endLocation}:d:{distance}:cf:{captureFrequency}:r:{sessionRemarks}:from:{fromDate}:to:{toDate}";
+    var cached = await TryGetCachedObjectAsync<SessionsPageResponse>(cacheKey);
     if (cached != null)
     {
         return Ok(new
         {
             Status = 1,
             Source = "REDIS",
-            Data = CleanCachedSessions(cached)
+            Data = CleanCachedSessions(cached.Data.Select(x => (object)x).ToList()),
+            cached.TotalCount,
+            cached.Page,
+            cached.PageSize,
+            cached.TotalPages
         });
     }
 
@@ -2914,20 +2991,20 @@ public async Task<IActionResult> GetSessions([FromQuery] int? company_id = null)
     // =========================================================
     try
     {
-        var rawSessions = await (
+        var query =
             from s in db.tbl_session.AsNoTracking()
-            join u in db.tbl_user.AsNoTracking() on s.user_id equals u.id
+            join u0 in db.tbl_user.AsNoTracking() on s.user_id equals u0.id into users
+            from u in users.DefaultIfEmpty()
             where useUserScope
                 ? s.user_id == currentUserId
-                : (targetCompanyId == 0 || u.company_id == targetCompanyId)
-            orderby s.id descending
+                : (targetCompanyId == 0 || (u != null && u.company_id == targetCompanyId))
             select new
             {
                 id = s.id,
                 session_name = "Session " + s.id,
 
                 // ?? COMPANY INFO
-                company_id = u.company_id,
+                company_id = u != null ? u.company_id : null,
 
                 start_time = s.start_time,
                 end_time = s.end_time,
@@ -2945,14 +3022,125 @@ public async Task<IActionResult> GetSessions([FromQuery] int? company_id = null)
                 end_address = s.end_address,
                 type = s.type,
 
-                CreatedBy = u.name,
-                mobile = u.mobile,
-                make = u.make,
-                model = u.model,
-                os = u.os,
-                operator_name = u.operator_name
-            }
-        ).ToListAsync();
+                CreatedBy = u != null ? u.name : null,
+                mobile = u != null ? u.mobile : null,
+                make = u != null ? u.make : null,
+                model = u != null ? u.model : null,
+                os = u != null ? u.os : null,
+                operator_name = u != null ? u.operator_name : null
+            };
+
+        if (!string.IsNullOrWhiteSpace(fromDate) && DateTime.TryParse(fromDate, out var from))
+        {
+            query = query.Where(s => s.start_time.HasValue && s.start_time.Value >= from.Date);
+        }
+
+        if (!string.IsNullOrWhiteSpace(toDate) && DateTime.TryParse(toDate, out var to))
+        {
+            var inclusiveTo = to.Date.AddDays(1).AddTicks(-1);
+            query = query.Where(s => s.start_time.HasValue && s.start_time.Value <= inclusiveTo);
+        }
+
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            var like = $"%{search}%";
+            query = query.Where(s =>
+                EF.Functions.Like((s.id ?? 0).ToString(), like) ||
+                (s.CreatedBy != null && EF.Functions.Like(s.CreatedBy, like)) ||
+                (s.mobile != null && EF.Functions.Like(s.mobile, like)) ||
+                (s.start_address != null && EF.Functions.Like(s.start_address, like)) ||
+                (s.end_address != null && EF.Functions.Like(s.end_address, like)));
+        }
+
+        if (!string.IsNullOrWhiteSpace(sessionType))
+        {
+            var like = $"%{sessionType}%";
+            query = query.Where(s => s.type != null && EF.Functions.Like(s.type, like));
+        }
+
+        if (!string.IsNullOrWhiteSpace(sessionId))
+        {
+            var like = $"%{sessionId}%";
+            query = query.Where(s => EF.Functions.Like((s.id ?? 0).ToString(), like));
+        }
+
+        if (!string.IsNullOrWhiteSpace(userDetails))
+        {
+            var like = $"%{userDetails}%";
+            query = query.Where(s =>
+                (s.CreatedBy != null && EF.Functions.Like(s.CreatedBy, like)) ||
+                (s.mobile != null && EF.Functions.Like(s.mobile, like)) ||
+                (s.make != null && EF.Functions.Like(s.make, like)) ||
+                (s.model != null && EF.Functions.Like(s.model, like)) ||
+                (s.os != null && EF.Functions.Like(s.os, like)) ||
+                (s.operator_name != null && EF.Functions.Like(s.operator_name, like)));
+        }
+
+        if (!string.IsNullOrWhiteSpace(startLocation))
+        {
+            var like = $"%{startLocation}%";
+            query = query.Where(s => s.start_address != null && EF.Functions.Like(s.start_address, like));
+        }
+
+        if (!string.IsNullOrWhiteSpace(endLocation))
+        {
+            var like = $"%{endLocation}%";
+            query = query.Where(s => s.end_address != null && EF.Functions.Like(s.end_address, like));
+        }
+
+        if (!string.IsNullOrWhiteSpace(sessionRemarks))
+        {
+            var like = $"%{sessionRemarks}%";
+            query = query.Where(s => s.notes != null && EF.Functions.Like(s.notes, like));
+        }
+
+        if (!string.IsNullOrWhiteSpace(distance))
+        {
+            var like = $"%{distance}%";
+            query = query.Where(s => s.distance_km.HasValue && EF.Functions.Like(s.distance_km.Value.ToString(), like));
+        }
+
+        if (!string.IsNullOrWhiteSpace(captureFrequency))
+        {
+            var like = $"%{captureFrequency}%";
+            query = query.Where(s => s.capture_frequency.HasValue && EF.Functions.Like(s.capture_frequency.Value.ToString(), like));
+        }
+
+        if (!string.IsNullOrWhiteSpace(startDate))
+        {
+            var like = $"%{startDate}%";
+            query = query.Where(s => s.start_time.HasValue && EF.Functions.Like(s.start_time.Value.ToString(), like));
+        }
+
+        if (!string.IsNullOrWhiteSpace(startTime))
+        {
+            var like = $"%{startTime}%";
+            query = query.Where(s => s.start_time.HasValue && EF.Functions.Like(s.start_time.Value.ToString(), like));
+        }
+
+        if (!string.IsNullOrWhiteSpace(endDate))
+        {
+            var like = $"%{endDate}%";
+            query = query.Where(s => s.end_time.HasValue && EF.Functions.Like(s.end_time.Value.ToString(), like));
+        }
+
+        if (!string.IsNullOrWhiteSpace(endTime))
+        {
+            var like = $"%{endTime}%";
+            query = query.Where(s => s.end_time.HasValue && EF.Functions.Like(s.end_time.Value.ToString(), like));
+        }
+
+        var totalCount = await query.CountAsync();
+        var totalPages = totalCount == 0 ? 0 : (int)Math.Ceiling(totalCount / (double)pageSize);
+
+        if (totalPages > 0 && page > totalPages)
+            page = totalPages;
+
+        var rawSessions = await query
+            .OrderByDescending(s => s.id)
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
+            .ToListAsync();
 
         var sessions = rawSessions.Select(s => new
         {
@@ -2979,13 +3167,49 @@ public async Task<IActionResult> GetSessions([FromQuery] int? company_id = null)
             s.operator_name
         }).ToList();
 
-        await CacheObjectAsync(cacheKey, sessions.Select(x => (object)x).ToList(), 300);
+        var pageResponse = new SessionsPageResponse
+        {
+            Data = sessions.Select(s => new SessionListItem
+            {
+                id = s.id,
+                session_name = s.session_name,
+                company_id = s.company_id,
+                start_time = s.start_time,
+                end_time = s.end_time,
+                notes = s.notes,
+                start_lat = s.start_lat,
+                start_lon = s.start_lon,
+                end_lat = s.end_lat,
+                end_lon = s.end_lon,
+                capture_frequency = s.capture_frequency,
+                distance_km = s.distance_km,
+                start_address = s.start_address,
+                end_address = s.end_address,
+                type = s.type,
+                CreatedBy = s.CreatedBy,
+                mobile = s.mobile,
+                make = s.make,
+                model = s.model,
+                os = s.os,
+                operator_name = s.operator_name
+            }).ToList(),
+            TotalCount = totalCount,
+            Page = page,
+            PageSize = pageSize,
+            TotalPages = totalPages
+        };
+
+        await CacheObjectAsync(cacheKey, pageResponse, 300);
 
         return Ok(new
         {
             Status = 1,
             Source = "DATABASE",
-            Data = sessions
+            pageResponse.Data,
+            pageResponse.TotalCount,
+            pageResponse.Page,
+            pageResponse.PageSize,
+            pageResponse.TotalPages
         });
     }
     catch (Exception ex)
@@ -3082,7 +3306,7 @@ public async Task<IActionResult> GetSessions([FromQuery] int? company_id = null)
                 var rawSessionsData = await (
                     from s in db.tbl_session.AsNoTracking()
                     join u in db.tbl_user.AsNoTracking() on s.user_id equals u.id
-                    where targetCompanyId == 0 || u.company_id == targetCompanyId
+                    where (targetCompanyId == 0 || u.company_id == targetCompanyId)
                        && s.start_time.HasValue
                        && s.start_time.Value >= startDate
                        && s.start_time.Value <= endDate
@@ -6870,5 +7094,4 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
         }
     }
 }
-
 

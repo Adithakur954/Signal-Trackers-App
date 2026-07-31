@@ -217,6 +217,10 @@ protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
             {
                 e.HasKey(x => x.id);
                 e.ToTable("thresholds");
+                e.Ignore("2g");
+                e.Ignore("3g");
+                e.Ignore("4g");
+                e.Ignore("5g");
             });
 
             modelBuilder.Entity<site_prediction>(e =>

@@ -1091,6 +1091,7 @@ namespace SignalTracker.Controllers
             var sourceIdColumn = isOptimized ? "site_prediction_id" : "id";
             var versionSelect = isOptimized ? "version" : "NULL AS version";
             var statusSelect = isOptimized ? "status" : "NULL AS status";
+            var secIdSelect = isOptimized ? "sec_id" : "NULL AS sec_id";
             var orderBy = isOptimized
                 ? "ORDER BY COALESCE(updated_at, created_at) DESC, id"
                 : "ORDER BY site, sector, cell_id";
@@ -1114,7 +1115,7 @@ namespace SignalTracker.Controllers
                     {sourceIdColumn} AS source_id,
                     {versionSelect},
                     {statusSelect},
-                    site, site_name, sector, cell_id, sec_id,
+                    site, site_name, sector, cell_id, {secIdSelect},
                     latitude, longitude, tac, pci, azimuth, height, band, earfcn, bw,
                     m_tilt, e_tilt, tx_power, reference_signal_power, frequency, cluster, technology
                 FROM {table}

@@ -70,6 +70,34 @@ namespace SignalTracker.Controllers
             return $"mapview:{NormalizeCacheKeyPart(endpoint)}:{string.Join(":", tokens)}";
         }
 
+        private string GetProjectListCacheScope()
+        {
+            string? country = null;
+
+            if (HttpContext.Request.Query.TryGetValue("country_code", out var queryCountry))
+            {
+                country = queryCountry.ToString();
+            }
+
+            if (string.IsNullOrWhiteSpace(country) &&
+                HttpContext.Request.Headers.TryGetValue("x-country-code", out var headerCountry))
+            {
+                country = headerCountry.ToString();
+            }
+
+            if (string.IsNullOrWhiteSpace(country))
+            {
+                country = User.FindFirst("country_code")?.Value;
+            }
+
+            if (string.IsNullOrWhiteSpace(country) && HttpContext.Session != null)
+            {
+                country = HttpContext.Session.GetString("country_code");
+            }
+
+            return NormalizeCacheKeyPart(string.IsNullOrWhiteSpace(country) ? "IN" : country);
+        }
+
         private static string NormalizeCacheKeyPart(object? value)
         {
             if (value == null)
@@ -2242,18 +2270,14 @@ public class AvailablePolygonsResponse
         public sealed class SitePredictionClusterColorRequest
         {
             public long? ProjectId { get; set; }
-            public long? projectId { get; set; }
             public string? Cluster { get; set; }
-            public string? cluster { get; set; }
-            public string? SiteColor { get; set; }
-            public string? siteColor { get; set; }
-            public string? site_color { get; set; }
             public string? ColorCode { get; set; }
-            public string? colorCode { get; set; }
+            public string? SiteColor { get; set; }
             public string? SiteColorCode { get; set; }
-            public string? siteColorCode { get; set; }
             public string? Color { get; set; }
-            public string? color { get; set; }
+
+            [System.Text.Json.Serialization.JsonExtensionData]
+            public Dictionary<string, System.Text.Json.JsonElement>? Extra { get; set; }
         }
 
         private static string? FirstNonBlank(params string?[] values)
@@ -2264,6 +2288,37 @@ public class AvailablePolygonsResponse
                     return value.Trim();
             }
             return null;
+        }
+
+        private static string? GetExtraString(SitePredictionClusterColorRequest? request, params string[] keys)
+        {
+            if (request?.Extra == null || keys.Length == 0)
+                return null;
+
+            foreach (var key in keys)
+            {
+                var match = request.Extra.FirstOrDefault(x => string.Equals(x.Key, key, StringComparison.OrdinalIgnoreCase));
+                if (string.IsNullOrWhiteSpace(match.Key))
+                    continue;
+
+                if (match.Value.ValueKind == System.Text.Json.JsonValueKind.String)
+                    return match.Value.GetString();
+
+                if (match.Value.ValueKind != System.Text.Json.JsonValueKind.Null &&
+                    match.Value.ValueKind != System.Text.Json.JsonValueKind.Undefined)
+                {
+                    return match.Value.ToString();
+                }
+            }
+
+            return null;
+        }
+
+        private static long? TryParseLong(string? value)
+        {
+            return long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)
+                ? parsed
+                : null;
         }
 
         private static bool IsSupportedColorCode(string value)
@@ -2395,7 +2450,6 @@ public class AvailablePolygonsResponse
             public DateTime? ToDate { get; set; }
             public List<int>? PolygonIds { get; set; }
             public List<int>? SessionIds { get; set; }
-            public string? GridSize { get; set; }
             public string? LogGrid { get; set; }
             public string? log_grid { get; set; }
             public int? company_id { get; set; }
@@ -2509,8 +2563,7 @@ public async Task<JsonResult> CreateProjectWithPolygons([FromBody] CreateProject
                     status         = 1,
                     ref_session_id = (model.SessionIds != null && model.SessionIds.Any())
                                         ? string.Join(",", model.SessionIds)
-                                        : null,
-                    grid_size      = model.GridSize
+                                        : null
                 };
 
                 db.tbl_project.Add(newProj);
@@ -2559,7 +2612,6 @@ public async Task<JsonResult> CreateProjectWithPolygons([FromBody] CreateProject
                 p.band,
                 p.earfcn,
                 p.apps,
-                p.grid_size,
                 p.created_on,
                 p.status
             })
@@ -4384,7 +4436,6 @@ public async Task<IActionResult> UpdateProjectSessions([FromBody] UpdateProjectS
                 project.band,
                 project.earfcn,
                 project.apps,
-                project.grid_size,
                 project.log_grid,
                 project.created_on,
                 project.status
@@ -7480,6 +7531,22 @@ public async Task<IActionResult> GetIndoorOutdoorSessionAnalytics(
 
             try
             {
+                var techDict = JsonConvert.DeserializeObject<Dictionary<string, List<SettingReangeColor>>>(raw);
+                if (techDict != null && techDict.Count > 0)
+                {
+                    foreach (var key in new[] { "default", "Default", "5g", "5G", "4g", "4G", "3g", "3G", "2g", "2G" })
+                    {
+                        if (techDict.TryGetValue(key, out var ranges) && ranges != null && ranges.Count > 0)
+                            return ranges;
+                    }
+
+                    return techDict.Values.FirstOrDefault(v => v != null && v.Count > 0);
+                }
+            }
+            catch { }
+
+            try
+            {
                 var dict = JsonConvert.DeserializeObject<Dictionary<string, SettingReangeColor>>(raw);
                 if (dict != null) return dict.Values.ToList();
             }
@@ -8195,8 +8262,6 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             ["sectorId"] = "sector",
             ["cell_id"] = "cell_id",
             ["cellId"] = "cell_id",
-            ["sec_id"] = "sec_id",
-            ["secId"] = "sec_id",
             ["longitude"] = "longitude",
             ["lng"] = "longitude",
             ["lon"] = "longitude",
@@ -8221,19 +8286,8 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             ["referenceSignalPower"] = "reference_signal_power",
             ["rs_power"] = "reference_signal_power",
             ["rsPower"] = "reference_signal_power",
-            ["cellsize"] = "cellsize",
-            ["cell_size"] = "cellsize",
-            ["cellSize"] = "cellsize",
             ["frequency"] = "frequency",
             ["band"] = "band",
-            ["uplink_center_frequency"] = "uplink_center_frequency",
-            ["uplinkCenterFrequency"] = "uplink_center_frequency",
-            ["uplink_frequency"] = "uplink_center_frequency",
-            ["uplinkFrequency"] = "uplink_center_frequency",
-            ["downlink_frequency"] = "downlink_frequency",
-            ["downlinkFrequency"] = "downlink_frequency",
-            ["download_frequency"] = "downlink_frequency",
-            ["downloadFrequency"] = "downlink_frequency",
             ["earfcn"] = "earfcn",
             ["cluster"] = "cluster",
             ["provider"] = "cluster",
@@ -9048,18 +9102,23 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
         [HttpPost, Route("SaveSitePredictionClusterColor")]
         public async Task<IActionResult> SaveSitePredictionClusterColor([FromBody] SitePredictionClusterColorRequest request)
         {
-            var cluster = FirstNonBlank(request?.Cluster, request?.cluster)?.Trim();
+            var cluster = FirstNonBlank(
+                request?.Cluster,
+                GetExtraString(request, "cluster", "Cluster"))?.Trim();
             var siteColor = FirstNonBlank(
                 request?.ColorCode,
-                request?.colorCode,
                 request?.SiteColorCode,
-                request?.siteColorCode,
                 request?.SiteColor,
-                request?.siteColor,
-                request?.site_color,
                 request?.Color,
-                request?.color)?.Trim();
-            var projectId = request?.ProjectId ?? request?.projectId;
+                GetExtraString(
+                    request,
+                    "colorCode",
+                    "siteColorCode",
+                    "site_color_code",
+                    "siteColor",
+                    "site_color",
+                    "color"))?.Trim();
+            var projectId = request?.ProjectId ?? TryParseLong(GetExtraString(request, "projectId", "project_id"));
 
             if (string.IsNullOrWhiteSpace(cluster))
                 return BadRequest(new { Status = 0, Message = "Cluster is required." });
@@ -9377,6 +9436,18 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 ? $"COALESCE({optimizedTxPowerExpr}, {baselineTxPowerExpr})"
                 : baselineTxPowerExpr;
 
+            static string ColumnExpr(string alias, HashSet<string> columns, string column)
+                => columns.Contains(column) ? $"{alias}.`{column}`" : "NULL";
+
+            var baselineSecIdExpr = ColumnExpr("sp", sourceColumns, "sec_id");
+            var baselineCellSizeExpr = ColumnExpr("sp", sourceColumns, "cellsize");
+            var baselineUplinkExpr = ColumnExpr("sp", sourceColumns, "uplink_center_frequency");
+            var baselineDownlinkExpr = ColumnExpr("sp", sourceColumns, "downlink_frequency");
+            var optimizedSecIdExpr = ColumnExpr("spo", optimizedColumns, "sec_id");
+            var optimizedCellSizeExpr = ColumnExpr("spo", optimizedColumns, "cellsize");
+            var optimizedUplinkExpr = ColumnExpr("spo", optimizedColumns, "uplink_center_frequency");
+            var optimizedDownlinkExpr = ColumnExpr("spo", optimizedColumns, "downlink_frequency");
+
             cmd.CommandText = requestedVersion == "combined"
                 ? $@"
                 WITH optimized_rows AS (
@@ -9437,7 +9508,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                         {combinedNodeExpr} AS node_id,
                         CONVERT(COALESCE(spo.sector, sp.sector) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS sector,
                         CONVERT(COALESCE(spo.cell_id, sp.cell_id) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS cell_id,
-                        CONVERT(COALESCE(spo.sec_id, sp.sec_id) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS sec_id,
+                        CONVERT(COALESCE({optimizedSecIdExpr}, {baselineSecIdExpr}) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS sec_id,
                         COALESCE(spo.longitude, sp.longitude) AS longitude,
                         COALESCE(spo.latitude, sp.latitude) AS latitude,
                         COALESCE(spo.tac, sp.tac) AS tac,
@@ -9450,11 +9521,11 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                         {mergedTxPowerExpr} AS maximum_transmission_power_of_resource,
                         COALESCE(spo.real_transmit_power_of_resource, sp.real_transmit_power_of_resource) AS real_transmit_power_of_resource,
                         COALESCE(spo.reference_signal_power, sp.reference_signal_power) AS reference_signal_power,
-                        COALESCE(spo.cellsize, sp.cellsize) AS cellsize,
+                        COALESCE({optimizedCellSizeExpr}, {baselineCellSizeExpr}) AS cellsize,
                         COALESCE(spo.frequency, sp.frequency) AS frequency,
                         COALESCE(spo.band, sp.band) AS band,
-                        COALESCE(spo.uplink_center_frequency, sp.uplink_center_frequency) AS uplink_center_frequency,
-                        COALESCE(spo.downlink_frequency, sp.downlink_frequency) AS downlink_frequency,
+                        COALESCE({optimizedUplinkExpr}, {baselineUplinkExpr}) AS uplink_center_frequency,
+                        COALESCE({optimizedDownlinkExpr}, {baselineDownlinkExpr}) AS downlink_frequency,
                         COALESCE(spo.earfcn, sp.earfcn) AS earfcn,
                         CONVERT(p.provider USING utf8mb4) COLLATE utf8mb4_unicode_ci AS project_provider,
                         CONVERT(sp.cluster USING utf8mb4) COLLATE utf8mb4_unicode_ci AS original_cluster,
@@ -9518,7 +9589,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                         {sourceNodeExpr} AS node_id,
                         CONVERT(sp.sector USING utf8mb4) COLLATE utf8mb4_unicode_ci AS sector,
                         CONVERT(sp.cell_id USING utf8mb4) COLLATE utf8mb4_unicode_ci AS cell_id,
-                        CONVERT(sp.sec_id USING utf8mb4) COLLATE utf8mb4_unicode_ci AS sec_id,
+                        CONVERT({baselineSecIdExpr} USING utf8mb4) COLLATE utf8mb4_unicode_ci AS sec_id,
                         sp.longitude,
                         sp.latitude,
                         sp.tac,
@@ -9531,11 +9602,11 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                         {baselineTxPowerExpr} AS maximum_transmission_power_of_resource,
                         sp.real_transmit_power_of_resource,
                         sp.reference_signal_power,
-                        sp.cellsize,
+                        {baselineCellSizeExpr} AS cellsize,
                         sp.frequency,
                         sp.band,
-                        sp.uplink_center_frequency,
-                        sp.downlink_frequency,
+                        {baselineUplinkExpr} AS uplink_center_frequency,
+                        {baselineDownlinkExpr} AS downlink_frequency,
                         sp.earfcn,
                         CONVERT(p.provider USING utf8mb4) COLLATE utf8mb4_unicode_ci AS project_provider,
                         CONVERT(sp.cluster USING utf8mb4) COLLATE utf8mb4_unicode_ci AS original_cluster,
@@ -9584,7 +9655,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                     {sourceNodeExpr} AS node_id,
                     sp.sector,
                     sp.cell_id,
-                    sp.sec_id,
+                    {baselineSecIdExpr} AS sec_id,
                     sp.longitude,
                     sp.latitude,
                     sp.tac,
@@ -9597,11 +9668,11 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                     {mergedTxPowerExpr} AS maximum_transmission_power_of_resource,
                     sp.real_transmit_power_of_resource,
                     sp.reference_signal_power,
-                    sp.cellsize,
+                    {baselineCellSizeExpr} AS cellsize,
                     sp.frequency,
                     sp.band,
-                    sp.uplink_center_frequency,
-                    sp.downlink_frequency,
+                    {baselineUplinkExpr} AS uplink_center_frequency,
+                    {baselineDownlinkExpr} AS downlink_frequency,
                     sp.earfcn,
                     CONVERT(p.provider USING utf8mb4) COLLATE utf8mb4_unicode_ci AS project_provider,
                     sp.cluster AS original_cluster,
@@ -11166,8 +11237,7 @@ public async Task<IActionResult> CreateSimpleProject([FromBody] CreateProjectMod
             earfcn = model.EarFcn,
             apps = model.Apps,
             from_date = model.FromDate?.ToString("yyyy-MM-dd"),
-            to_date = model.ToDate?.ToString("yyyy-MM-dd"),
-            grid_size = model.GridSize
+            to_date = model.ToDate?.ToString("yyyy-MM-dd")
         };
 
         // 4. Save to Database
@@ -12040,7 +12110,7 @@ public async Task<IActionResult> GetProjects([FromQuery] int? company_id = null)
             });
         }
 
-        var cacheKey = BuildMapViewCacheKey("projects", targetCompanyId, useUserScope ? currentUserId : 0);
+        var cacheKey = BuildMapViewCacheKey("projects", GetProjectListCacheScope(), targetCompanyId, useUserScope ? currentUserId : 0);
         var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
         if (cached != null)
             return Json(cached);
@@ -12104,9 +12174,7 @@ private async Task<List<object>> GetProjectsFromRawSqlAsync(
     using var conn = new MySqlConnection(connString);
     await conn.OpenAsync();
     var projectColumns = await GetTableColumnSetAsync(conn, "tbl_project");
-    var gridSizeSelect = projectColumns.Contains("grid_size")
-        ? "p.grid_size"
-        : "NULL AS grid_size";
+    var gridSizeSelect = "NULL AS grid_size";
     var logGridSelect = projectColumns.Contains("log_grid")
         ? "p.log_grid"
         : "NULL AS log_grid";
@@ -12189,7 +12257,6 @@ private async Task<List<object>> GetProjectsFromRawSqlAsync(
             band = ReadDb("band"),
             earfcn = ReadDb("earfcn"),
             apps = ReadDb("apps"),
-            grid_size = ReadDb("grid_size"),
             log_grid = ReadDb("log_grid"),
             sitesize = ReadDb("sitesize"),
             created_on = ReadDb("created_on"),
@@ -12217,9 +12284,7 @@ private async Task<List<object>> GetProjectsFallbackAsync(
     await conn.OpenAsync();
 
     var projectColumns = await GetTableColumnSetAsync(conn, "tbl_project");
-    var gridSizeSelect = projectColumns.Contains("grid_size")
-        ? "p.grid_size"
-        : "NULL AS grid_size";
+    var gridSizeSelect = "NULL AS grid_size";
     var logGridSelect = projectColumns.Contains("log_grid")
         ? "p.log_grid"
         : "NULL AS log_grid";
@@ -12282,7 +12347,6 @@ private async Task<List<object>> GetProjectsFallbackAsync(
             band = ReadDb("band"),
             earfcn = ReadDb("earfcn"),
             apps = ReadDb("apps"),
-            grid_size = ReadDb("grid_size"),
             log_grid = ReadDb("log_grid"),
             sitesize = ReadDb("sitesize"),
             created_on = ReadDb("created_on"),
