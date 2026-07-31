@@ -7506,7 +7506,7 @@ public async Task<IActionResult> GetIndoorOutdoorSessionAnalytics(
                 var techDict = JsonConvert.DeserializeObject<Dictionary<string, List<SettingReangeColor>>>(raw);
                 if (techDict != null && techDict.Count > 0)
                 {
-                    foreach (var key in new[] { "4g", "4G", "5g", "5G", "3g", "3G", "2g", "2G" })
+                    foreach (var key in new[] { "default", "Default", "5g", "5G", "4g", "4G", "3g", "3G", "2g", "2G" })
                     {
                         if (techDict.TryGetValue(key, out var ranges) && ranges != null && ranges.Count > 0)
                             return ranges;

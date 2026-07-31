@@ -1214,7 +1214,7 @@ namespace SignalTracker.Controllers
                 var thresholdElement = doc.RootElement;
                 if (thresholdElement.ValueKind == JsonValueKind.Object)
                 {
-                    foreach (var key in new[] { "4g", "4G", "5g", "5G", "3g", "3G", "2g", "2G" })
+                    foreach (var key in new[] { "default", "Default", "5g", "5G", "4g", "4G", "3g", "3G", "2g", "2G" })
                     {
                         if (thresholdElement.TryGetProperty(key, out var techElement) &&
                             techElement.ValueKind == JsonValueKind.Array)
@@ -1510,7 +1510,7 @@ namespace SignalTracker.Controllers
                 using var doc = JsonDocument.Parse(value);
                 if (doc.RootElement.ValueKind == JsonValueKind.Object)
                 {
-                    foreach (var key in new[] { "4g", "4G", "5g", "5G", "3g", "3G", "2g", "2G" })
+                    foreach (var key in new[] { "default", "Default", "5g", "5G", "4g", "4G", "3g", "3G", "2g", "2G" })
                     {
                         if (doc.RootElement.TryGetProperty(key, out var element))
                         {
