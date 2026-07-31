@@ -11,6 +11,8 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
+using SixLabors.ImageSharp.Processing;
+using SkiaSharp;
 using SignalTracker.Models;
 
 namespace SignalTracker.Controllers
@@ -21,10 +23,38 @@ namespace SignalTracker.Controllers
     public class ExcelReportController : ControllerBase
     {
         private const string ImageBaseUrl = "https://apistracer.vinfocom.co.in/uploaded_images";
+        private static readonly HashSet<string> UniqueValueHeaders = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "PCI", "NODEB_ID", "CELL_ID", "CI", "CELLID", "CID"
+        };
+
+        private static bool IsUniqueValueHeader(string? header) =>
+            !string.IsNullOrWhiteSpace(header) && UniqueValueHeaders.Contains(header.Trim());
+
+        private static List<string> GetUniqueValuesForHeader(List<WalkTestLogRow> rows, string header)
+        {
+            var headerUpper = (header ?? "").ToUpperInvariant().Trim();
+
+            IEnumerable<string?> rawValues = headerUpper switch
+            {
+                "PCI"      => rows.Select(r => r.Pci),
+                "NODEB_ID" => rows.Select(r => r.NodeBId),
+                "CELL_ID" or "CI" or "CELLID" or "CID" => rows.Select(r => r.CellId),
+                _          => Enumerable.Empty<string?>()
+            };
+
+            return rawValues
+                .Where(v => !string.IsNullOrWhiteSpace(v))
+                .Select(v => v!.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(v => v, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
         private static readonly string[] ImageHeaders =
         {
-            "BAND", "RSRP", "RSRQ", "SINR", "DL_THPT", "UL_THPT",
-            "EARFCN", "LTE_BLER", "PCI", "NODEB_ID", "VOLTE_CALL", "PUSCH_TX"
+            "BAND", "RSRP", "RSRQ", "SINR", "DL_THPT", "UL_THPT", "CI",
+            "EARFCN", "LTE_BLER", "PCI", "NODEB_ID", "PUSCH_TX"
         };
 
         private readonly ApplicationDbContext _db;
@@ -242,13 +272,20 @@ namespace SignalTracker.Controllers
             var rawRows = ExtractNetworkRowsFromZip(archive, sessionId);
             var rows = CleanZipRows(rawRows);
 
-            var bandSummary = rows
+            var validRows = rows
+                .Where(r => !string.IsNullOrWhiteSpace(r.BandSheetName) &&
+                            !r.BandSheetName.Equals("Unknown Band", StringComparison.OrdinalIgnoreCase) &&
+                            !r.BandSheetName.Equals("Unknown", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            var totalValid = validRows.Count;
+            var bandSummary = validRows
                 .GroupBy(r => r.BandSheetName, StringComparer.OrdinalIgnoreCase)
                 .Select(g => new
                 {
                     Band = g.Key,
                     Count = g.Count(),
-                    Percentage = rows.Count == 0 ? 0 : Math.Round(g.Count() * 100.0 / rows.Count, 2)
+                    Percentage = totalValid == 0 ? 0 : Math.Round(g.Count() * 100.0 / totalValid, 2)
                 })
                 .OrderByDescending(x => x.Count)
                 .ToList();
@@ -301,7 +338,34 @@ namespace SignalTracker.Controllers
                 if (ext != ".png" && ext != ".jpg" && ext != ".jpeg") continue;
 
                 var fileName = Path.GetFileNameWithoutExtension(entry.FullName);
-                if (fileName.StartsWith("legend_", StringComparison.OrdinalIgnoreCase)) continue;
+                if (fileName.StartsWith("legend_", StringComparison.OrdinalIgnoreCase))
+                {
+                    var lHeader = fileName.Substring(7).ToUpperInvariant();
+                    try
+                    {
+                        using var entryStream = entry.Open();
+                        using var ms = new MemoryStream();
+                        entryStream.CopyTo(ms);
+                        images["LEGEND_" + lHeader] = ms.ToArray();
+                    }
+                    catch { }
+                    continue;
+                }
+
+                if (fileName.EndsWith("_legend", StringComparison.OrdinalIgnoreCase))
+                {
+                    var rawHeader = fileName.Substring(0, fileName.Length - 7);
+                    var cleanHeader = Regex.Replace(rawHeader, @"^(?:map_)?(?:\d+_)?", "", RegexOptions.IgnoreCase).ToUpperInvariant();
+                    try
+                    {
+                        using var entryStream = entry.Open();
+                        using var ms = new MemoryStream();
+                        entryStream.CopyTo(ms);
+                        images["LEGEND_" + cleanHeader] = ms.ToArray();
+                    }
+                    catch { }
+                    continue;
+                }
 
                 var match = Regex.Match(entry.FullName, @"(?:^|[\\/])(?:map_)?(\d+)_([A-Za-z0-9_]+)\.(png|jpg|jpeg)$", RegexOptions.IgnoreCase);
                 string header;
@@ -391,7 +455,7 @@ namespace SignalTracker.Controllers
                 Network = FindZipColumn(headers, "network type"),
                 IndoorOutdoor = FindZipColumn(headers, "indoor/outdoor"),
                 Mos = FindZipColumn(headers, "mos"),
-                CellId = FindZipColumn(headers, "cell id"),
+                CellId = FindZipColumn(headers, "cell id", "cell_id", "cellid", "ci", "cid", "cell identity", "cell_index"),
                 Pci = FindZipColumn(headers, "pci / psc"),
                 Rsrp = FindZipColumn(headers, "ssrsrp", "rsrp"),
                 Rsrq = FindZipColumn(headers, "ssrsrq", "rsrq"),
@@ -404,7 +468,13 @@ namespace SignalTracker.Controllers
                 Bler = FindZipColumn(headers, "bler"),
                 AlphaLong = FindZipColumn(headers, "alpha long", "m_alpha_long"),
                 AlphaShort = FindZipColumn(headers, "alpha short", "m_alpha_short"),
-                NodebId = FindZipColumn(headers, "nodeb id", "nodeb_id"),
+                NodebId = FindZipColumn(headers,
+                    "nodeb id", "nodeb_id", "node_b_id", "nodeb", "node_b",
+                    "enodeb id", "enodeb_id", "enodebid", "enodeb",
+                    "enb id", "enb_id", "enbid", "enb",
+                    "gnodeb id", "gnodeb_id", "gnodebid", "gnodeb",
+                    "gnb id", "gnb_id", "gnbid", "gnb",
+                    "site id", "site_id", "siteid"),
                 Apps = FindZipColumn(headers, "running apps", "apps"),
                 PuschTx = FindZipColumn(headers, "pusch tx", "pusch_tx", "pusch"),
                 Ta = FindZipColumn(headers, "ta"),
@@ -524,6 +594,15 @@ namespace SignalTracker.Controllers
                 r.IndoorOutdoor = NormalizeZipText(r.IndoorOutdoor);
                 r.Apps = NormalizeZipText(r.Apps);
                 r.Bler = NormalizeZipText(r.Bler);
+
+                if (string.IsNullOrWhiteSpace(r.NodeBId) && !string.IsNullOrWhiteSpace(r.CellId))
+                {
+                    var digits = Regex.Match(r.CellId, @"\d+").Value;
+                    if (long.TryParse(digits, out var cidVal) && cidVal > 256)
+                    {
+                        r.NodeBId = (cidVal >> 8).ToString();
+                    }
+                }
 
                 if (r.Lat is < -90 or > 90) r.Lat = null;
                 if (r.Lon is < -180 or > 180) r.Lon = null;
@@ -920,21 +999,17 @@ namespace SignalTracker.Controllers
             List<int> sessionIds,
             CancellationToken cancellationToken)
         {
+            // Only fetch map plot images over HTTP (legends are created dynamically by the backend)
             var urls = sessionIds
-                .SelectMany(sessionId => ImageHeaders.SelectMany(header => new[]
-                {
-                    BuildImageUrl(sessionId, header),
-                    BuildLegendImageUrl(sessionId, header),
-                    BuildGlobalLegendImageUrl(header)
-                }))
+                .SelectMany(sessionId => ImageHeaders.Select(header => BuildImageUrl(sessionId, header)))
                 .Distinct()
                 .ToList();
 
             var result = new ConcurrentDictionary<string, byte[]?>(StringComparer.OrdinalIgnoreCase);
             var client = _httpClientFactory.CreateClient("WalkTestReportImages");
-            client.Timeout = TimeSpan.FromSeconds(20);
+            client.Timeout = TimeSpan.FromSeconds(3); // Fast 3s timeout for non-existent image checks
 
-            using var throttle = new SemaphoreSlim(8);
+            using var throttle = new SemaphoreSlim(32); // High concurrency for fast parallel downloads
 
             var downloadTasks = urls.Select(async url =>
             {
@@ -997,13 +1072,12 @@ namespace SignalTracker.Controllers
                 query = query.Where(x => x.network != null && EF.Functions.Like(x.network, $"%{networkType}%"));
             }
 
-            var rows = await query
-                .OrderBy(x => x.timestamp)
-                .ThenBy(x => x.id)
+            var resultRows = await query
+                .OrderBy(x => x.id)
                 .Take(limit)
                 .Select(x => new WalkTestLogRow
                 {
-                    Id = x.id,
+                    Id = (int)x.id,
                     SessionId = x.session_id ?? 0,
                     Timestamp = x.timestamp,
                     Lat = x.lat,
@@ -1012,6 +1086,7 @@ namespace SignalTracker.Controllers
                     Network = x.network,
                     Provider = x.m_alpha_short ?? x.m_alpha_long,
                     Band = x.band,
+                    BandSheetName = string.IsNullOrWhiteSpace(x.band) ? "Band" : x.band,
                     Pci = x.pci,
                     Rsrp = x.rsrp,
                     Rsrq = x.rsrq,
@@ -1032,15 +1107,24 @@ namespace SignalTracker.Controllers
                 })
                 .ToListAsync(HttpContext.RequestAborted);
 
-            foreach (var row in rows)
+            foreach (var row in resultRows)
             {
                 if (string.IsNullOrWhiteSpace(row.Ta))
                     row.Ta = ExtractPuschTxFromPrimaryCellInfo(row.Primary);
 
+                if (string.IsNullOrWhiteSpace(row.NodeBId) && !string.IsNullOrWhiteSpace(row.CellId))
+                {
+                    var digits = Regex.Match(row.CellId, @"\d+").Value;
+                    if (long.TryParse(digits, out var cidVal) && cidVal > 256)
+                    {
+                        row.NodeBId = (cidVal >> 8).ToString();
+                    }
+                }
+
                 row.BandSheetName = ToBandSheetName(row.Band, row.Network);
             }
 
-            return rows;
+            return resultRows;
         }
 
         private static string? ExtractPuschTxFromPrimaryCellInfo(string? primaryCellInfo)
@@ -1225,7 +1309,10 @@ namespace SignalTracker.Controllers
             workbook.Sheets.Add(BuildSiteSummarySheet(projectName, sessionIds, rows, siteRows));
 
             var bandGroups = rows
-                .GroupBy(x => string.IsNullOrWhiteSpace(x.BandSheetName) ? "Unknown Band" : x.BandSheetName)
+                .Where(x => !string.IsNullOrWhiteSpace(x.BandSheetName) &&
+                            !x.BandSheetName.Equals("Unknown Band", StringComparison.OrdinalIgnoreCase) &&
+                            !x.BandSheetName.Equals("Unknown", StringComparison.OrdinalIgnoreCase))
+                .GroupBy(x => x.BandSheetName)
                 .OrderBy(x => BandSortKey(x.Key), StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
@@ -1334,175 +1421,260 @@ namespace SignalTracker.Controllers
             IReadOnlyDictionary<string, byte[]?> imageBytesByUrl,
             ReportThresholdConfig thresholds)
         {
-            // 15 columns total:
-            // Cols 0..5 (A-F): 6 cells for Left Image
-            // Cols 6..8 (G-I): 3 cells gap between image columns
-            // Cols 9..14 (J-O): 6 cells for Right Image
             var columnWidths = new double[15];
             for (int c = 0; c < 15; c++)
-            {
-                columnWidths[c] = 13.5; // ~100px per cell
-            }
+                columnWidths[c] = 13.5; // ~100 px per cell
 
-            var sheet = new XlsxSheet(bandName)
-            {
-                ColumnWidths = columnWidths
-            };
+            var sheet = new XlsxSheet(bandName) { ColumnWidths = columnWidths };
 
-            const int colIndexLeft = 0;   // Column A (spans A-F: 6 cells)
-            const int colIndexRight = 9;  // Column J (spans J-O: 6 cells)
-            const int imageCellSpan = 6;  // Spans 6 cells horizontally
+            const int colLeft    = 0;  // A – left map image anchor
+            const int colRight   = 9;  // J – right map image anchor
+            const int cellSpan   = 6;  // each image spans 6 columns
 
-            // 6 columns * ~100px * 9525 EMU/px = 5,715,000 EMUs
-            const int maxWidthEmu = 5715000; 
+            // Decrease max image width to make images narrower as requested
+            const int maxWidthEmu = 3_619_500; // ~380 px wide (~4 Excel columns)
 
             var primarySessionId = bandRows.Select(x => x.SessionId).FirstOrDefault(x => x > 0);
 
-            // Filter to only those headers that successfully returned an image
             var validImages = ImageHeaders
-                .Select(header => new { Header = header, Url = BuildImageUrl(primarySessionId, header) })
-                .Where(x => imageBytesByUrl.TryGetValue(x.Url, out var bytes) && bytes != null)
+                .Select(header => new
+                {
+                    Header = header,
+                    Bytes = TryResolveMapImage(imageBytesByUrl, primarySessionId, header)
+                })
+                .Where(x => x.Bytes != null && x.Bytes.Length > 0)
                 .ToList();
 
-            // Process images in chunks of 2 for side-by-side layout
             for (int i = 0; i < validImages.Count; i += 2)
             {
-                var leftItem = validImages[i];
+                var leftItem  = validImages[i];
                 var rightItem = (i + 1 < validImages.Count) ? validImages[i + 1] : null;
 
-                // 1. Create Title Row for the plots
+                // ── 1. Title row ──────────────────────────────────────────────────────
                 var titleRow = new XlsxRow(22);
-                
-                // Left plot title at Col 0 (A)
-                titleRow.Cells.Add(XlsxCell.Text($"{bandName} - {leftItem.Header} Plot", 4));
-                for (int c = 1; c < 6; c++) // Empty cells B..F
-                {
-                    titleRow.Cells.Add(XlsxCell.Text(""));
-                }
-
-                // 3 Gap columns (G, H, I)
-                for (int c = 6; c < 9; c++)
-                {
-                    titleRow.Cells.Add(XlsxCell.Text(""));
-                }
-
-                // Right plot title at Col 9 (J)
+                titleRow.Cells.Add(XlsxCell.Text($"{bandName} - {leftItem.Header} Plot", 4)); // col 0
+                for (int c = 1; c < 9; c++) titleRow.Cells.Add(XlsxCell.Text(""));            // cols 1-8
                 if (rightItem != null)
                 {
-                    titleRow.Cells.Add(XlsxCell.Text($"{bandName} - {rightItem.Header} Plot", 4));
-                    for (int c = 10; c < 15; c++) // Empty cells K..O
-                    {
-                        titleRow.Cells.Add(XlsxCell.Text(""));
-                    }
+                    titleRow.Cells.Add(XlsxCell.Text($"{bandName} - {rightItem.Header} Plot", 4)); // col 9
+                    for (int c = 10; c < 15; c++) titleRow.Cells.Add(XlsxCell.Text(""));           // cols 10-14
                 }
-                
                 sheet.Rows.Add(titleRow);
 
-                // 2. Prepare Images and Calculate Row Height
-                var leftBytes = imageBytesByUrl[leftItem.Url]!;
-                var leftSize = ScaleToEmu(ReadPngSizePx(leftBytes), maxWidthEmu);
-                double maxRowHeightPts = leftSize.HeightEmu / 12700.0; // Convert EMU to Points
+                // ── 2. Resolve legend photo & overlay onto map image ──────────────────
+                var leftRawBytes    = leftItem.Bytes!;
+                var leftLegendBytes = TryResolveLegendPhoto(imageBytesByUrl, primarySessionId, leftItem.Header, allRows, thresholds);
+                var leftBytes       = OverlayLegendOnMap(leftRawBytes, leftLegendBytes);
+                var leftSize        = ScaleToEmu(ReadPngSizePx(leftBytes), maxWidthEmu);
 
                 byte[]? rightBytes = null;
                 (int WidthEmu, int HeightEmu) rightSize = (0, 0);
-
                 if (rightItem != null)
                 {
-                    rightBytes = imageBytesByUrl[rightItem.Url]!;
-                    rightSize = ScaleToEmu(ReadPngSizePx(rightBytes), maxWidthEmu);
-                    double rightPts = rightSize.HeightEmu / 12700.0;
-                    
-                    if (rightPts > maxRowHeightPts)
-                    {
-                        maxRowHeightPts = rightPts; // Fit tallest image
-                    }
+                    var rightRawBytes    = rightItem.Bytes!;
+                    var rightLegendBytes = TryResolveLegendPhoto(imageBytesByUrl, primarySessionId, rightItem.Header, allRows, thresholds);
+                    rightBytes           = OverlayLegendOnMap(rightRawBytes, rightLegendBytes);
+                    rightSize            = ScaleToEmu(ReadPngSizePx(rightBytes), maxWidthEmu);
                 }
 
-                if (maxRowHeightPts > 390.0)
-                {
-                    maxRowHeightPts = 390.0; // Cap to max row height limit
-                }
+                // ── 3. Image row (legend panel sits at bottom-left outside map boundary) ─
+                double rowHeightPts = leftSize.HeightEmu / 12700.0;
+                if (rightSize.HeightEmu > 0)
+                    rowHeightPts = Math.Max(rowHeightPts, rightSize.HeightEmu / 12700.0);
+                if (rowHeightPts > 550.0) rowHeightPts = 550.0;
+                if (rowHeightPts < 220.0) rowHeightPts = 220.0;
 
-                // 3. Add the Image Row
-                var imageRowIndex0 = sheet.Rows.Count;
-                sheet.Rows.Add(new XlsxRow(maxRowHeightPts)); // Tall row for charts
+                var imageRowIdx = sheet.Rows.Count;
+                var imageRow    = new XlsxRow(rowHeightPts);
+                for (int c = 0; c < 15; c++) imageRow.Cells.Add(XlsxCell.Text(""));
+                sheet.Rows.Add(imageRow);
 
-                // Embed Left Plot Image (spanning A-F: 6 cells) - NO OVERLAP
-                sheet.Images.Add(new XlsxImage(imageRowIndex0, colIndexLeft, leftBytes, leftSize.WidthEmu, leftSize.HeightEmu, cellSpanCols: imageCellSpan));
+                // Left map image (cols A-F, 6 cells)
+                sheet.Images.Add(new XlsxImage(imageRowIdx, colLeft, leftBytes,
+                    leftSize.WidthEmu, leftSize.HeightEmu, cellSpanCols: cellSpan));
 
-                // Embed Right Plot Image (spanning J-O: 6 cells) - NO OVERLAP
+                // Right map image (cols J-O, 6 cells)
                 if (rightBytes != null)
-                {
-                    sheet.Images.Add(new XlsxImage(imageRowIndex0, colIndexRight, rightBytes, rightSize.WidthEmu, rightSize.HeightEmu, cellSpanCols: imageCellSpan));
-                }
+                    sheet.Images.Add(new XlsxImage(imageRowIdx, colRight, rightBytes,
+                        rightSize.WidthEmu, rightSize.HeightEmu, cellSpanCols: cellSpan));
 
-                // 4. Add "Legend" Section Header Row directly under each plot image
-                var legendTitleRow = new XlsxRow(18);
-                legendTitleRow.Cells.Add(XlsxCell.Text("Legend", 4));
-                for (int c = 1; c < 6; c++) legendTitleRow.Cells.Add(XlsxCell.Text(""));
-                for (int c = 6; c < 9; c++) legendTitleRow.Cells.Add(XlsxCell.Text(""));
-
-                if (rightItem != null)
-                {
-                    legendTitleRow.Cells.Add(XlsxCell.Text("Legend", 4));
-                    for (int c = 10; c < 15; c++) legendTitleRow.Cells.Add(XlsxCell.Text(""));
-                }
-                sheet.Rows.Add(legendTitleRow);
-
-                // 5. Add Compact Legend Table directly under each plot image
-                var leftStats = CalculateLegendStatistics(allRows, leftItem.Header, thresholds);
-                var rightStats = rightItem != null ? CalculateLegendStatistics(allRows, rightItem.Header, thresholds) : null;
-                bool isLeftEarfcn = string.Equals(leftItem.Header, "EARFCN", StringComparison.OrdinalIgnoreCase);
-                bool isRightEarfcn = rightItem != null && string.Equals(rightItem.Header, "EARFCN", StringComparison.OrdinalIgnoreCase);
-
-                int maxRows = Math.Max(leftStats.Count, rightStats?.Count ?? 0);
-                for (int s = 0; s < maxRows; s++)
-                {
-                    var statRowIndex0 = sheet.Rows.Count;
-                    var statRow = new XlsxRow(16);
-
-                    // Left plot legend row: Color Swatch + Compact text "Range (Count : Percentage%)"
-                    if (s < leftStats.Count)
-                    {
-                        var ls = leftStats[s];
-                        var leftTextDisplay = isLeftEarfcn ? ls.Range.Display : ls.Range.RangeOnlyDisplay;
-                        statRow.Cells.Add(XlsxCell.Text("", 3)); // Color swatch PNG image
-                        statRow.Cells.Add(XlsxCell.Text($"{leftTextDisplay} ({ls.Count} : {ls.Percentage:0.00}%)", 3));
-                        for (int c = 2; c < 6; c++) statRow.Cells.Add(XlsxCell.Text(""));
-
-                        var swatch = GenerateColorSwatchPng(ls.Range.ColorHex);
-                        sheet.Images.Add(new XlsxImage(statRowIndex0, colIndexLeft, swatch, widthEmu: 180000, heightEmu: 120000, cellSpanCols: 1));
-                    }
-                    else
-                    {
-                        for (int c = 0; c < 6; c++) statRow.Cells.Add(XlsxCell.Text(""));
-                    }
-
-                    // 3 Gap columns (G, H, I)
-                    for (int c = 6; c < 9; c++) statRow.Cells.Add(XlsxCell.Text(""));
-
-                    // Right plot legend row: Color Swatch + Compact text "Range (Count : Percentage%)"
-                    if (rightStats != null && s < rightStats.Count)
-                    {
-                        var rs = rightStats[s];
-                        var rightTextDisplay = isRightEarfcn ? rs.Range.Display : rs.Range.RangeOnlyDisplay;
-                        statRow.Cells.Add(XlsxCell.Text("", 3)); // Color swatch PNG image
-                        statRow.Cells.Add(XlsxCell.Text($"{rightTextDisplay} ({rs.Count} : {rs.Percentage:0.00}%)", 3));
-                        for (int c = 10; c < 15; c++) statRow.Cells.Add(XlsxCell.Text(""));
-
-                        var swatch = GenerateColorSwatchPng(rs.Range.ColorHex);
-                        sheet.Images.Add(new XlsxImage(statRowIndex0, colIndexRight, swatch, widthEmu: 180000, heightEmu: 120000, cellSpanCols: 1));
-                    }
-
-                    sheet.Rows.Add(statRow);
-                }
-
-                // 6. Blank spacer rows before next plot pair
+                // ── 4. Blank spacer rows ──────────────────────────────────────────────
                 sheet.Rows.Add(XlsxRow.Blank());
                 sheet.Rows.Add(XlsxRow.Blank());
             }
 
             return sheet;
+        }
+
+        private static byte[]? TryResolveMapImage(
+            IReadOnlyDictionary<string, byte[]?> imageBytesByUrl,
+            int primarySessionId,
+            string header)
+        {
+            var headerUpper = header.ToUpperInvariant();
+            var headerLower = header.ToLowerInvariant();
+
+            var candidateKeys = new[]
+            {
+                BuildImageUrl(primarySessionId, header),
+                $"{ImageBaseUrl}/{primarySessionId}_{headerUpper}.png",
+                $"{ImageBaseUrl}/{primarySessionId}_{headerLower}.png",
+                $"{ImageBaseUrl}/0_{headerUpper}.png",
+                $"{ImageBaseUrl}/0_{headerLower}.png",
+                BuildImageUrl(0, header),
+                headerUpper,
+                headerLower,
+                $"MAP_{headerUpper}",
+                $"MAP_{headerLower}"
+            };
+
+            foreach (var key in candidateKeys)
+            {
+                if (imageBytesByUrl.TryGetValue(key, out var b) && b != null && b.Length > 0)
+                    return b;
+            }
+
+            var altHeader = headerUpper switch
+            {
+                "CI" => "CELL_ID",
+                "CELL_ID" => "CI",
+                _ => null
+            };
+
+            if (altHeader != null)
+            {
+                var altKeys = new[]
+                {
+                    BuildImageUrl(primarySessionId, altHeader),
+                    $"{ImageBaseUrl}/{primarySessionId}_{altHeader}.png",
+                    $"{ImageBaseUrl}/0_{altHeader}.png",
+                    BuildImageUrl(0, altHeader),
+                    altHeader,
+                    $"MAP_{altHeader}"
+                };
+                foreach (var key in altKeys)
+                {
+                    if (imageBytesByUrl.TryGetValue(key, out var b) && b != null && b.Length > 0)
+                        return b;
+                }
+            }
+
+            foreach (var kvp in imageBytesByUrl)
+            {
+                if (kvp.Value == null || kvp.Value.Length == 0) continue;
+                if (kvp.Key.Contains("legend", StringComparison.OrdinalIgnoreCase)) continue;
+
+                if (kvp.Key.Equals(headerUpper, StringComparison.OrdinalIgnoreCase) ||
+                    kvp.Key.EndsWith($"_{headerUpper}.png", StringComparison.OrdinalIgnoreCase) ||
+                    kvp.Key.EndsWith($"_{headerUpper}", StringComparison.OrdinalIgnoreCase) ||
+                    kvp.Key.EndsWith($"/{headerUpper}.png", StringComparison.OrdinalIgnoreCase) ||
+                    (altHeader != null && (
+                        kvp.Key.Equals(altHeader, StringComparison.OrdinalIgnoreCase) ||
+                        kvp.Key.EndsWith($"_{altHeader}.png", StringComparison.OrdinalIgnoreCase) ||
+                        kvp.Key.EndsWith($"_{altHeader}", StringComparison.OrdinalIgnoreCase) ||
+                        kvp.Key.EndsWith($"/{altHeader}.png", StringComparison.OrdinalIgnoreCase))))
+                {
+                    return kvp.Value;
+                }
+            }
+
+            return null;
+        }
+
+        private static byte[] TryResolveLegendPhoto(
+            IReadOnlyDictionary<string, byte[]?> imageBytesByUrl,
+            int primarySessionId,
+            string header,
+            List<WalkTestLogRow> allRows,
+            ReportThresholdConfig thresholds)
+        {
+            var headerUpper = header.ToUpperInvariant();
+            var headerLower = header.ToLowerInvariant();
+
+            var candidateKeys = new[]
+            {
+                $"LEGEND_{headerUpper}",
+                $"{headerUpper}_LEGEND",
+                $"LEGEND_{headerLower}",
+                $"{headerLower}_LEGEND",
+                "GLOBAL_LEGEND",
+                "LEGEND"
+            };
+
+            foreach (var key in candidateKeys)
+            {
+                if (imageBytesByUrl.TryGetValue(key, out var b) && b != null && b.Length > 0)
+                    return b;
+            }
+
+            foreach (var kvp in imageBytesByUrl)
+            {
+                if (kvp.Value == null || kvp.Value.Length == 0) continue;
+                if (!kvp.Key.Contains("legend", StringComparison.OrdinalIgnoreCase)) continue;
+
+                if (kvp.Key.Contains(headerUpper, StringComparison.OrdinalIgnoreCase))
+                {
+                    return kvp.Value;
+                }
+            }
+
+            return GenerateLegendPng(header, allRows, thresholds);
+        }
+
+        private static byte[] OverlayLegendOnMap(byte[] mapBytes, byte[]? legendBytes)
+        {
+            if (legendBytes == null || legendBytes.Length == 0)
+                return mapBytes;
+
+            try
+            {
+                using var mapImage = Image.Load<Rgba32>(mapBytes);
+                using var legendImage = Image.Load<Rgba32>(legendBytes);
+
+                int margin = 16;
+
+                int targetWidth = Math.Max(420, (int)(mapImage.Width * 0.45));
+                if (targetWidth > mapImage.Width - margin * 2)
+                    targetWidth = mapImage.Width - margin * 2;
+
+                if (legendImage.Width != targetWidth)
+                {
+                    double scale = (double)targetWidth / legendImage.Width;
+                    int newW = targetWidth;
+                    int newH = Math.Max(1, (int)(legendImage.Height * scale));
+                    legendImage.Mutate(ctx => ctx.Resize(newW, newH));
+                }
+
+                int legendPanelHeight = legendImage.Height + margin * 2;
+                int combinedWidth = mapImage.Width;
+                int combinedHeight = mapImage.Height + legendPanelHeight;
+
+                using var canvas = new Image<Rgba32>(combinedWidth, combinedHeight);
+                var white = new Rgba32(255, 255, 255, 255);
+
+                canvas.ProcessPixelRows(accessor =>
+                {
+                    for (int y = 0; y < accessor.Height; y++)
+                    {
+                        var row = accessor.GetRowSpan(y);
+                        row.Fill(white);
+                    }
+                });
+
+                canvas.Mutate(ctx => ctx.DrawImage(mapImage, new Point(0, 0), 1.0f));
+
+                int legendX = margin;
+                int legendY = mapImage.Height + margin;
+                canvas.Mutate(ctx => ctx.DrawImage(legendImage, new Point(legendX, legendY), 1.0f));
+
+                using var ms = new MemoryStream();
+                canvas.SaveAsPng(ms);
+                return ms.ToArray();
+            }
+            catch
+            {
+                return mapBytes;
+            }
         }
 
         private sealed class LegendStatRow
@@ -1840,48 +2012,48 @@ namespace SignalTracker.Controllers
                     Source = "Hardcoded",
                     Rsrp = new List<ThresholdRange>
                     {
-                        new("",-75,0,"#006400"),
-                        new("",-85,-75,"#92D050"),
-                        new("",-95,-85,"#95D5F5"),
-                        new("",-105,-95,"#0000FF"),
-                        new("",-115,-105,"#FFFF00"),
-                        new("",-140,-115,"#FF0000")
+                        new("-75 to 0",-75,0,"#006400"),
+                        new("-85 to -75",-85,-75,"#92D050"),
+                        new("-95 to -85",-95,-85,"#95D5F5"),
+                        new("-105 to -95",-105,-95,"#0000FF"),
+                        new("-115 to -105",-115,-105,"#FFFF00"),
+                        new("-140 to -115",-140,-115,"#FF0000")
                     },
                     Rsrq = new List<ThresholdRange>
                     {
-                        new("",-5,0,"#006400"),
-                        new("",-10,-5,"#92D050"),
-                        new("",-15,-10,"#95D5F5"),
-                        new("",-20,-15,"#0000FF"),
-                        new("",-25,-20,"#FFFF00"),
-                        new("",-30,-25,"#FF0000")
+                        new("-5 to 0",-5,0,"#006400"),
+                        new("-10 to -5",-10,-5,"#92D050"),
+                        new("-15 to -10",-15,-10,"#95D5F5"),
+                        new("-20 to -15",-20,-15,"#0000FF"),
+                        new("-25 to -20",-25,-20,"#FFFF00"),
+                        new("-30 to -25",-30,-25,"#FF0000")
                     },
                     Sinr = new List<ThresholdRange>
                     {
-                        new("",25,40,"#006400"),
-                        new("",15,25,"#92D050"),
-                        new("",10,15,"#95D5F5"),
-                        new("",5,10,"#0000FF"),
-                        new("",0,5,"#FFFF00"),
-                        new("",-20,0,"#FF0000")
+                        new("25 to 40",25,40,"#006400"),
+                        new("15 to 25",15,25,"#92D050"),
+                        new("10 to 15",10,15,"#95D5F5"),
+                        new("5 to 10",5,10,"#0000FF"),
+                        new("0 to 5",0,5,"#FFFF00"),
+                        new("-20 to 0",-20,0,"#FF0000")
                     },
                     DlTpt = new List<ThresholdRange>
                     {
-                        new("",100,1000,"#006400"),
-                        new("",50,100,"#92D050"),
-                        new("",20,50,"#95D5F5"),
-                        new("",10,20,"#0000FF"),
-                        new("",5,10,"#FFFF00"),
-                        new("",0,5,"#FF0000")
+                        new("100 to 1000",100,1000,"#006400"),
+                        new("50 to 100",50,100,"#92D050"),
+                        new("20 to 50",20,50,"#95D5F5"),
+                        new("10 to 20",10,20,"#0000FF"),
+                        new("5 to 10",5,10,"#FFFF00"),
+                        new("0 to 5",0,5,"#FF0000")
                     },
                     UlTpt = new List<ThresholdRange>
                     {
-                        new("",30,1000,"#006400"),
-                        new("",15,30,"#92D050"),
-                        new("",10,15,"#95D5F5"),
-                        new("",5,10,"#0000FF"),
-                        new("",1,5,"#FFFF00"),
-                        new("",0,1,"#FF0000")
+                        new("30 to 1000",30,1000,"#006400"),
+                        new("15 to 30",15,30,"#92D050"),
+                        new("10 to 15",10,15,"#95D5F5"),
+                        new("5 to 10",5,10,"#0000FF"),
+                        new("1 to 5",1,5,"#FFFF00"),
+                        new("0 to 1",0,1,"#FF0000")
                     },
                     Earfcn = new List<ThresholdRange>
                     {
@@ -1893,12 +2065,12 @@ namespace SignalTracker.Controllers
                     },
                     Bler = new List<ThresholdRange>
                     {
-                        new("",0,1,"#006400") { ValueMatch="< 1%" },
-                        new("",1,3,"#92D050") { ValueMatch="1% - 3%" },
-                        new("",3,5,"#95D5F5") { ValueMatch="3% - 5%" },
-                        new("",5,10,"#0000FF") { ValueMatch="5% - 10%" },
-                        new("",10,15,"#FFFF00") { ValueMatch="10% - 15%" },
-                        new("",15,100,"#FF0000") { ValueMatch="> 15%" }
+                        new("0% - 1%",0,1,"#006400") { ValueMatch="< 1%" },
+                        new("1% - 3%",1,3,"#92D050") { ValueMatch="1% - 3%" },
+                        new("3% - 5%",3,5,"#95D5F5") { ValueMatch="3% - 5%" },
+                        new("5% - 10%",5,10,"#0000FF") { ValueMatch="5% - 10%" },
+                        new("10% - 15%",10,15,"#FFFF00") { ValueMatch="10% - 15%" },
+                        new("> 15%",15,100,"#FF0000") { ValueMatch="> 15%" }
                     },
                     VolteCall = new List<ThresholdRange>
                     {
@@ -1907,11 +2079,11 @@ namespace SignalTracker.Controllers
                     },
                     PuschTx = new List<ThresholdRange>
                     {
-                        new("",21,31,"#FF0000"),
-                        new("",16,21,"#FFFF00"),
-                        new("",9,16,"#0000FF"),
-                        new("",1,9,"#95D5F5"),
-                        new("",-50,1,"#006400")
+                        new("<= 1 dBm",-50,1,"#006400"),
+                        new("1 to 9 dBm",1,9,"#95D5F5"),
+                        new("9 to 16 dBm",9,16,"#0000FF"),
+                        new("16 to 21 dBm",16,21,"#FFFF00"),
+                        new("> 21 dBm",21,35,"#FF0000")
                     }
                 };
             }
@@ -2045,53 +2217,199 @@ namespace SignalTracker.Controllers
             return (width, height);
         }
 
-        /// <summary>
-        /// Generates a clean color-coded legend PNG graphic in memory if no pre-generated legend image exists on the server.
-        /// </summary>
-        private static byte[] GenerateLegendPng(string header)
+        private static byte[] ResolveLegendImageBytes(
+            string header,
+            List<WalkTestLogRow> bandRows,
+            ReportThresholdConfig thresholds,
+            IReadOnlyDictionary<string, byte[]?> imageBytesByUrl,
+            long primarySessionId)
         {
-            const int width = 240;
-            const int height = 150;
-            using var image = new SixLabors.ImageSharp.Image<SixLabors.ImageSharp.PixelFormats.Rgba32>(width, height);
+            string keyZip = "LEGEND_" + header.ToUpperInvariant();
+            if (imageBytesByUrl.TryGetValue(keyZip, out var b1) && b1 != null && b1.Length > 0)
+                return b1;
 
-            var bgColor = new SixLabors.ImageSharp.PixelFormats.Rgba32(245, 247, 250);
-            var borderColor = new SixLabors.ImageSharp.PixelFormats.Rgba32(210, 215, 225);
-            var legendColors = GetLegendColorsForHeader(header);
+            string url1 = BuildLegendImageUrl((int)primarySessionId, header);
+            if (imageBytesByUrl.TryGetValue(url1, out var b2) && b2 != null && b2.Length > 0)
+                return b2;
 
-            image.ProcessPixelRows(accessor =>
+            string url2 = BuildGlobalLegendImageUrl(header);
+            if (imageBytesByUrl.TryGetValue(url2, out var b3) && b3 != null && b3.Length > 0)
+                return b3;
+
+            return GenerateLegendPng(header);
+        }
+
+        /// <summary>
+        /// Generates a clean high-definition color-coded vector legend PNG graphic in memory (with Ranges, Count, & Percentage).
+        /// </summary>
+        private static byte[] GenerateLegendPng(
+            string header,
+            List<WalkTestLogRow>? allRows = null,
+            ReportThresholdConfig? thresholds = null)
+        {
+            thresholds ??= ReportThresholdConfig.Hardcoded();
+            allRows ??= new List<WalkTestLogRow>();
+
+            bool isUniqueValues = IsUniqueValueHeader(header);
+            bool isEarfcn = string.Equals(header, "EARFCN", StringComparison.OrdinalIgnoreCase);
+
+            var uniqueVals = isUniqueValues ? GetUniqueValuesForHeader(allRows, header) : null;
+            var stats = !isUniqueValues ? CalculateLegendStatistics(allRows, header, thresholds) : null;
+
+            var lines = new List<(string Label, Rgba32 Color)>();
+            if (isUniqueValues && uniqueVals != null)
             {
-                for (int y = 0; y < accessor.Height; y++)
+                var totalCount = allRows.Count;
+                var headerUpper = header.ToUpperInvariant().Trim();
+
+                for (int i = 0; i < uniqueVals.Count; i++)
                 {
-                    var row = accessor.GetRowSpan(y);
-                    for (int x = 0; x < row.Length; x++)
-                    {
-                        if (x == 0 || y == 0 || x == width - 1 || y == height - 1)
+                    var val = uniqueVals[i];
+                    int valCount = allRows.Count(r =>
+                        string.Equals(headerUpper switch
                         {
-                            row[x] = borderColor;
-                            continue;
-                        }
+                            "PCI" => r.Pci,
+                            "NODEB_ID" => r.NodeBId,
+                            _ => r.CellId
+                        }, val, StringComparison.OrdinalIgnoreCase));
 
-                        row[x] = bgColor;
-
-                        for (int i = 0; i < legendColors.Length; i++)
-                        {
-                            int boxTop = 15 + (i * 32);
-                            int boxBottom = boxTop + 22;
-                            int boxLeft = 15;
-                            int boxRight = 60;
-
-                            if (x >= boxLeft && x < boxRight && y >= boxTop && y < boxBottom)
-                            {
-                                row[x] = legendColors[i];
-                            }
-                        }
-                    }
+                    double pct = totalCount > 0 ? (valCount * 100.0 / totalCount) : 0;
+                    string lineLabel = $"{headerUpper} {val}  ({valCount} : {pct:0.00}%)";
+                    lines.Add((lineLabel, new Rgba32(80, 85, 95)));
                 }
-            });
 
+                if (lines.Count == 0)
+                {
+                    lines.Add(($"{headerUpper} Unique Values", new Rgba32(80, 85, 95)));
+                }
+            }
+            else if (stats != null && stats.Count > 0)
+            {
+                foreach (var stat in stats)
+                {
+                    var (r, g, b) = ParseHexColor(stat.Range.ColorHex);
+                    var rangeDisplay = isEarfcn ? stat.Range.Display : stat.Range.RangeOnlyDisplay;
+                    if (string.IsNullOrWhiteSpace(rangeDisplay)) rangeDisplay = stat.Range.Display;
+
+                    string label = $"{rangeDisplay}  ({stat.Count} : {stat.Percentage:0.00}%)";
+                    lines.Add((label, new Rgba32(r, g, b)));
+                }
+            }
+            else
+            {
+                var ranges = thresholds.GetRangesForHeader(header);
+                foreach (var r in ranges)
+                {
+                    var (red, green, blue) = ParseHexColor(r.ColorHex);
+                    var label = !string.IsNullOrWhiteSpace(r.Display) ? r.Display : r.RangeOnlyDisplay;
+                    lines.Add((label, new Rgba32(red, green, blue)));
+                }
+            }
+
+            int count = Math.Max(1, lines.Count);
+            const int boxW = 22;          // Large 22x14px color swatch box
+            const int boxH = 14;
+            const int spacing = 10;       // Spacing between rows
+            const int padding = 16;       // Card padding
+            const int textPadding = 12;   // Text padding after swatch
+            const int fontSize = 16;      // Large 16pt bold font
+            const int titleFontSize = 18; // Large 18pt bold title font
+            const int titleGap = 8;       // Gap under title
+
+            using var typeface = SKTypeface.FromFamilyName("Arial", SKFontStyleWeight.Bold, SKFontStyleWidth.Normal, SKFontStyleSlant.Upright);
+            using var font = new SKFont(typeface, fontSize) { Embolden = true };
+            using var titleFont = new SKFont(typeface, titleFontSize) { Embolden = true };
+            using var textPaint = new SKPaint { Color = new SKColor(15, 20, 30), IsAntialias = true, TextAlign = SKTextAlign.Left };
+            using var titlePaint = new SKPaint { Color = new SKColor(10, 40, 120), IsAntialias = true, TextAlign = SKTextAlign.Left };
+
+            var titleText = FormatLegendTitle(header);
+
+            float maxTextWidth = 0;
+            foreach (var item in lines)
+            {
+                var w = textPaint.MeasureText(item.Label ?? "");
+                if (w > maxTextWidth) maxTextWidth = w;
+            }
+            var titleWidth = titlePaint.MeasureText(titleText);
+
+            int width = Math.Max(420, padding * 2 + (isUniqueValues ? 0 : boxW + textPadding) + (int)Math.Ceiling(maxTextWidth) + 16);
+            width = Math.Max(width, padding * 2 + (int)Math.Ceiling(titleWidth) + 16);
+
+            int titleBlockHeight = titleFontSize + titleGap + 6;
+            int height = padding + titleBlockHeight + count * boxH + (count - 1) * spacing + padding;
+
+            using var surface = SKSurface.Create(new SKImageInfo(width, height, SKColorType.Rgba8888, SKAlphaType.Premul));
+            var canvas = surface.Canvas;
+            canvas.Clear(new SKColor(255, 255, 255, 255));
+
+            using var borderPaint = new SKPaint
+            {
+                Color = new SKColor(170, 175, 185),
+                Style = SKPaintStyle.Stroke,
+                StrokeWidth = 2,
+                IsAntialias = true
+            };
+            canvas.DrawRect(1.0f, 1.0f, width - 2, height - 2, borderPaint);
+
+            // Title Header
+            var titleBaselineY = padding + titleFontSize;
+            canvas.DrawText(titleText, padding, titleBaselineY, titleFont, titlePaint);
+
+            using var separatorPaint = new SKPaint
+            {
+                Color = new SKColor(190, 195, 205),
+                Style = SKPaintStyle.Stroke,
+                StrokeWidth = 2,
+                IsAntialias = true
+            };
+            var separatorY = titleBaselineY + titleGap;
+            canvas.DrawLine(padding, separatorY, width - padding, separatorY, separatorPaint);
+
+            int listTop = padding + titleBlockHeight;
+
+            for (int i = 0; i < lines.Count; i++)
+            {
+                var (label, color) = lines[i];
+                int boxTop = listTop + i * (boxH + spacing);
+
+                if (!isUniqueValues)
+                {
+                    using var boxFill = new SKPaint { Color = new SKColor(color.R, color.G, color.B), IsAntialias = true };
+                    var rect = new SKRect(padding, boxTop, padding + boxW, boxTop + boxH);
+                    canvas.DrawRect(rect, boxFill);
+                }
+
+                var textX = isUniqueValues ? padding : padding + boxW + textPadding;
+                var textY = boxTop + boxH - 1;
+                canvas.DrawText(label ?? "", textX, textY, font, textPaint);
+            }
+
+            using var snapshot = surface.Snapshot();
+            using var encoded = snapshot.Encode(SKEncodedImageFormat.Png, 100);
             using var ms = new MemoryStream();
-            image.SaveAsPng(ms);
+            encoded.SaveTo(ms);
             return ms.ToArray();
+        }
+
+        /// <summary>Human-friendly title shown at the top of a generated legend (e.g. "RSRP" -> "RSRP (dBm)").</summary>
+        private static string FormatLegendTitle(string header)
+        {
+            var h = (header ?? "").ToUpperInvariant().Trim();
+            return h switch
+            {
+                "RSRP" => "RSRP (dBm)",
+                "RSRQ" => "RSRQ (dB)",
+                "SINR" => "SINR (dB)",
+                "DL_THPT" => "DL Throughput (Mbps)",
+                "UL_THPT" => "UL Throughput (Mbps)",
+                "LTE_BLER" or "BLER" => "BLER (%)",
+                "VOLTE_CALL" or "VOLTE" => "VoLTE Call",
+                "PUSCH_TX" => "PUSCH Tx Power (dBm)",
+                "EARFCN" => "EARFCN / Band",
+                "CI" => "CI (Cell ID)",
+                "CELL_ID" => "Cell ID",
+                _ => string.IsNullOrWhiteSpace(header) ? "Legend" : header
+            };
         }
 
         private static SixLabors.ImageSharp.PixelFormats.Rgba32[] GetLegendColorsForHeader(string header)

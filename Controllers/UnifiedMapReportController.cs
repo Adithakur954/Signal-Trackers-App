@@ -101,7 +101,7 @@ namespace SignalTracker.Controllers
 
         private async Task<Dictionary<string, ReportLogo>> FetchMapImagesAsync(long sessionId)
         {
-            var headers = new[] { "BAND", "RSRP", "RSRQ", "SINR", "DL_THPT", "UL_THPT", "EARFCN", "LTE_BLER","PCI", "NODEB_ID", "VOLTE_CALL", "PUSCH_TX" };
+            var headers = new[] { "BAND", "RSRP", "RSRQ", "SINR", "DL_THPT", "UL_THPT", "EARFCN", "LTE_BLER","PCI", "NODEB_ID", "VOLTE_CALL","CI", "PUSCH_TX" };
 
             var downloadTasks = headers.Select(async header =>
             {
@@ -315,6 +315,23 @@ namespace SignalTracker.Controllers
 
             if (rows.Count == 0 && applyProjectPolygon && request.ProjectId > 0)
                 return await QueryReportRowsAsync(request, sessionIds, applyProjectPolygon: false);
+
+            foreach (var r in rows)
+            {
+                if (string.IsNullOrWhiteSpace(r.NodebId) ||
+                    r.NodebId.Equals("Unknown", StringComparison.OrdinalIgnoreCase) ||
+                    r.NodebId.Equals("N/A", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!string.IsNullOrWhiteSpace(r.CellId))
+                    {
+                        var digits = Regex.Match(r.CellId, @"\d+").Value;
+                        if (long.TryParse(digits, out var cidVal) && cidVal > 256)
+                        {
+                            r.NodebId = (cidVal >> 8).ToString();
+                        }
+                    }
+                }
+            }
 
             return rows;
         }
@@ -1693,7 +1710,7 @@ namespace SignalTracker.Controllers
 
             report.BarCharts.Add(BuildBarChart("Technology Distribution", orderedRows.Select(x => ClassifyTechnology(x.Network)), 10));
             report.BarCharts.Add(BuildBarChart("Operator Distribution", orderedRows.Select(x => CleanGroup(x.Provider, "Unknown")), 10));
-            report.BarCharts.Add(BuildBarChart("Band Distribution", orderedRows.Select(x => CleanGroup(x.Band, "Unknown")), 12));
+            report.BarCharts.Add(BuildBarChart("Band Distribution", orderedRows.Select(x => CleanGroup(x.Band, "")).Where(b => !string.IsNullOrWhiteSpace(b) && !b.Equals("Unknown", StringComparison.OrdinalIgnoreCase) && !b.Equals("Unknown Band", StringComparison.OrdinalIgnoreCase)), 12));
             report.BarCharts.Add(BuildBarChart("PCI Distribution", orderedRows.Select(x => CleanGroup(x.Pci, "Unknown")), 5));
             report.BarCharts.Add(BuildBarChart("NodeB ID Distribution", orderedRows.Select(x => CleanGroup(x.NodebId, "Unknown")), 8));
             report.BarCharts.Add(BuildBarChart("Cell ID Distribution", orderedRows.Select(x => CleanGroup(x.CellId, "Unknown")), 8));
@@ -1846,7 +1863,9 @@ namespace SignalTracker.Controllers
         private static TableData BuildNetworkSiteTable(List<UnifiedMapReportRow> rows)
         {
             var table = new TableData { Title = "Network Site Summary", Headers = new List<string> { "Band", "Operator", "NodeB ID", "Cell ID", "Samples" } };
-            var grouped = rows.GroupBy(x => new { Band = CleanGroup(x.Band, "Unknown"), Operator = CleanGroup(x.Provider, "Unknown"), Nodeb = CleanGroup(x.NodebId, "Unknown"), Cell = CleanGroup(x.CellId, CleanGroup(x.Pci, "Unknown")) }).Select(g => new { g.Key.Band, g.Key.Operator, g.Key.Nodeb, g.Key.Cell, Count = g.Count() }).OrderByDescending(x => x.Count).ThenBy(x => x.Operator).Take(32);
+            var grouped = rows.GroupBy(x => new { Band = CleanGroup(x.Band, ""), Operator = CleanGroup(x.Provider, "Unknown"), Nodeb = CleanGroup(x.NodebId, "Unknown"), Cell = CleanGroup(x.CellId, CleanGroup(x.Pci, "Unknown")) })
+                .Where(g => !string.IsNullOrWhiteSpace(g.Key.Band) && !g.Key.Band.Equals("Unknown", StringComparison.OrdinalIgnoreCase) && !g.Key.Band.Equals("Unknown Band", StringComparison.OrdinalIgnoreCase))
+                .Select(g => new { g.Key.Band, g.Key.Operator, g.Key.Nodeb, g.Key.Cell, Count = g.Count() }).OrderByDescending(x => x.Count).ThenBy(x => x.Operator).Take(32);
             foreach (var item in grouped) table.Rows.Add(new List<string> { item.Band, item.Operator, item.Nodeb, item.Cell, item.Count.ToString("N0", CultureInfo.InvariantCulture) });
             return table;
         }

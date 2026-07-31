@@ -84,8 +84,11 @@ namespace SignalTracker.Controllers
             // Tell the caller which bands were present in this zip (before any
             // BandFilter is applied) so they know what values are valid.
             var bandsPresent = rows
-                .Select(r => r.Band ?? "Unknown")
-                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Select(r => r.Band)
+                .Where(b => !string.IsNullOrWhiteSpace(b) &&
+                            !b.Equals("Unknown", StringComparison.OrdinalIgnoreCase) &&
+                            !b.Equals("Unknown Band", StringComparison.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)!
                 .OrderBy(b => b, StringComparer.OrdinalIgnoreCase)
                 .ToList();
             Response.Headers["X-Available-Bands"] = string.Join(",", bandsPresent);
@@ -335,9 +338,15 @@ namespace SignalTracker.Controllers
 
         private static List<object> BuildBandSummary(List<UnifiedMapReportRow> rows)
         {
-            var total = rows.Count;
-            return rows
-                .GroupBy(r => r.Band ?? "Unknown", StringComparer.OrdinalIgnoreCase)
+            var validRows = rows
+                .Where(r => !string.IsNullOrWhiteSpace(r.Band) &&
+                            !r.Band.Equals("Unknown", StringComparison.OrdinalIgnoreCase) &&
+                            !r.Band.Equals("Unknown Band", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            var total = validRows.Count;
+            return validRows
+                .GroupBy(r => r.Band!, StringComparer.OrdinalIgnoreCase)
                 .Select(g => new
                 {
                     Band = g.Key,
@@ -620,7 +629,7 @@ namespace SignalTracker.Controllers
                 Jitter = FindColumn(headers, "jitter"),
                 Latency = FindColumn(headers, "latency"),
                 PacketLoss = FindColumn(headers, "packet loss"),
-                CellId = FindColumn(headers, "cell id"),
+                CellId = FindColumn(headers, "cell id", "cell_id", "cellid", "ci", "cid", "cell identity", "cell_index"),
                 Pci = FindColumn(headers, "pci / psc"),
                 Rsrp = FindColumn(headers, "ssrsrp"),
                 Rsrq = FindColumn(headers, "ssrsrq"),
@@ -634,7 +643,13 @@ namespace SignalTracker.Controllers
                 AlphaLong = FindColumn(headers, "alpha long"),
                 AlphaShort = FindColumn(headers, "alpha short"),
                 Rssi = FindColumn(headers, "rssi"),
-                NodebId = FindColumn(headers, "nodeb id"),
+                NodebId = FindColumn(headers,
+                    "nodeb id", "nodeb_id", "node_b_id", "nodeb", "node_b",
+                    "enodeb id", "enodeb_id", "enodebid", "enodeb",
+                    "enb id", "enb_id", "enbid", "enb",
+                    "gnodeb id", "gnodeb_id", "gnodebid", "gnodeb",
+                    "gnb id", "gnb_id", "gnbid", "gnb",
+                    "site id", "site_id", "siteid"),
                 Apps = FindColumn(headers, "running apps"),
                 PuschTx = FindColumn(headers, "pusch tx"),
                 Primary = FindColumnByName(headers, "primary"),
@@ -685,6 +700,30 @@ namespace SignalTracker.Controllers
             var provider = GetCol(cols, map.AlphaShort);
             if (string.IsNullOrWhiteSpace(provider)) provider = GetCol(cols, map.AlphaLong);
 
+            var band = GetCol(cols, map.Band);
+            var network = GetCol(cols, map.Network);
+            var earfcn = GetCol(cols, map.Earfcn);
+            var primaryCellInfo = GetCol(cols, map.PrimaryCellInfo);
+
+            var resolvedBand = ResolveZipReportBand(band, network, earfcn, primaryCellInfo);
+
+            var nodebId = GetCol(cols, map.NodebId);
+            var cellId = GetCol(cols, map.CellId);
+
+            if (string.IsNullOrWhiteSpace(nodebId) ||
+                nodebId.Equals("Unknown", StringComparison.OrdinalIgnoreCase) ||
+                nodebId.Equals("N/A", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!string.IsNullOrWhiteSpace(cellId))
+                {
+                    var digits = Regex.Match(cellId, @"\d+").Value;
+                    if (long.TryParse(digits, out var cidVal) && cidVal > 256)
+                    {
+                        nodebId = (cidVal >> 8).ToString();
+                    }
+                }
+            }
+
             return new UnifiedMapReportRow
             {
                 Id = nextId++,
@@ -692,9 +731,9 @@ namespace SignalTracker.Controllers
                 Timestamp = ts,
                 Lat = ParseFloat(GetCol(cols, map.Lat)),
                 Lon = ParseFloat(GetCol(cols, map.Lon)),
-                Network = GetCol(cols, map.Network),
+                Network = network,
                 Provider = CleanProvider(provider),
-                Band = GetCol(cols, map.Band),
+                Band = string.IsNullOrWhiteSpace(band) || band.Equals("NA", StringComparison.OrdinalIgnoreCase) || band.Equals("Unknown", StringComparison.OrdinalIgnoreCase) ? resolvedBand : band,
                 Pci = GetCol(cols, map.Pci),
                 Rssi = ParseFloat(GetCol(cols, map.Rssi)),
                 Rsrp = ClampKpi(ParseFloat(GetCol(cols, map.Rsrp)), -140, -44),
@@ -704,17 +743,95 @@ namespace SignalTracker.Controllers
                 Jitter = ParseFloat(GetCol(cols, map.Jitter)),
                 Latency = ParseFloat(GetCol(cols, map.Latency)),
                 PacketLoss = ParseFloat(GetCol(cols, map.PacketLoss)),
-                Earfcn = ParseIntSafe(GetCol(cols, map.Earfcn)),
+                Earfcn = ParseIntSafe(earfcn),
                 Bler = GetCol(cols, map.Bler),
                 VolteCall = ParseIntSafe(GetCol(cols, map.VolteCall)),
                 DlTpt = GetCol(cols, map.DlTpt),
                 UlTpt = GetCol(cols, map.UlTpt),
-                NodebId = GetCol(cols, map.NodebId),
+                NodebId = nodebId,
                 Apps = GetCol(cols, map.Apps),
                 IndoorOutdoor = GetCol(cols, map.IndoorOutdoor),
-                CellId = GetCol(cols, map.CellId),
+                CellId = cellId,
                 PuschTx = GetCol(cols, map.PuschTx)
             };
+        }
+
+        private static string? ResolveZipReportBand(string? band, string? network, string? earfcn, string? primaryCellInfo)
+        {
+            var value = (band ?? string.Empty).Trim();
+            if (!string.IsNullOrWhiteSpace(value) &&
+                !value.Equals("NA", StringComparison.OrdinalIgnoreCase) &&
+                !value.Equals("Unknown", StringComparison.OrdinalIgnoreCase) &&
+                !value.Equals("Unknown Band", StringComparison.OrdinalIgnoreCase) &&
+                !value.Equals("-1", StringComparison.OrdinalIgnoreCase))
+            {
+                return FormatZipBandName(value, network);
+            }
+
+            if (!string.IsNullOrWhiteSpace(primaryCellInfo))
+            {
+                var mBandsMatch = Regex.Match(primaryCellInfo, @"mBands=\[\s*(n?\d+)\s*\]", RegexOptions.IgnoreCase);
+                if (mBandsMatch.Success)
+                {
+                    return FormatZipBandName(mBandsMatch.Groups[1].Value, network);
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(earfcn) && int.TryParse(earfcn.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var earfcnVal))
+            {
+                var derived = EarfcnToZipBandName(earfcnVal, network);
+                if (!string.IsNullOrWhiteSpace(derived))
+                    return derived;
+            }
+
+            if (!string.IsNullOrWhiteSpace(network) && network.Contains("5G", StringComparison.OrdinalIgnoreCase))
+            {
+                return "n78";
+            }
+
+            return null;
+        }
+
+        private static string EarfcnToZipBandName(int earfcn, string? network)
+        {
+            if (earfcn is >= 0 and <= 599) return "B1";
+            if (earfcn is >= 600 and <= 1199) return "B2";
+            if (earfcn is >= 1200 and <= 1949) return "B3";
+            if (earfcn is >= 1950 and <= 2399) return "B4";
+            if (earfcn is >= 2400 and <= 2649) return "B5";
+            if (earfcn is >= 2750 and <= 3449) return "B7";
+            if (earfcn is >= 3450 and <= 3799) return "B8";
+            if (earfcn is >= 6150 and <= 6449) return "B20";
+            if (earfcn is >= 9210 and <= 9659) return "B28";
+            if (earfcn is >= 37750 and <= 38249) return "B38";
+            if (earfcn is >= 38650 and <= 39649) return "B40";
+            if (earfcn is >= 39650 and <= 41589) return "B41";
+
+            if (earfcn is >= 151600 and <= 160600) return "n28";
+            if (earfcn is >= 422000 and <= 434000) return "n40";
+            if (earfcn is >= 620000 and <= 653333) return "n78";
+
+            return string.Empty;
+        }
+
+        private static string FormatZipBandName(string value, string? network)
+        {
+            value = value.Replace("LTE", "", StringComparison.OrdinalIgnoreCase).Trim();
+            value = Regex.Replace(value, @"\s+", "");
+
+            if (Regex.IsMatch(value, @"^[BbNn]\d+[A-Za-z]?$"))
+                return value.StartsWith("n", StringComparison.OrdinalIgnoreCase)
+                    ? "n" + value[1..]
+                    : "B" + value[1..];
+
+            var match = Regex.Match(value, @"\d+");
+            if (match.Success)
+            {
+                bool is5g = !string.IsNullOrWhiteSpace(network) && network.Contains("5G", StringComparison.OrdinalIgnoreCase);
+                return is5g ? $"n{match.Value}" : $"B{match.Value}";
+            }
+
+            return value.Length <= 31 ? value : value[..31];
         }
 
         private static bool IsPrimaryRegisteredRow(List<string> cols, ColumnMap map)
