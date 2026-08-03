@@ -2859,6 +2859,9 @@ private static double? AsDouble(object? value)
 public class MapFilter1
 {
     public string session_ids { get; set; }
+    public string sessionIds { get; set; }
+    public string session_Ids { get; set; }
+    public string sessionId { get; set; }
     public int page { get; set; } = 1;
     public int limit { get; set; } = 20000;
     public string NetworkType { get; set; } = "ALL";
@@ -2873,10 +2876,13 @@ public class MapFilter1
 
     public List<long> GetSessionIds()
     {
-        if (string.IsNullOrWhiteSpace(session_ids))
+        var raw = new[] { session_ids, sessionIds, session_Ids, sessionId }
+            .FirstOrDefault(v => !string.IsNullOrWhiteSpace(v));
+
+        if (string.IsNullOrWhiteSpace(raw))
             return new List<long>();
 
-        return session_ids
+        return raw
             .Split(new[] { ',', ';', '|' }, StringSplitOptions.RemoveEmptyEntries)
             .Select(s => long.TryParse(s.Trim(), out long id) ? id : 0)
             .Where(id => id > 0)
@@ -2885,7 +2891,14 @@ public class MapFilter1
     }
 }
 [HttpGet, Route("GetNetworkLog")]
-public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
+public Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
+    => GetNetworkLogCore(filters);
+
+[HttpPost, Route("GetNetworkLog")]
+public Task<JsonResult> GetNetworkLogPost([FromBody] MapFilter1 filters)
+    => GetNetworkLogCore(filters);
+
+private async Task<JsonResult> GetNetworkLogCore(MapFilter1 filters)
 {
     var totalStopwatch = Stopwatch.StartNew();
     var sessionIds = filters?.GetSessionIds() ?? new List<long>();
@@ -7174,8 +7187,17 @@ private static string DetectTechnology(string? network)
 
 [HttpGet]
 [Route("GetIndoorOutdoorSessionAnalytics")]
-public async Task<IActionResult> GetIndoorOutdoorSessionAnalytics(
+public Task<IActionResult> GetIndoorOutdoorSessionAnalytics(
     [FromQuery] IndoorOutdoorSessionFilter filter)
+    => GetIndoorOutdoorSessionAnalyticsCore(filter);
+
+[HttpPost]
+[Route("GetIndoorOutdoorSessionAnalytics")]
+public Task<IActionResult> GetIndoorOutdoorSessionAnalyticsPost(
+    [FromBody] IndoorOutdoorSessionFilter filter)
+    => GetIndoorOutdoorSessionAnalyticsCore(filter);
+
+private async Task<IActionResult> GetIndoorOutdoorSessionAnalyticsCore(IndoorOutdoorSessionFilter filter)
 {
     try
     {
@@ -7184,13 +7206,21 @@ public async Task<IActionResult> GetIndoorOutdoorSessionAnalytics(
         // =============================
         // 1ï¸ VALIDATION
         // =============================
-        if (string.IsNullOrWhiteSpace(filter.SessionIds))
+        if (filter == null)
             return BadRequest("SessionIds are required");
 
-        var sessionIds = filter.SessionIds
-            .Split(',', StringSplitOptions.RemoveEmptyEntries)
-            .Select(int.Parse)
+        var rawSessionIds = filter.GetRawSessionIds();
+        if (string.IsNullOrWhiteSpace(rawSessionIds))
+            return BadRequest("SessionIds are required");
+
+        var sessionIds = rawSessionIds
+            .Split(new[] { ',', ';', '|' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(s => int.TryParse(s.Trim(), out var id) ? id : 0)
+            .Where(id => id > 0)
             .ToList();
+
+        if (sessionIds.Count == 0)
+            return BadRequest("Valid SessionIds are required");
 
         string? indoorFilter = filter.IndoorOutdoor?.Trim().ToUpper();
         string? operatorFilter = filter.Operator?.Trim().ToLower();
@@ -7198,7 +7228,7 @@ public async Task<IActionResult> GetIndoorOutdoorSessionAnalytics(
 
         var cacheKey = BuildMapViewCacheKey(
             "indoor-outdoor-session-analytics",
-            filter.SessionIds,
+            rawSessionIds,
             indoorFilter ?? "all",
             operatorFilter ?? "all",
             techFilter ?? "all");

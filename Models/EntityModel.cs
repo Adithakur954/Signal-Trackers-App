@@ -609,12 +609,22 @@ public class N78NeighbourDto
     }
 
 
-       public class IndoorOutdoorSessionFilter
+public class IndoorOutdoorSessionFilter
 {
     public string? IndoorOutdoor { get; set; }   // "INDOOR" or "OUTDOOR"
-    public string SessionIds { get; set; }      // "101,102,103"
+    public string? SessionIds { get; set; }      // "101,102,103"
+    public string? sessionIds { get; set; }
+    public string? session_ids { get; set; }
+    public string? session_Ids { get; set; }
+    public string? sessionId { get; set; }
     public string? Operator { get; set; }       // OPTIONAL (JIO / AIRTEL / VI)
     public string? Technology { get; set; }     // OPTIONAL (4G / 5G / NSA / SA)
+
+    public string? GetRawSessionIds()
+    {
+        return new[] { SessionIds, sessionIds, session_ids, session_Ids, sessionId }
+            .FirstOrDefault(v => !string.IsNullOrWhiteSpace(v));
+    }
 }
 
 
