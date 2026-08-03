@@ -2244,6 +2244,8 @@ public class AvailablePolygonsResponse
 
         private async Task EnsureSitePredictionNameColumnsAsync(DbConnection conn)
         {
+            await EnsureSitePredictionTextColumnAsync(conn, "site_prediction", "site");
+            await EnsureSitePredictionTextColumnAsync(conn, "site_prediction_optimized", "site");
             await EnsureSitePredictionTextColumnAsync(conn, "site_prediction", "site_name");
             await EnsureSitePredictionTextColumnAsync(conn, "site_prediction_optimized", "site_name");
         }
@@ -8208,6 +8210,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
     if (conn.State != System.Data.ConnectionState.Open)
         await conn.OpenAsync();
 
+    await EnsureSitePredictionNameColumnsAsync(conn);
     await EnsureSitePredictionCellIdColumnsAsync(conn);
 
     await using var tx = await conn.BeginTransactionAsync();
@@ -8252,8 +8255,8 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
         cmd.CommandText = sql;
         cmd.Transaction = tx;
 
-        Add(cmd, "@site",    ToInt(cols[idxSite]));
-        Add(cmd, "@sector",  ToInt(cols[idxSector]));
+        Add(cmd, "@site",    cols[idxSite].Trim());
+        Add(cmd, "@sector",  cols[idxSector].Trim());
         Add(cmd, "@cell_id", cols[idxCellId].Trim());
         Add(cmd, "@lon",     ToDouble(cols[idxLon]));
         Add(cmd, "@lat",     ToDouble(cols[idxLat]));
@@ -9559,11 +9562,11 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                         {mergedTxPowerExpr} AS maximum_transmission_power_of_resource,
                         COALESCE(spo.real_transmit_power_of_resource, sp.real_transmit_power_of_resource) AS real_transmit_power_of_resource,
                         COALESCE(spo.reference_signal_power, sp.reference_signal_power) AS reference_signal_power,
-                        COALESCE({optimizedCellSizeExpr}, {baselineCellSizeExpr}) AS cellsize,
-                        COALESCE(spo.frequency, sp.frequency) AS frequency,
+                        CONVERT(COALESCE({optimizedCellSizeExpr}, {baselineCellSizeExpr}) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS cellsize,
+                        CONVERT(COALESCE(spo.frequency, sp.frequency) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS frequency,
                         COALESCE(spo.band, sp.band) AS band,
-                        COALESCE({optimizedUplinkExpr}, {baselineUplinkExpr}) AS uplink_center_frequency,
-                        COALESCE({optimizedDownlinkExpr}, {baselineDownlinkExpr}) AS downlink_frequency,
+                        CONVERT(COALESCE({optimizedUplinkExpr}, {baselineUplinkExpr}) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS uplink_center_frequency,
+                        CONVERT(COALESCE({optimizedDownlinkExpr}, {baselineDownlinkExpr}) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS downlink_frequency,
                         COALESCE(spo.earfcn, sp.earfcn) AS earfcn,
                         CONVERT(p.provider USING utf8mb4) COLLATE utf8mb4_unicode_ci AS project_provider,
                         CONVERT(sp.cluster USING utf8mb4) COLLATE utf8mb4_unicode_ci AS original_cluster,
@@ -9617,7 +9620,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                         NULL AS optimized_id,
                         0 AS is_updated,
                         0 AS version,
-                        'original' AS status,
+                        CONVERT('original' USING utf8mb4) COLLATE utf8mb4_unicode_ci AS status,
                         NULL AS created_at,
                         NULL AS updated_at,
                         NULL AS updated_by,
@@ -9640,11 +9643,11 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                         {baselineTxPowerExpr} AS maximum_transmission_power_of_resource,
                         sp.real_transmit_power_of_resource,
                         sp.reference_signal_power,
-                        {baselineCellSizeExpr} AS cellsize,
-                        sp.frequency,
+                        CONVERT({baselineCellSizeExpr} USING utf8mb4) COLLATE utf8mb4_unicode_ci AS cellsize,
+                        CONVERT(sp.frequency USING utf8mb4) COLLATE utf8mb4_unicode_ci AS frequency,
                         sp.band,
-                        {baselineUplinkExpr} AS uplink_center_frequency,
-                        {baselineDownlinkExpr} AS downlink_frequency,
+                        CONVERT({baselineUplinkExpr} USING utf8mb4) COLLATE utf8mb4_unicode_ci AS uplink_center_frequency,
+                        CONVERT({baselineDownlinkExpr} USING utf8mb4) COLLATE utf8mb4_unicode_ci AS downlink_frequency,
                         sp.earfcn,
                         CONVERT(p.provider USING utf8mb4) COLLATE utf8mb4_unicode_ci AS project_provider,
                         CONVERT(sp.cluster USING utf8mb4) COLLATE utf8mb4_unicode_ci AS original_cluster,
@@ -9744,10 +9747,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                     row[r.GetName(i)] = await r.IsDBNullAsync(i) ? null : r.GetValue(i);
                 }
                 EnrichSitePredictionRow(row);
-                if (!HasCompleteSitePredictionIdentity(row))
-                {
-                    continue;
-                }
+                row["has_complete_identity"] = HasCompleteSitePredictionIdentity(row);
                 list.Add(row);
             }
 

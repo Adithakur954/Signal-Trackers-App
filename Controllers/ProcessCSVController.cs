@@ -2366,6 +2366,10 @@ public bool ProcessSitePredictionSheet(
     {
         EnsureVarcharColumn("site_prediction", "cell_id", "VARCHAR(64) NULL");
         EnsureVarcharColumn("site_prediction_optimized", "cell_id", "VARCHAR(64) NULL");
+        EnsureVarcharColumn("site_prediction", "site", "VARCHAR(255) NULL");
+        EnsureVarcharColumn("site_prediction_optimized", "site", "VARCHAR(255) NULL");
+        EnsureVarcharColumn("site_prediction", "site_name", "VARCHAR(255) NULL");
+        EnsureVarcharColumn("site_prediction_optimized", "site_name", "VARCHAR(255) NULL");
 
         using var reader = new StreamReader(filePath, Encoding.UTF8);
         var config = CreateLenientCsvConfiguration();
@@ -2457,8 +2461,8 @@ public bool ProcessSitePredictionSheet(
                     tbl_project_id = projectId,
                     tbl_upload_id = ExcelID,
 
-                    site = TryInt(row.site),
-                    site_name = TryInt(row.site_name),
+                    site = string.IsNullOrWhiteSpace(row.site) ? null : row.site.Trim(),
+                    site_name = string.IsNullOrWhiteSpace(row.site_name) ? null : row.site_name.Trim(),
                     sector = row.sector,
 
                     cell_id = string.IsNullOrWhiteSpace(row.cell_id) ? null : row.cell_id.Trim(),

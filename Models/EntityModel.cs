@@ -813,8 +813,8 @@ public class IndoorOutdoorLogDto
     public int tbl_project_id { get; set; }
     public int tbl_upload_id { get; set; }
 
-    public int? site { get; set; }
-    public int? site_name { get; set; }
+    public string? site { get; set; }
+    public string? site_name { get; set; }
     public string? sector { get; set; }
     public string? cell_id { get; set; }
     public double? longitude { get; set; }
@@ -880,8 +880,8 @@ public class IndoorOutdoorLogDto
         public int tbl_project_id { get; set; }
         public int tbl_upload_id { get; set; }
 
-        public int? site { get; set; }
-        public int? site_name { get; set; }
+        public string? site { get; set; }
+        public string? site_name { get; set; }
         public string? sector { get; set; }
         public string? cell_id { get; set; }
         public int? sec_id { get; set; }
