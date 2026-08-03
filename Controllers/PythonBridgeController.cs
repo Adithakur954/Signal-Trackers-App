@@ -706,9 +706,6 @@ namespace SignalTracker.Controllers
         [HttpGet("GetProject")]
         public async Task<IActionResult> GetProject([FromQuery] long projectId)
         {
-            var authResult = EnsureAuthorized();
-            if (authResult is not null) return authResult;
-
             if (projectId <= 0)
             {
                 return BadRequest(new { Status = 0, Message = "projectId is required." });
@@ -745,9 +742,6 @@ namespace SignalTracker.Controllers
             [FromQuery] string? countryCode,
             [FromQuery(Name = "country_code")] string? countryCodeSnake)
         {
-            var authResult = EnsureAuthorized();
-            if (authResult is not null) return authResult;
-
             if (projectId <= 0)
             {
                 return BadRequest(new { Status = 0, Message = "projectId is required." });
