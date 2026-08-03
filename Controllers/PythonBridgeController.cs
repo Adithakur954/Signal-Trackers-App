@@ -760,9 +760,6 @@ namespace SignalTracker.Controllers
         [HttpPost("GetReportNetworkLogs")]
         public async Task<IActionResult> GetReportNetworkLogs([FromBody] SessionIdsPagedRequest request)
         {
-            var authResult = EnsureAuthorized();
-            if (authResult is not null) return authResult;
-
             if (request == null || request.SessionIds == null || request.SessionIds.Count == 0)
             {
                 return BadRequest(new { Status = 0, Message = "SessionIds are required." });
@@ -786,9 +783,6 @@ namespace SignalTracker.Controllers
         [HttpPost("GetSessions")]
         public async Task<IActionResult> GetSessions([FromBody] SessionIdsPagedRequest request)
         {
-            var authResult = EnsureAuthorized();
-            if (authResult is not null) return authResult;
-
             if (request == null || request.SessionIds == null || request.SessionIds.Count == 0)
             {
                 return BadRequest(new { Status = 0, Message = "SessionIds are required." });
@@ -805,9 +799,6 @@ namespace SignalTracker.Controllers
         [HttpGet("GetUser")]
         public async Task<IActionResult> GetUser([FromQuery] int userId)
         {
-            var authResult = EnsureAuthorized();
-            if (authResult is not null) return authResult;
-
             if (userId <= 0)
             {
                 return BadRequest(new { Status = 0, Message = "userId is required." });
@@ -829,9 +820,6 @@ namespace SignalTracker.Controllers
         [HttpGet("GetUserThresholds")]
         public async Task<IActionResult> GetUserThresholds([FromQuery] int userId)
         {
-            var authResult = EnsureAuthorized();
-            if (authResult is not null) return authResult;
-
             if (userId <= 0)
             {
                 return BadRequest(new { Status = 0, Message = "userId is required." });
