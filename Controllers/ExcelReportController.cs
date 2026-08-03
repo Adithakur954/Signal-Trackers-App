@@ -42,12 +42,20 @@ namespace SignalTracker.Controllers
             return false;
         }
 
-        private static List<string> GetUniqueValuesForHeader(List<WalkTestLogRow> rows, string header)
+        private static List<string> GetUniqueValuesForHeader(List<WalkTestLogRow> rows, string header, bool filterByImageName = true)
         {
             var headerUpper = (header ?? "").ToUpperInvariant().Trim();
 
-            var validImageRows = rows.Where(r => RowHasImageName(r, headerUpper)).ToList();
-            var targetRows = validImageRows.Count > 0 ? validImageRows : rows;
+            List<WalkTestLogRow> targetRows;
+            if (filterByImageName)
+            {
+                var validImageRows = rows.Where(r => RowHasImageName(r, headerUpper)).ToList();
+                targetRows = validImageRows.Count > 0 ? validImageRows : rows;
+            }
+            else
+            {
+                targetRows = rows;
+            }
 
             IEnumerable<string?> rawValues = headerUpper switch
             {
@@ -104,7 +112,10 @@ namespace SignalTracker.Controllers
             [FromQuery] string? networkType = null,
             [FromQuery] DateTime? startDate = null,
             [FromQuery] DateTime? endDate = null,
-            [FromQuery] int? limit = null)
+            [FromQuery] int? limit = null,
+            [FromQuery] string? reportMode = null,
+            [FromQuery] string? sheetMode = null,
+            [FromQuery] string? mode = null)
         {
             var request = new WalkTestExcelReportRequest
             {
@@ -114,7 +125,8 @@ namespace SignalTracker.Controllers
                 NetworkType = networkType,
                 StartDate = startDate,
                 EndDate = endDate,
-                Limit = limit
+                Limit = limit,
+                ReportMode = reportMode ?? sheetMode ?? mode
             };
 
             return Generate(request);
@@ -153,13 +165,18 @@ namespace SignalTracker.Controllers
             // Download the chart/report images once so they can be embedded directly in the workbook.
             var imageBytesByUrl = await FetchReportImagesAsync(sessionIds, HttpContext.RequestAborted);
 
+            var reportMode = request.ReportMode ?? request.SheetMode ?? request.Mode ?? "separate";
+            var filterByImageName = ResolveFilterByImageName(request, Request.HasFormContentType ? Request.Form : null, Request.Query);
+
             var workbook = BuildWorkbook(
                 project.project_name ?? $"Project {project.id}",
                 sessionIds,
                 rows,
                 siteRows,
                 imageBytesByUrl,
-                thresholds);
+                thresholds,
+                reportMode,
+                filterByImageName);
 
             var bytes = SimpleXlsxWriter.Write(workbook);
             var filename = $"Walk_Test_Report_{request.ProjectId}_{DateTime.Now:yyyy-MM-dd}.xlsx";
@@ -202,10 +219,14 @@ namespace SignalTracker.Controllers
             if (rows.Count == 0)
                 return BadRequest(new { Message = "No usable network log rows were found inside the zip." });
 
-            var imageRows = rows.Where(r => RowHasImageName(r)).ToList();
-            if (imageRows.Count > 0)
+            var filterByImageName = ResolveFilterByImageName(request, Request.HasFormContentType ? Request.Form : null);
+            if (filterByImageName)
             {
-                rows = imageRows;
+                var imageRows = rows.Where(r => RowHasImageName(r)).ToList();
+                if (imageRows.Count > 0)
+                {
+                    rows = imageRows;
+                }
             }
 
             var bandsPresent = rows
@@ -245,13 +266,17 @@ namespace SignalTracker.Controllers
 
             var imageBytesByUrl = BuildImageBytesByUrlFromZip(mapImages, sessionIds);
 
+            var reportMode = ResolveReportMode(request, Request.HasFormContentType ? Request.Form : null);
+
             var workbook = BuildWorkbook(
                 projectName,
                 sessionIds,
                 rows,
                 siteRows,
                 imageBytesByUrl,
-                thresholds);
+                thresholds,
+                reportMode,
+                filterByImageName);
 
             var bytes = SimpleXlsxWriter.Write(workbook);
             var filename = $"Walk_Test_Report_Zip_{sessionId}_{DateTime.Now:yyyy-MM-dd}.xlsx";
@@ -292,8 +317,16 @@ namespace SignalTracker.Controllers
             var rawRows = ExtractNetworkRowsFromZip(archive, sessionId);
             var rows = CleanZipRows(rawRows);
 
-            var imageRows = rows.Where(r => RowHasImageName(r)).ToList();
-            var rowsToSummarize = imageRows.Count > 0 ? imageRows : rows;
+            var filterByImageName = ResolveFilterByImageName(request, Request.HasFormContentType ? Request.Form : null, Request.Query);
+            var rowsToSummarize = rows;
+            if (filterByImageName)
+            {
+                var imageRows = rows.Where(r => RowHasImageName(r)).ToList();
+                if (imageRows.Count > 0)
+                {
+                    rowsToSummarize = imageRows;
+                }
+            }
 
             var validRows = rowsToSummarize
                 .Where(r => !string.IsNullOrWhiteSpace(r.BandSheetName) &&
@@ -1412,7 +1445,9 @@ namespace SignalTracker.Controllers
             List<WalkTestLogRow> rows,
             List<WalkTestSiteSummaryRow> siteRows,
             IReadOnlyDictionary<string, byte[]?> imageBytesByUrl,
-            ReportThresholdConfig thresholds)
+            ReportThresholdConfig thresholds,
+            string reportMode = "separate",
+            bool filterByImageName = true)
         {
             var workbook = new XlsxWorkbook();
             workbook.Sheets.Add(BuildSiteSummarySheet(projectName, sessionIds, rows, siteRows));
@@ -1425,10 +1460,237 @@ namespace SignalTracker.Controllers
                 .OrderBy(x => BandSortKey(x.Key), StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
-            foreach (var group in bandGroups)
-                workbook.Sheets.Add(BuildBandSheet(group.Key, group.ToList(), rows, imageBytesByUrl, thresholds));
+            if (string.Equals(reportMode, "combined", StringComparison.OrdinalIgnoreCase))
+            {
+                workbook.Sheets.Add(BuildCombinedBandSheet(bandGroups, rows, imageBytesByUrl, thresholds, filterByImageName));
+            }
+            else
+            {
+                foreach (var group in bandGroups)
+                    workbook.Sheets.Add(BuildBandSheet(group.Key, group.ToList(), rows, imageBytesByUrl, thresholds, filterByImageName));
+            }
 
             return workbook;
+        }
+
+        private static string ResolveReportMode(ZipReportUploadRequest request, IFormCollection? form)
+        {
+            string? raw = null;
+            if (form != null)
+            {
+                if (form.TryGetValue("ReportMode", out var v1) && !string.IsNullOrWhiteSpace(v1)) raw = v1.ToString();
+                else if (form.TryGetValue("SheetMode", out var v2) && !string.IsNullOrWhiteSpace(v2)) raw = v2.ToString();
+                else if (form.TryGetValue("Mode", out var v3) && !string.IsNullOrWhiteSpace(v3)) raw = v3.ToString();
+                else if (form.TryGetValue("ReportType", out var v4) && !string.IsNullOrWhiteSpace(v4)) raw = v4.ToString();
+                else if (form.TryGetValue("Combined", out var v5) && !string.IsNullOrWhiteSpace(v5)) raw = "combined";
+                else if (form.TryGetValue("Seperate", out var v6) && !string.IsNullOrWhiteSpace(v6)) raw = "separate";
+                else if (form.TryGetValue("Separate", out var v7) && !string.IsNullOrWhiteSpace(v7)) raw = "separate";
+            }
+
+            if (!string.IsNullOrWhiteSpace(raw) && raw.Trim().StartsWith("comb", StringComparison.OrdinalIgnoreCase))
+            {
+                return "combined";
+            }
+
+            return "separate";
+        }
+
+        private static bool ResolveFilterByImageName(object? request, IFormCollection? form, IQueryCollection? query = null)
+        {
+            var keysToMatch = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "FilterByImageName", "UseImageNameFilter", "OnlyWithImage", "ImageFilter", "WithImageName", "ImageNameFilter", "ByImage", "ImageOnly"
+            };
+
+            // 1. Check Query string parameters
+            if (query != null)
+            {
+                foreach (var qKey in query.Keys)
+                {
+                    var normalized = qKey.Replace("_", "").Replace("-", "");
+                    if (keysToMatch.Contains(normalized) || keysToMatch.Contains(qKey))
+                    {
+                        var v = query[qKey].ToString().Trim().ToLowerInvariant();
+                        if (v == "false" || v == "0" || v == "no" || v == "without_image" || v == "withoutimage" || v == "all" || v == "off") return false;
+                        if (v == "true" || v == "1" || v == "yes" || v == "with_image" || v == "withimage" || v == "only_image" || v == "on") return true;
+                    }
+                }
+            }
+
+            // 2. Check Form collection parameters
+            if (form != null)
+            {
+                foreach (var fKey in form.Keys)
+                {
+                    var normalized = fKey.Replace("_", "").Replace("-", "");
+                    if (keysToMatch.Contains(normalized) || keysToMatch.Contains(fKey))
+                    {
+                        var v = form[fKey].ToString().Trim().ToLowerInvariant();
+                        if (v == "false" || v == "0" || v == "no" || v == "without_image" || v == "withoutimage" || v == "all" || v == "off") return false;
+                        if (v == "true" || v == "1" || v == "yes" || v == "with_image" || v == "withimage" || v == "only_image" || v == "on") return true;
+                    }
+                }
+            }
+
+            // 3. Check request model properties
+            if (request is WalkTestExcelReportRequest req)
+            {
+                if (req.FilterByImageName.HasValue) return req.FilterByImageName.Value;
+                if (!string.IsNullOrWhiteSpace(req.ImageFilter))
+                {
+                    var v = req.ImageFilter.Trim().ToLowerInvariant();
+                    if (v == "false" || v == "0" || v == "no" || v == "without_image" || v == "withoutimage" || v == "all" || v == "off") return false;
+                    if (v == "true" || v == "1" || v == "yes" || v == "with_image" || v == "withimage" || v == "only_image" || v == "on") return true;
+                }
+            }
+
+            return true;
+        }
+
+        private static XlsxSheet BuildCombinedBandSheet(
+            List<IGrouping<string, WalkTestLogRow>> bandGroups,
+            List<WalkTestLogRow> allRows,
+            IReadOnlyDictionary<string, byte[]?> imageBytesByUrl,
+            ReportThresholdConfig thresholds,
+            bool filterByImageName = true)
+        {
+            int numBands = bandGroups.Count;
+            int totalCols = Math.Max(15, numBands * 9);
+            var columnWidths = new double[totalCols];
+            for (int c = 0; c < totalCols; c++)
+                columnWidths[c] = (c % 9 >= 6) ? 3.5 : 13.5;
+
+            var sheet = new XlsxSheet("Combined") { ColumnWidths = columnWidths, FreezeTopRow = false };
+
+            const int cellSpan = 6; // Block 1: A-F (cols 0-5), Block 2: J-O (cols 9-14)...
+            const int maxWidthEmu = 3_619_500; // ~380 px wide
+
+            var bandDataList = new List<(string BandName, List<WalkTestLogRow> BandRows, int PrimarySessionId, List<(string Header, byte[] FinalBytes, (int WidthEmu, int HeightEmu) Size)> Plots)>();
+
+            foreach (var group in bandGroups)
+            {
+                var bandName = group.Key;
+                var bandRows = group.ToList();
+                var primarySessionId = bandRows.Select(x => x.SessionId).FirstOrDefault(x => x > 0);
+
+                var plots = new List<(string Header, byte[] FinalBytes, (int WidthEmu, int HeightEmu) Size)>();
+
+                foreach (var header in ImageHeaders)
+                {
+                    var mapRawBytes = TryResolveMapImage(imageBytesByUrl, primarySessionId, header);
+                    if (mapRawBytes == null || mapRawBytes.Length == 0) continue;
+
+                    var legendBytes = TryResolveLegendPhoto(imageBytesByUrl, primarySessionId, header, bandRows, thresholds, filterByImageName);
+                    var finalBytes  = OverlayLegendOnMap(mapRawBytes, legendBytes);
+                    var size        = ScaleToEmu(ReadPngSizePx(finalBytes), maxWidthEmu);
+
+                    plots.Add((header, finalBytes, size));
+                }
+
+                if (plots.Count > 0)
+                {
+                    bandDataList.Add((bandName, bandRows, primarySessionId, plots));
+                }
+            }
+
+            if (bandDataList.Count == 0) return sheet;
+
+            int activeBands = bandDataList.Count;
+
+            // 1. Band Banner Row
+            var headerRow = new XlsxRow(28);
+            for (int c = 0; c < totalCols; c++) headerRow.Cells.Add(XlsxCell.Text(""));
+
+            for (int b = 0; b < activeBands; b++)
+            {
+                int colStart = b * 9;
+                headerRow.Cells[colStart] = XlsxCell.Text($"Band: {bandDataList[b].BandName}", 4);
+            }
+            sheet.Rows.Add(headerRow);
+            sheet.Rows.Add(XlsxRow.Blank());
+
+            // 2. Maximum number of plots among all active bands
+            int maxPlots = bandDataList.Max(b => b.Plots.Count);
+
+            for (int p = 0; p < maxPlots; p++)
+            {
+                // Title Row for plot p across all bands
+                var titleRow = new XlsxRow(22);
+                for (int c = 0; c < totalCols; c++) titleRow.Cells.Add(XlsxCell.Text(""));
+
+                double maxRowHeight = 220.0;
+
+                for (int b = 0; b < activeBands; b++)
+                {
+                    var plots = bandDataList[b].Plots;
+                    if (p < plots.Count)
+                    {
+                        int colStart = b * 9;
+                        var plot = plots[p];
+                        titleRow.Cells[colStart] = XlsxCell.Text($"{bandDataList[b].BandName} - {plot.Header} Plot", 4);
+
+                        double heightPts = plot.Size.HeightEmu / 12700.0;
+                        if (heightPts > maxRowHeight) maxRowHeight = heightPts;
+                    }
+                }
+                sheet.Rows.Add(titleRow);
+
+                if (maxRowHeight > 550.0) maxRowHeight = 550.0;
+                if (maxRowHeight < 220.0) maxRowHeight = 220.0;
+
+                // Image Row for plot p across all bands
+                int imageRowIdx = sheet.Rows.Count;
+                var imageRow = new XlsxRow(maxRowHeight);
+                for (int c = 0; c < totalCols; c++) imageRow.Cells.Add(XlsxCell.Text(""));
+                sheet.Rows.Add(imageRow);
+
+                for (int b = 0; b < activeBands; b++)
+                {
+                    var plots = bandDataList[b].Plots;
+                    if (p < plots.Count)
+                    {
+                        int colStart = b * 9;
+                        var plot = plots[p];
+                        sheet.Images.Add(new XlsxImage(imageRowIdx, colStart, plot.FinalBytes,
+                            plot.Size.WidthEmu, plot.Size.HeightEmu, cellSpanCols: cellSpan));
+                    }
+                }
+
+                // Blank spacer rows between KPI plots
+                sheet.Rows.Add(XlsxRow.Blank());
+                sheet.Rows.Add(XlsxRow.Blank());
+            }
+
+            return sheet;
+        }
+
+        private static string ExtractWalkTestDate(List<WalkTestLogRow> rows)
+        {
+            foreach (var r in rows)
+            {
+                if (r.Timestamp.HasValue)
+                {
+                    return r.Timestamp.Value.ToString("dd/MM/yyyy", CultureInfo.InvariantCulture);
+                }
+            }
+
+            return DateTime.Now.ToString("dd/MM/yyyy", CultureInfo.InvariantCulture);
+        }
+
+        private static string ExtractEnodeBandsFormatted(List<WalkTestLogRow> rows)
+        {
+            var bands = rows
+                .Select(x => x.BandSheetName)
+                .Where(b => !string.IsNullOrWhiteSpace(b) &&
+                            !b.Equals("Unknown Band", StringComparison.OrdinalIgnoreCase) &&
+                            !b.Equals("Unknown", StringComparison.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(b => BandSortKey(b))
+                .ToList();
+
+            if (bands.Count == 0) return "XXX";
+
+            return string.Join(" & ", bands);
         }
 
         private static XlsxSheet BuildSiteSummarySheet(
@@ -1439,7 +1701,7 @@ namespace SignalTracker.Controllers
         {
             var sheet = new XlsxSheet("Site Summary")
             {
-                ColumnWidths = new double[] { 14, 14, 12, 12, 12, 14, 14, 11, 11, 12, 12, 10, 10, 10, 12, 12, 12, 16, 18, 14, 14, 12 },
+                ColumnWidths = new double[] { 50, 30 },
                 FreezeTopRow = false
             };
 
@@ -1449,39 +1711,46 @@ namespace SignalTracker.Controllers
             sheet.Rows.Add(XlsxRow.FromText("Band Sheets", string.Join(", ", rows.Select(x => x.BandSheetName).Distinct().OrderBy(x => x))));
             sheet.Rows.Add(XlsxRow.Blank());
 
-            if (siteRows.Count > 0)
-            {
-                sheet.Rows.Add(XlsxRow.Header(
-                    "Source", "Site", "Site Name", "Sector", "Cell ID", "Sec ID", "Latitude", "Longitude",
-                    "TAC", "PCI", "Band", "EARFCN", "Azimuth", "Height", "BW", "M Tilt", "E Tilt",
-                    "Tx Power", "Reference Signal Power", "Frequency", "Cluster", "Technology"));
+            var walkTestDate = ExtractWalkTestDate(rows);
+            var enodeBands = ExtractEnodeBandsFormatted(rows);
 
-                foreach (var row in siteRows)
-                {
-                    sheet.Rows.Add(XlsxRow.Data(
-                        row.Source,
-                        FormatValue(row.Site),
-                        FormatValue(row.SiteName),
-                        row.Sector,
-                        FormatValue(row.CellId),
-                        FormatValue(row.SecId),
-                        FormatValue(row.Latitude),
-                        FormatValue(row.Longitude),
-                        FormatValue(row.Tac),
-                        FormatValue(row.Pci),
-                        FormatBandValue(row.Band),
-                        FormatValue(row.Earfcn),
-                        FormatValue(row.Azimuth),
-                        FormatValue(row.Height),
-                        FormatValue(row.Bw),
-                        FormatValue(row.MTilt),
-                        FormatValue(row.ETilt),
-                        FormatValue(row.TxPower),
-                        FormatValue(row.ReferenceSignalPower),
-                        row.Frequency,
-                        row.Cluster,
-                        row.Technology));
-                }
+            var metaFields = new (string FieldName, string Value)[]
+            {
+                ("Circle", "XXX"),
+                ("Name of Infra Provider/TOCO", "XXX"),
+                ("Site Name", "XXX"),
+                ("Site Address", "XXX"),
+                ("City/Town", "XXX"),
+                ("Site Lat", "XXX"),
+                ("Site Long", "XXX"),
+                ("Operator Site ID", "XXX"),
+                ("Operator Site ID", "XXX"),
+                ("TOCO Site ID", "XXX"),
+                ("No. of Sectors", "XXX"),
+                ("Total No of Floors in the Building", "XXX"),
+                ("No. of Floors covered by IBS", "XXX"),
+                ("IBS Type (Full, Partial, Skeletal)", "XXX"),
+                ("Date of Installation", "XXX"),
+                ("Date of I&C", "XXX"),
+                ("eNode Band for Node B(900/1800/2100/2300/3500)", enodeBands),
+                ("Max. Output Power", "XXX"),
+                ("Site Type", "XXX"),
+                ("DAS MIMO Configuration", "XXX"),
+                ("MEDIA TYPE", "XXX"),
+                ("Anchor Operator", "XXX"),
+                ("Sharing Opcos", "XXX"),
+                ("Sites Layout Attached", "XXX"),
+                ("Acceptance KPI Attached", "XXX"),
+                ("Area - sqft", "XXX"),
+                ("Walk Test Date", walkTestDate)
+            };
+
+            foreach (var (field, val) in metaFields)
+            {
+                var row = new XlsxRow(20);
+                row.Cells.Add(XlsxCell.Text(field, 4)); // Bold field header
+                row.Cells.Add(XlsxCell.Text(val));
+                sheet.Rows.Add(row);
             }
 
             return sheet;
@@ -1529,7 +1798,8 @@ namespace SignalTracker.Controllers
             List<WalkTestLogRow> bandRows,
             List<WalkTestLogRow> allRows,
             IReadOnlyDictionary<string, byte[]?> imageBytesByUrl,
-            ReportThresholdConfig thresholds)
+            ReportThresholdConfig thresholds,
+            bool filterByImageName = true)
         {
             var columnWidths = new double[15];
             for (int c = 0; c < 15; c++)
@@ -1573,7 +1843,7 @@ namespace SignalTracker.Controllers
 
                 // ── 2. Resolve legend photo & overlay onto map image ──────────────────
                 var leftRawBytes    = leftItem.Bytes!;
-                var leftLegendBytes = TryResolveLegendPhoto(imageBytesByUrl, primarySessionId, leftItem.Header, bandRows, thresholds);
+                var leftLegendBytes = TryResolveLegendPhoto(imageBytesByUrl, primarySessionId, leftItem.Header, bandRows, thresholds, filterByImageName);
                 var leftBytes       = OverlayLegendOnMap(leftRawBytes, leftLegendBytes);
                 var leftSize        = ScaleToEmu(ReadPngSizePx(leftBytes), maxWidthEmu);
 
@@ -1582,7 +1852,7 @@ namespace SignalTracker.Controllers
                 if (rightItem != null)
                 {
                     var rightRawBytes    = rightItem.Bytes!;
-                    var rightLegendBytes = TryResolveLegendPhoto(imageBytesByUrl, primarySessionId, rightItem.Header, bandRows, thresholds);
+                    var rightLegendBytes = TryResolveLegendPhoto(imageBytesByUrl, primarySessionId, rightItem.Header, bandRows, thresholds, filterByImageName);
                     rightBytes           = OverlayLegendOnMap(rightRawBytes, rightLegendBytes);
                     rightSize            = ScaleToEmu(ReadPngSizePx(rightBytes), maxWidthEmu);
                 }
@@ -1696,11 +1966,12 @@ namespace SignalTracker.Controllers
             int primarySessionId,
             string header,
             List<WalkTestLogRow> bandRows,
-            ReportThresholdConfig thresholds)
+            ReportThresholdConfig thresholds,
+            bool filterByImageName = true)
         {
             if (bandRows != null && bandRows.Count > 0)
             {
-                return GenerateLegendPng(header, bandRows, thresholds);
+                return GenerateLegendPng(header, bandRows, thresholds, filterByImageName);
             }
 
             var headerUpper = header.ToUpperInvariant();
@@ -1802,18 +2073,27 @@ namespace SignalTracker.Controllers
         private static List<LegendStatRow> CalculateLegendStatistics(
             List<WalkTestLogRow> rows,
             string header,
-            ReportThresholdConfig thresholdConfig)
+            ReportThresholdConfig thresholds,
+            bool filterByImageName = true)
         {
-            var ranges = thresholdConfig.GetRangesForHeader(header);
+            var headerUpper = (header ?? "").ToUpperInvariant().Trim();
+            var ranges = thresholds.GetRangesForHeader(headerUpper);
+
             var result = ranges.Select(r => new LegendStatRow { Range = r, Count = 0 }).ToList();
 
             if (result.Count == 0)
                 return result;
 
-            var headerUpper = (header ?? "").ToUpperInvariant().Trim();
-
-            var validImageRows = rows.Where(r => RowHasImageName(r, headerUpper)).ToList();
-            var targetRows = validImageRows.Count > 0 ? validImageRows : rows;
+            List<WalkTestLogRow> targetRows;
+            if (filterByImageName)
+            {
+                var validImageRows = rows.Where(r => RowHasImageName(r, headerUpper)).ToList();
+                targetRows = validImageRows.Count > 0 ? validImageRows : rows;
+            }
+            else
+            {
+                targetRows = rows;
+            }
 
             if (headerUpper == "RSRP" || headerUpper == "RSRQ" || headerUpper == "SINR" ||
                 headerUpper == "DL_THPT" || headerUpper == "UL_THPT" || headerUpper == "LTE_BLER" ||
@@ -2401,7 +2681,8 @@ namespace SignalTracker.Controllers
         private static byte[] GenerateLegendPng(
             string header,
             List<WalkTestLogRow>? allRows = null,
-            ReportThresholdConfig? thresholds = null)
+            ReportThresholdConfig? thresholds = null,
+            bool filterByImageName = true)
         {
             thresholds ??= ReportThresholdConfig.Hardcoded();
             allRows ??= new List<WalkTestLogRow>();
@@ -2409,15 +2690,23 @@ namespace SignalTracker.Controllers
             bool isUniqueValues = IsUniqueValueHeader(header);
             bool isEarfcn = string.Equals(header, "EARFCN", StringComparison.OrdinalIgnoreCase);
 
-            var uniqueVals = isUniqueValues ? GetUniqueValuesForHeader(allRows, header) : null;
-            var stats = !isUniqueValues ? CalculateLegendStatistics(allRows, header, thresholds) : null;
+            var uniqueVals = isUniqueValues ? GetUniqueValuesForHeader(allRows, header, filterByImageName) : null;
+            var stats = !isUniqueValues ? CalculateLegendStatistics(allRows, header, thresholds, filterByImageName) : null;
 
             var lines = new List<(string Label, Rgba32 Color)>();
             if (isUniqueValues && uniqueVals != null)
             {
                 var headerUpper = header.ToUpperInvariant().Trim();
-                var validImageRows = allRows.Where(r => RowHasImageName(r, headerUpper)).ToList();
-                var targetRows = validImageRows.Count > 0 ? validImageRows : allRows;
+                List<WalkTestLogRow> targetRows;
+                if (filterByImageName)
+                {
+                    var validImageRows = allRows.Where(r => RowHasImageName(r, headerUpper)).ToList();
+                    targetRows = validImageRows.Count > 0 ? validImageRows : allRows;
+                }
+                else
+                {
+                    targetRows = allRows;
+                }
                 var totalCount = targetRows.Count;
 
                 for (int i = 0; i < uniqueVals.Count; i++)
@@ -2738,6 +3027,11 @@ namespace SignalTracker.Controllers
             public DateTime? StartDate { get; set; }
             public DateTime? EndDate { get; set; }
             public int? Limit { get; set; }
+            public string? ReportMode { get; set; }
+            public string? SheetMode { get; set; }
+            public string? Mode { get; set; }
+            public bool? FilterByImageName { get; set; }
+            public string? ImageFilter { get; set; }
         }
 
         private sealed class WalkTestLogRow
