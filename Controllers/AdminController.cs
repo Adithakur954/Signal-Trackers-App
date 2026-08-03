@@ -339,6 +339,39 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
                 .Replace(" ", "_");
         }
 
+        private string GetCacheCountryScope()
+        {
+            string? country = null;
+
+            if (HttpContext.Request.Query.TryGetValue("country_code", out var queryCountry))
+            {
+                country = queryCountry.ToString();
+            }
+
+            if (string.IsNullOrWhiteSpace(country) &&
+                HttpContext.Request.Headers.TryGetValue("x-country-code", out var headerCountry))
+            {
+                country = headerCountry.ToString();
+            }
+
+            if (string.IsNullOrWhiteSpace(country))
+            {
+                country = User.FindFirst("country_code")?.Value;
+            }
+
+            if (string.IsNullOrWhiteSpace(country) && HttpContext.Session != null)
+            {
+                country = HttpContext.Session.GetString("country_code");
+            }
+
+            var normalized = (country ?? "IN").Trim().ToUpperInvariant();
+            return normalized switch
+            {
+                "TW" or "TWN" or "TAIWAN" => "TW",
+                _ => "IN"
+            };
+        }
+
         private async Task<T?> TryGetCachedObjectAsync<T>(string cacheKey) where T : class
         {
             if (!IsRedisReady)
@@ -555,7 +588,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
                     return Json(message);
                 }
 
-                var cacheKey = $"users:list:{targetCompanyId}:{NormalizeCacheSegment(UserName)}:{NormalizeCacheSegment(Email)}:{NormalizeCacheSegment(Mobile)}:{(Status.HasValue ? Status.Value.ToString(CultureInfo.InvariantCulture) : "all")}:{NormalizeCacheSegment(CompanyName)}";
+                var cacheKey = $"users:list:{GetCacheCountryScope()}:{targetCompanyId}:{NormalizeCacheSegment(UserName)}:{NormalizeCacheSegment(Email)}:{NormalizeCacheSegment(Mobile)}:{(Status.HasValue ? Status.Value.ToString(CultureInfo.InvariantCulture) : "all")}:{NormalizeCacheSegment(CompanyName)}";
                 var cached = await TryGetCachedObjectAsync<ReturnAPIResponse>(cacheKey);
                 if (cached != null)
                     return Json(cached);
@@ -665,7 +698,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
             {
                 cf.SessionCheck();
                 message.Status = 1; // cf.MatchToken(token);
-                var cacheKey = $"users:by-id:{UserID}";
+                var cacheKey = $"users:by-id:{GetCacheCountryScope()}:{UserID}";
                 var cached = await TryGetCachedObjectAsync<ReturnAPIResponse>(cacheKey);
                 if (cached != null)
                     return Json(cached);
@@ -1255,7 +1288,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
                 string toKey = toDate?.ToString("yyyyMMdd") ?? "null";
 
                 // Cache key now includes the Resolved Company ID
-                string cacheKey = $"alllogs:sql:{targetCompanyId}:{sessionKey}:{fromKey}:{toKey}:{maxRows}";
+                string cacheKey = $"alllogs:sql:{GetCacheCountryScope()}:{targetCompanyId}:{sessionKey}:{fromKey}:{toKey}:{maxRows}";
 
                 // =========================================================
                 // 4. CHECK REDIS CACHE
@@ -1499,7 +1532,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
                 if (pageSize < 1) pageSize = 100;
                 if (pageSize > 10000) pageSize = 10000;
 
-                var cacheKey = $"alllogs:paged:{pageNumber}:{pageSize}";
+                var cacheKey = $"alllogs:paged:{GetCacheCountryScope()}:{pageNumber}:{pageSize}";
                 var cached = await TryGetCachedObjectAsync<PagedNetworkLogsResponse>(cacheKey);
                 if (cached != null)
                     return Json(cached);
@@ -1599,7 +1632,7 @@ public async Task<IActionResult> GetOperatorCoverageRanking(
             effectiveTo = tmp;
         }
 
-        string cacheKey = $"opcoverage:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:{min}:{max}:{effectiveFrom:yyyyMMdd}:{effectiveTo:yyyyMMdd}";
+        string cacheKey = $"opcoverage:{GetCacheCountryScope()}:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:{min}:{max}:{effectiveFrom:yyyyMMdd}:{effectiveTo:yyyyMMdd}";
         if (_redis != null && _redis.IsConnected)
         {
             var cached = await _redis.GetObjectAsync<List<OperatorQualityItem>>(cacheKey);
@@ -1759,7 +1792,7 @@ public async Task<IActionResult> GetOperatorQualityRanking(
         }
 
         // 2. CACHE KEY
-        string cacheKey = $"opquality:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:{min}:{max}:{effectiveFrom:yyyyMMdd}:{effectiveTo:yyyyMMdd}";
+        string cacheKey = $"opquality:{GetCacheCountryScope()}:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:{min}:{max}:{effectiveFrom:yyyyMMdd}:{effectiveTo:yyyyMMdd}";
 
         // 3. TRY REDIS (Standard Cache Logic)
         if (_redis != null && _redis.IsConnected)
@@ -2045,7 +2078,7 @@ public async Task<IActionResult> OutdoorCount(
         // ---- helper: count with SAME filters as KPI (indoor/outdoor + networkType) ----
         private async Task<long> CountForKpiSqlAsync(string indoorColumn, bool isIndoor, string networkType, int companyId = 0)
 	{
-	    var cacheKey = $"{(isIndoor ? "indoorcount" : "outdoorcount")}:{companyId}:{NormalizeCacheSegment(indoorColumn)}:{NormalizeCacheSegment(networkType)}";
+	    var cacheKey = $"{(isIndoor ? "indoorcount" : "outdoorcount")}:{GetCacheCountryScope()}:{companyId}:{NormalizeCacheSegment(indoorColumn)}:{NormalizeCacheSegment(networkType)}";
 
 	    var cached = await TryGetCachedLongAsync(cacheKey);
 	    if (cached.HasValue)
@@ -2148,7 +2181,7 @@ public async Task<IActionResult> OutdoorCount(
         // Indoor/outdoor KPIs by operator
         private async Task<List<OperatorKpiRow>> GetOperatorKpisSqlAsync(string networkType, string indoorColumn, bool isIndoor)
         {
-            var cacheKey = $"{(isIndoor ? "indoorkpis" : "outdoorkpis")}:{NormalizeCacheSegment(indoorColumn)}:{NormalizeCacheSegment(networkType)}";
+            var cacheKey = $"{(isIndoor ? "indoorkpis" : "outdoorkpis")}:{GetCacheCountryScope()}:{NormalizeCacheSegment(indoorColumn)}:{NormalizeCacheSegment(networkType)}";
 
             var cached = await TryGetCachedObjectAsync<List<OperatorKpiRow>>(cacheKey);
             if (cached != null)
@@ -2273,7 +2306,7 @@ public async Task<IActionResult> OutdoorCount(
             bool isGood,
             string networkType)
         {
-            var cacheKey = $"{(isIndoor ? (isGood ? "indoorgoodcount" : "indoorbadcount") : (isGood ? "outdoorgoodcount" : "outdoorbadcount"))}:{NormalizeCacheSegment(indoorColumn)}:{NormalizeCacheSegment(networkType)}";
+            var cacheKey = $"{(isIndoor ? (isGood ? "indoorgoodcount" : "indoorbadcount") : (isGood ? "outdoorgoodcount" : "outdoorbadcount"))}:{GetCacheCountryScope()}:{NormalizeCacheSegment(indoorColumn)}:{NormalizeCacheSegment(networkType)}";
 
             var cached = await TryGetCachedLongAsync(cacheKey);
             if (cached.HasValue)
@@ -2415,7 +2448,7 @@ public async Task<IActionResult> OutdoorCount(
             string networkType = null,
             int maxRows = 1000)
         {
-            var cacheKey = $"{(isGood ? "indoorgoodlogs" : "indoorbadlogs")}:{NormalizeCacheSegment(indoorColumn)}:{NormalizeCacheSegment(networkType)}:{maxRows}";
+            var cacheKey = $"{(isGood ? "indoorgoodlogs" : "indoorbadlogs")}:{GetCacheCountryScope()}:{NormalizeCacheSegment(indoorColumn)}:{NormalizeCacheSegment(networkType)}:{maxRows}";
 
             var cached = await TryGetCachedObjectAsync<List<object>>(cacheKey);
             if (cached != null)
@@ -2569,7 +2602,7 @@ public async Task<IActionResult> OutdoorCount(
             int maxRows = 200000
         )
         {
-            var cacheKey = $"indoorallsessionlogs:{NormalizeCacheSegment(indoorColumn)}:{NormalizeCacheSegment(networkType)}:{maxRows}";
+            var cacheKey = $"indoorallsessionlogs:{GetCacheCountryScope()}:{NormalizeCacheSegment(indoorColumn)}:{NormalizeCacheSegment(networkType)}:{maxRows}";
 
             var cached = await TryGetCachedObjectAsync<List<object>>(cacheKey);
             if (cached != null)
@@ -2970,7 +3003,7 @@ public async Task<IActionResult> GetSessions(
     fromDate = CleanFilter(fromDate);
     toDate = CleanFilter(toDate);
 
-    var cacheKey = $"sessions:list:v2:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:p:{page}:ps:{pageSize}:q:{search}:type:{sessionType}:sid:{sessionId}:ud:{userDetails}:sd:{startDate}:st:{startTime}:ed:{endDate}:et:{endTime}:sl:{startLocation}:el:{endLocation}:d:{distance}:cf:{captureFrequency}:r:{sessionRemarks}:from:{fromDate}:to:{toDate}";
+    var cacheKey = $"sessions:list:v2:{GetCacheCountryScope()}:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:p:{page}:ps:{pageSize}:q:{search}:type:{sessionType}:sid:{sessionId}:ud:{userDetails}:sd:{startDate}:st:{startTime}:ed:{endDate}:et:{endTime}:sl:{startLocation}:el:{endLocation}:d:{distance}:cf:{captureFrequency}:r:{sessionRemarks}:from:{fromDate}:to:{toDate}";
     var cached = await TryGetCachedObjectAsync<SessionsPageResponse>(cacheKey);
     if (cached != null)
     {
@@ -3289,7 +3322,7 @@ public async Task<IActionResult> GetSessions(
                 // =========================================================
                 string fromKey = startDate.ToString("yyyyMMdd");
                 string toKey = endDate.ToString("yyyyMMdd");
-                string cacheKey = $"SessionsDateRange:{targetCompanyId}:{fromKey}:{toKey}";
+                string cacheKey = $"SessionsDateRange:{GetCacheCountryScope()}:{targetCompanyId}:{fromKey}:{toKey}";
 
                 // =========================================================
                 // 3. TRY REDIS
@@ -3447,7 +3480,7 @@ public async Task<IActionResult> GetSessions(
             string networkType = null,
             long? projectId = null)
         {
-            var cacheKey = $"polygongoodbad:{rsrpThreshold.ToString(CultureInfo.InvariantCulture)}:{NormalizeCacheSegment(networkType)}:{projectId?.ToString(CultureInfo.InvariantCulture) ?? "all"}";
+            var cacheKey = $"polygongoodbad:{GetCacheCountryScope()}:{rsrpThreshold.ToString(CultureInfo.InvariantCulture)}:{NormalizeCacheSegment(networkType)}:{projectId?.ToString(CultureInfo.InvariantCulture) ?? "all"}";
 
             var cached = await TryGetCachedObjectAsync<List<PolygonGoodBadSummaryRow>>(cacheKey);
             if (cached != null)
@@ -3709,7 +3742,7 @@ public async Task<IActionResult> GetSessions(
                     ? "all"
                     : networkType.Trim().ToLowerInvariant();
 
-                string cacheKey = $"polygonpoints:{polygonId}:{rsrpThreshold}:{normalizedNetworkType}";
+                string cacheKey = $"polygonpoints:{GetCacheCountryScope()}:{polygonId}:{rsrpThreshold}:{normalizedNetworkType}";
 
                 // ========================================
                 //  TRY GET FROM REDIS CACHE
@@ -4299,7 +4332,7 @@ public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
     // 2. DEFINE CACHE KEY (Include Company ID)
     // =========================================================
     // Cache must be isolated per company so Company A doesn't see Company B's totals.
-    string cacheKey = $"DashboardTotalsV2:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}";
+    string cacheKey = $"DashboardTotalsV2:{GetCacheCountryScope()}:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}";
 
     // =========================================================
     // 3. EXECUTE SAFE QUERY HANDLER
@@ -4387,7 +4420,7 @@ public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
             var normalizedNetwork = string.IsNullOrWhiteSpace(network) ? null : network.Trim().ToLowerInvariant();
 
             // Include CompanyID in cache key for isolation
-            var cacheKey = $"NetDur:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:{fromDate:yyyyMMdd}:{toDate:yyyyMMdd}:{normalizedProvider ?? "ALL"}:{normalizedNetwork ?? "ALL"}";
+            var cacheKey = $"NetDur:{GetCacheCountryScope()}:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:{fromDate:yyyyMMdd}:{toDate:yyyyMMdd}:{normalizedProvider ?? "ALL"}:{normalizedNetwork ?? "ALL"}";
 
             var result = new List<object>();
             var conn = db.Database.GetDbConnection();
@@ -4588,7 +4621,7 @@ public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
             var thresholdHash = Convert.ToHexString(
                 System.Security.Cryptography.SHA256.HashData(
                     System.Text.Encoding.UTF8.GetBytes(raw)));
-            var cacheKey = $"coverageholes:{threshold.id}:{thresholdHash}";
+            var cacheKey = $"coverageholes:{GetCacheCountryScope()}:{threshold.id}:{thresholdHash}";
 
             var cached = await TryGetCachedObjectAsync<List<object>>(cacheKey);
             if (cached != null)
@@ -4765,7 +4798,7 @@ public async Task<IActionResult> MonthlySamplesV2(
     string netKey = netSet != null
         ? string.Join(",", netSet.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
         : "ALL";
-    string cacheKey = $"MonthlySamples:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:{opKey}:{netKey}:{fromKey}:{toKey}";
+    string cacheKey = $"MonthlySamples:{GetCacheCountryScope()}:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:{opKey}:{netKey}:{fromKey}:{toKey}";
 
     // 3. Try to fetch data from Redis Cache
     if (_redis != null && _redis.IsConnected)
@@ -4969,7 +5002,7 @@ public async Task<IActionResult> MonthlySamplesV2(
                 // ========================================
                 //  BUILD CACHE KEY
                 // ========================================
-                string cacheKey = $"sesstechmin:{session_id}:{normalizedProvider ?? "all"}:{normalizedTech ?? "all"}";
+                string cacheKey = $"sesstechmin:{GetCacheCountryScope()}:{session_id}:{normalizedProvider ?? "all"}:{normalizedTech ?? "all"}";
 
                 // ========================================
                 //  TRY GET FROM REDIS CACHE
@@ -5248,7 +5281,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
                 ? string.Join(",", netSet.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
                 : "ALL";
 
-            string cacheKey = $"OpSamples:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:{opKey}:{netKey}:{fromKey}:{toKey}";
+            string cacheKey = $"OpSamples:{GetCacheCountryScope()}:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:{opKey}:{netKey}:{fromKey}:{toKey}";
 
             // =========================================================
             // 3. TRY REDIS
@@ -5518,7 +5551,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
             // =========================================================
             string opKey = operatorName?.ToLower() ?? "all";
             string netKey = networkType?.ToLower() ?? "all";
-            string cacheKey = $"OpAvgTpt10:{targetCompanyId}:{opKey}:{netKey}:{fromDate:yyyyMMdd}:{toDate:yyyyMMdd}";
+            string cacheKey = $"OpAvgTpt10:{GetCacheCountryScope()}:{targetCompanyId}:{opKey}:{netKey}:{fromDate:yyyyMMdd}:{toDate:yyyyMMdd}";
 
             // =========================================================
             // 4. TRY REDIS
@@ -5708,7 +5741,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
             string fromKey = from?.ToString("yyyyMMdd") ?? "null";
             string toKey = to?.ToString("yyyyMMdd") ?? "null";
             string opKey = operatorName ?? "ALL";
-            string cacheKey = $"netdist:{targetCompanyId}:{opKey}:{fromKey}:{toKey}";
+            string cacheKey = $"netdist:{GetCacheCountryScope()}:{targetCompanyId}:{opKey}:{fromKey}:{toKey}";
 
             // =========================================================
             // 3. TRY REDIS
@@ -5871,7 +5904,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
             string opKey = operatorName ?? "ALL";
             string netKey = networkType ?? "ALL";
 
-            string cacheKey = $"Avg{metricName}:{targetCompanyId}:{opKey}:{netKey}:{fromKey}:{toKey}";
+            string cacheKey = $"Avg{metricName}:{GetCacheCountryScope()}:{targetCompanyId}:{opKey}:{netKey}:{fromKey}:{toKey}";
 
             // ---------------------------------------------------------
             // 4. TRY REDIS
@@ -6029,7 +6062,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
             string fromKey = hasDateFilter ? effectiveFrom.ToString("yyyyMMdd") : "ALL";
             string toKey = hasDateFilter ? effectiveTo.ToString("yyyyMMdd") : "ALL";
 
-            string cacheKey = $"BandDist:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:{opKey}:{netKey}:{fromKey}:{toKey}";
+            string cacheKey = $"BandDist:{GetCacheCountryScope()}:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:{opKey}:{netKey}:{fromKey}:{toKey}";
 
             // =========================================================
             // 4. TRY REDIS
@@ -6200,7 +6233,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
             }
             string fromKey = hasDateFilter ? effectiveFrom.ToString("yyyyMMdd") : "ALL";
             string toKey = hasDateFilter ? effectiveTo.ToString("yyyyMMdd") : "ALL";
-            string cacheKey = $"HandsetDist:MakeOnly:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:{fromKey}:{toKey}";
+            string cacheKey = $"HandsetDist:MakeOnly:{GetCacheCountryScope()}:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:{fromKey}:{toKey}";
 
             var totalSw = System.Diagnostics.Stopwatch.StartNew();
 
@@ -6345,7 +6378,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
                 effectiveTo = tmp;
             }
 
-            string cacheKey = $"op-indoor-outdoor-avg:{targetCompanyId}:{effectiveFrom:yyyyMMdd}:{effectiveTo:yyyyMMdd}:raw:v3";
+            string cacheKey = $"op-indoor-outdoor-avg:{GetCacheCountryScope()}:{targetCompanyId}:{effectiveFrom:yyyyMMdd}:{effectiveTo:yyyyMMdd}:raw:v3";
 
             if (_redis != null && _redis.IsConnected)
             {
@@ -6563,7 +6596,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
             // =====================================================
             // 5. CACHE KEY (Includes Company ID)
             // =====================================================
-            string cacheKey = $"boxplot:v7:{targetCompanyId}:{metric}:{op ?? "ALL"}:{effectiveFrom:yyyyMMdd}:{effectiveTo:yyyyMMdd}";
+            string cacheKey = $"boxplot:v7:{GetCacheCountryScope()}:{targetCompanyId}:{metric}:{op ?? "ALL"}:{effectiveFrom:yyyyMMdd}:{effectiveTo:yyyyMMdd}";
 
             if (_redis != null && _redis.IsConnected)
             {
@@ -6741,7 +6774,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
             var effectiveFrom = from ?? effectiveTo.AddDays(-30);
             string fromKey = effectiveFrom.ToString("yyyyMMdd");
             string toKey = effectiveTo.ToString("yyyyMMdd");
-            string cacheKey = $"AppKPIs:{targetCompanyId}:{fromKey}:{toKey}";
+            string cacheKey = $"AppKPIs:{GetCacheCountryScope()}:{targetCompanyId}:{fromKey}:{toKey}";
 
             // =========================================================
             // 3. TRY REDIS
@@ -6948,7 +6981,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
 }
 
     // 2. CACHE KEY
-    string cacheKey = $"OperatorsList:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}";
+    string cacheKey = $"OperatorsList:{GetCacheCountryScope()}:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}";
 
             
             if (_redis != null && _redis.IsConnected)
@@ -7028,7 +7061,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
     return Unauthorized(new { Status = 0, Message = "Unauthorized. Invalid Company." });
 }
     // 2. CACHE KEY
-    string cacheKey = $"NetworksList:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}";
+    string cacheKey = $"NetworksList:{GetCacheCountryScope()}:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}";
 
            
             if (_redis != null && _redis.IsConnected)

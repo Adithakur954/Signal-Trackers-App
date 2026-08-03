@@ -67,7 +67,7 @@ namespace SignalTracker.Controllers
         private string BuildMapViewCacheKey(string endpoint, params object?[] parts)
         {
             var tokens = parts.Select(NormalizeCacheKeyPart);
-            return $"mapview:{NormalizeCacheKeyPart(endpoint)}:{string.Join(":", tokens)}";
+            return $"mapview:{GetProjectListCacheScope()}:{NormalizeCacheKeyPart(endpoint)}:{string.Join(":", tokens)}";
         }
 
         private string GetProjectListCacheScope()
@@ -558,7 +558,7 @@ public async Task<IActionResult> GetProjectPolygons(
         // ========================================
         //  BUILD CACHE KEY
         // ========================================
-        string cacheKey = $"projectpolygons:{projectId}";
+        string cacheKey = $"projectpolygons:{GetProjectListCacheScope()}:{projectId}";
 
         // ========================================
         //  TRY GET FROM CACHE
@@ -1528,7 +1528,7 @@ public async Task<IActionResult> GetAvailablePolygons(
         // ========================================
         //  BUILD CACHE KEY
         // ========================================
-        string cacheKey = $"availablepolygons:C{targetCompanyId}:{sessionId?.ToString() ?? "all"}";
+        string cacheKey = $"availablepolygons:{GetProjectListCacheScope()}:C{targetCompanyId}:{sessionId?.ToString() ?? "all"}";
 
         if (_redis != null && _redis.IsConnected)
         {
@@ -3969,7 +3969,7 @@ private string BuildNetworkLogCacheKey(
         : "no_project";
     string versionKey = NormalizeCacheKeyPart(dataVersion);
 
-    return $"networklog:v12:{sortedSessionIds}:{providerKey}:{networkTypeKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
+    return $"networklog:v12:{GetProjectListCacheScope()}:{sortedSessionIds}:{providerKey}:{networkTypeKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
 }
 
 private static string CleanProviderDisplayName(string value)
@@ -4833,7 +4833,7 @@ public async Task<IActionResult> GetLatLonDistribution(
     // ========================================
     // ðŸ”‘ BUILD REDIS CACHE KEY
     // ========================================
-    string cacheKey = $"latlon:dist:{string.Join("-", sessionIdList)}";
+    string cacheKey = $"latlon:dist:{GetProjectListCacheScope()}:{string.Join("-", sessionIdList)}";
 
     var totalStopwatch = System.Diagnostics.Stopwatch.StartNew();
 
@@ -5158,7 +5158,7 @@ public async Task<IActionResult> GetN78NeighboursSimple([FromQuery] string sessi
         return BadRequest("No valid sessionIds");
 
     string sessionCsv = string.Join(",", parsedIds);
-    string cacheKey = $"n78_simple_kpi:{sessionCsv}";
+    string cacheKey = $"n78_simple_kpi:{GetProjectListCacheScope()}:{sessionCsv}";
 
     // ================= REDIS READ =================
     if (_redis != null && _redis.IsConnected)
@@ -5409,7 +5409,7 @@ public async Task<IActionResult> GetN78Neighbours([FromQuery] string session_ids
     string projectKey = project_id.HasValue && project_id.Value > 0
         ? project_id.Value.ToString(CultureInfo.InvariantCulture)
         : "no_project";
-    string cacheKey = $"n78_neighbours:v2:{sessionCsv}:project:{projectKey}";
+    string cacheKey = $"n78_neighbours:v2:{GetProjectListCacheScope()}:{sessionCsv}:project:{projectKey}";
     var projectPolygonWkt = await ResolveProjectFilterWktAsync(project_id);
 
     // ================= 2. REDIS READ =================
