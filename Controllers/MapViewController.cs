@@ -2858,10 +2858,10 @@ private static double? AsDouble(object? value)
 
 public class MapFilter1
 {
-    public string session_ids { get; set; }
-    public string sessionIds { get; set; }
-    public string session_Ids { get; set; }
-    public string sessionId { get; set; }
+    public string? session_ids { get; set; }
+    public string? sessionIds { get; set; }
+    public string? session_Ids { get; set; }
+    public string? sessionId { get; set; }
     public int page { get; set; } = 1;
     public int limit { get; set; } = 20000;
     public string NetworkType { get; set; } = "ALL";
@@ -12514,7 +12514,14 @@ public async Task<JsonResult> GetDominanceDetails([FromQuery] MapFilter1 filters
     }
 }
 [HttpGet, Route("GetPciDistribution")]
-public async Task<JsonResult> GetPciDistribution([FromQuery] MapFilter1 filters)
+public Task<JsonResult> GetPciDistribution([FromQuery] MapFilter1 filters)
+    => GetPciDistributionCore(filters);
+
+[HttpPost, Route("GetPciDistribution")]
+public Task<JsonResult> GetPciDistributionPost([FromBody] MapFilter1 filters)
+    => GetPciDistributionCore(filters);
+
+private async Task<JsonResult> GetPciDistributionCore(MapFilter1 filters)
 {
     var sessionIds = filters?.GetSessionIds() ?? new List<long>();
     
