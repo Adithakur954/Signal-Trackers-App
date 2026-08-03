@@ -31,15 +31,29 @@ namespace SignalTracker.Controllers
         private static bool IsUniqueValueHeader(string? header) =>
             !string.IsNullOrWhiteSpace(header) && UniqueValueHeaders.Contains(header.Trim());
 
+        private static bool RowHasImageName(WalkTestLogRow r, string? headerUpper = null)
+        {
+            if (!string.IsNullOrWhiteSpace(r.RawImageName))
+                return true;
+
+            if (r.MetricColors != null && r.MetricColors.Count > 0)
+                return true;
+
+            return false;
+        }
+
         private static List<string> GetUniqueValuesForHeader(List<WalkTestLogRow> rows, string header)
         {
             var headerUpper = (header ?? "").ToUpperInvariant().Trim();
 
+            var validImageRows = rows.Where(r => RowHasImageName(r, headerUpper)).ToList();
+            var targetRows = validImageRows.Count > 0 ? validImageRows : rows;
+
             IEnumerable<string?> rawValues = headerUpper switch
             {
-                "PCI"      => rows.Select(r => r.Pci),
-                "NODEB_ID" => rows.Select(r => r.NodeBId),
-                "CELL_ID" or "CI" or "CELLID" or "CID" => rows.Select(r => r.CellId),
+                "PCI"      => targetRows.Select(r => r.Pci),
+                "NODEB_ID" => targetRows.Select(r => r.NodeBId),
+                "CELL_ID" or "CI" or "CELLID" or "CID" => targetRows.Select(r => r.CellId),
                 _          => Enumerable.Empty<string?>()
             };
 
@@ -188,6 +202,12 @@ namespace SignalTracker.Controllers
             if (rows.Count == 0)
                 return BadRequest(new { Message = "No usable network log rows were found inside the zip." });
 
+            var imageRows = rows.Where(r => RowHasImageName(r)).ToList();
+            if (imageRows.Count > 0)
+            {
+                rows = imageRows;
+            }
+
             var bandsPresent = rows
                 .Select(r => r.BandSheetName)
                 .Where(b => !string.IsNullOrWhiteSpace(b))
@@ -272,7 +292,10 @@ namespace SignalTracker.Controllers
             var rawRows = ExtractNetworkRowsFromZip(archive, sessionId);
             var rows = CleanZipRows(rawRows);
 
-            var validRows = rows
+            var imageRows = rows.Where(r => RowHasImageName(r)).ToList();
+            var rowsToSummarize = imageRows.Count > 0 ? imageRows : rows;
+
+            var validRows = rowsToSummarize
                 .Where(r => !string.IsNullOrWhiteSpace(r.BandSheetName) &&
                             !r.BandSheetName.Equals("Unknown Band", StringComparison.OrdinalIgnoreCase) &&
                             !r.BandSheetName.Equals("Unknown", StringComparison.OrdinalIgnoreCase))
@@ -293,7 +316,7 @@ namespace SignalTracker.Controllers
             return Ok(new
             {
                 SessionId = sessionId,
-                TotalRows = rows.Count,
+                TotalRows = rowsToSummarize.Count,
                 AvailableBands = bandSummary
             });
             }
@@ -405,9 +428,21 @@ namespace SignalTracker.Controllers
 
             var csvEntries = archive.Entries
                 .Where(e => e.FullName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase))
-                .Where(e => !Path.GetFileName(e.FullName).StartsWith("ColorSettings", StringComparison.OrdinalIgnoreCase) &&
-                            !Path.GetFileName(e.FullName).StartsWith("SiteSummary", StringComparison.OrdinalIgnoreCase) &&
-                            !Path.GetFileName(e.FullName).StartsWith("sites", StringComparison.OrdinalIgnoreCase))
+                .Where(e => {
+                    var fn = Path.GetFileName(e.FullName);
+                    if (fn.StartsWith("ColorSettings", StringComparison.OrdinalIgnoreCase) ||
+                        fn.StartsWith("SiteSummary", StringComparison.OrdinalIgnoreCase) ||
+                        fn.StartsWith("sites", StringComparison.OrdinalIgnoreCase) ||
+                        fn.StartsWith("Event", StringComparison.OrdinalIgnoreCase) ||
+                        fn.StartsWith("L3", StringComparison.OrdinalIgnoreCase) ||
+                        fn.Contains("Unsent", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return false;
+                    }
+                    return fn.StartsWith("NetworkLog", StringComparison.OrdinalIgnoreCase) ||
+                           fn.StartsWith("log", StringComparison.OrdinalIgnoreCase) ||
+                           fn.Contains("network", StringComparison.OrdinalIgnoreCase);
+                })
                 .OrderBy(e => e.FullName, StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
@@ -442,7 +477,7 @@ namespace SignalTracker.Controllers
                 Rsrp = -1, Rsrq = -1, Sinr = -1, DlTpt = -1, UlTpt = -1, Earfcn = -1,
                 VolteCall = -1, Band = -1, Bler = -1, AlphaLong = -1, AlphaShort = -1,
                 NodebId = -1, Apps = -1, PuschTx = -1, Ta = -1, Cqi = -1, Level = -1, Primary = -1,
-                PrimaryCellInfo = -1;
+                PrimaryCellInfo = -1, ImageName = -1;
         }
 
         private static ZipColumnMap BuildZipColumnMap(List<string> headers)
@@ -481,7 +516,8 @@ namespace SignalTracker.Controllers
                 Cqi = FindZipColumn(headers, "cqi"),
                 Level = FindZipColumn(headers, "level"),
                 Primary = FindZipColumnByName(headers, "primary"),
-                PrimaryCellInfo = FindZipColumnByName(headers, "cellinfo_1", "primary_cell_info_1")
+                PrimaryCellInfo = FindZipColumnByName(headers, "cellinfo_1", "primary_cell_info_1"),
+                ImageName = FindZipColumn(headers, "image name", "image_name")
             };
         }
 
@@ -516,6 +552,69 @@ namespace SignalTracker.Controllers
         private static string NormalizeZipColumnName(string value) =>
             Regex.Replace(value.Trim(), @"[^a-z0-9]+", "", RegexOptions.IgnoreCase);
 
+        private static Dictionary<string, string>? ParseImageNameColors(string? imageName)
+        {
+            if (string.IsNullOrWhiteSpace(imageName)) return null;
+
+            var parts = imageName.Split("@@", StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length <= 1) return null;
+
+            var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            for (int i = 1; i < parts.Length; i++)
+            {
+                var part = parts[i].Trim();
+                var match = Regex.Match(part, @"^(.*?)\((#[0-9A-Fa-f]{6}|#[0-9A-Fa-f]{8})\)$");
+                if (match.Success)
+                {
+                    var metricName = match.Groups[1].Value.Trim();
+                    var colorHex = match.Groups[2].Value.Trim();
+                    if (!string.IsNullOrEmpty(metricName) && !string.IsNullOrEmpty(colorHex))
+                    {
+                        dict[metricName] = colorHex;
+                    }
+                }
+            }
+
+            return dict.Count > 0 ? dict : null;
+        }
+
+        private static string? GetHexColorFromRows(List<WalkTestLogRow> rows, string headerUpper)
+        {
+            if (rows == null || rows.Count == 0) return null;
+
+            string[] metricKeys = (headerUpper ?? "").ToUpperInvariant().Trim() switch
+            {
+                "PCI" => new[] { "PCI" },
+                "NODEB_ID" or "NODEB" => new[] { "NodeB ID", "NodeB_ID", "NODEB_ID", "NodeB" },
+                "CELL_ID" or "CI" or "CELLID" or "CID" => new[] { "CI", "Cell ID", "CELL_ID", "CellID" },
+                "EARFCN" => new[] { "EARFCN" },
+                "RSRP" => new[] { "RSRP" },
+                "RSRQ" => new[] { "RSRQ" },
+                "SINR" => new[] { "SINR" },
+                "DL_THPT" => new[] { "DL THPT", "DL_THPT" },
+                "UL_THPT" => new[] { "UL THPT", "UL_THPT" },
+                "PUSCH_TX" => new[] { "PUSCH Tx", "PUSCH_TX" },
+                "BLER" or "LTE_BLER" => new[] { "LTE BLER", "BLER" },
+                "VOLTE" or "VOLTE_CALL" => new[] { "VoLTE Call", "VOLTE" },
+                _ => new[] { headerUpper ?? "" }
+            };
+
+            foreach (var r in rows)
+            {
+                if (r.MetricColors == null) continue;
+                foreach (var key in metricKeys)
+                {
+                    if (r.MetricColors.TryGetValue(key, out var colorHex) && !string.IsNullOrWhiteSpace(colorHex))
+                    {
+                        return colorHex.Trim();
+                    }
+                }
+            }
+
+            return null;
+        }
+
         private WalkTestLogRow? ParseZipRow(List<string> cols, ZipColumnMap map, long sessionId, ref int nextId)
         {
             var tsRaw = GetZipCol(cols, map.Timestamp);
@@ -530,6 +629,9 @@ namespace SignalTracker.Controllers
 
             var band = GetZipCol(cols, map.Band);
             var network = GetZipCol(cols, map.Network);
+
+            var imageNameRaw = GetZipCol(cols, map.ImageName);
+            var metricColors = ParseImageNameColors(imageNameRaw);
 
             return new WalkTestLogRow
             {
@@ -559,7 +661,9 @@ namespace SignalTracker.Controllers
                 Ta = map.PuschTx >= 0 ? GetZipCol(cols, map.PuschTx) : GetZipCol(cols, map.Ta),
                 Cqi = ParseFloatSafe(GetZipCol(cols, map.Cqi)),
                 Level = ParseIntSafe(GetZipCol(cols, map.Level)),
-                Primary = GetZipCol(cols, map.Primary)
+                Primary = GetZipCol(cols, map.Primary),
+                RawImageName = NormalizeZipText(imageNameRaw),
+                MetricColors = metricColors
             };
         }
 
@@ -609,7 +713,7 @@ namespace SignalTracker.Controllers
                 if (r.Lat == 0 && r.Lon == 0) { r.Lat = null; r.Lon = null; }
 
                 var dedupeKey = string.Join('|',
-                    r.SessionId, r.Timestamp?.Ticks, r.Pci, r.Rsrp, r.Rsrq, r.Band);
+                    r.SessionId, r.Timestamp?.Ticks, r.Pci, r.Rsrp, r.Rsrq, r.Band, r.Lat, r.Lon, r.RawImageName, r.Id);
                 if (!seen.Add(dedupeKey)) continue;
 
                 cleaned.Add(r);
@@ -796,6 +900,11 @@ namespace SignalTracker.Controllers
                 ApplyZipMetricRanges(rangesByMetric, "VOLTE", ranges => thresholds.VolteCall = ranges);
                 ApplyZipMetricRanges(rangesByMetric, "VOLTE_CALL", ranges => thresholds.VolteCall = ranges);
                 ApplyZipMetricRanges(rangesByMetric, "PUSCH_TX", ranges => thresholds.PuschTx = ranges);
+                ApplyZipMetricRanges(rangesByMetric, "PCI", ranges => thresholds.Pci = ranges);
+                ApplyZipMetricRanges(rangesByMetric, "NODEB_ID", ranges => thresholds.NodeBId = ranges);
+                ApplyZipMetricRanges(rangesByMetric, "NODEB", ranges => thresholds.NodeBId = ranges);
+                ApplyZipMetricRanges(rangesByMetric, "CELL_ID", ranges => thresholds.CellId = ranges);
+                ApplyZipMetricRanges(rangesByMetric, "CI", ranges => thresholds.CellId = ranges);
 
                 thresholds.Source = $"Log zip color settings ({Path.GetFileName(entry.FullName)})";
             }
@@ -1330,7 +1439,8 @@ namespace SignalTracker.Controllers
         {
             var sheet = new XlsxSheet("Site Summary")
             {
-                ColumnWidths = new double[] { 14, 14, 12, 12, 12, 14, 14, 11, 11, 12, 12, 10, 10, 10, 12, 12, 12, 16, 18, 14, 14, 12 }
+                ColumnWidths = new double[] { 14, 14, 12, 12, 12, 14, 14, 11, 11, 12, 12, 10, 10, 10, 12, 12, 12, 16, 18, 14, 14, 12 },
+                FreezeTopRow = false
             };
 
             sheet.Rows.Add(XlsxRow.Title($"Walk Test Excel Report - {projectName}", 22));
@@ -1339,40 +1449,40 @@ namespace SignalTracker.Controllers
             sheet.Rows.Add(XlsxRow.FromText("Band Sheets", string.Join(", ", rows.Select(x => x.BandSheetName).Distinct().OrderBy(x => x))));
             sheet.Rows.Add(XlsxRow.Blank());
 
-            sheet.Rows.Add(XlsxRow.Header(
-                "Source", "Site", "Site Name", "Sector", "Cell ID", "Sec ID", "Latitude", "Longitude",
-                "TAC", "PCI", "Band", "EARFCN", "Azimuth", "Height", "BW", "M Tilt", "E Tilt",
-                "Tx Power", "Reference Signal Power", "Frequency", "Cluster", "Technology"));
-
-            foreach (var row in siteRows)
+            if (siteRows.Count > 0)
             {
-                sheet.Rows.Add(XlsxRow.Data(
-                    row.Source,
-                    FormatValue(row.Site),
-                    FormatValue(row.SiteName),
-                    row.Sector,
-                    FormatValue(row.CellId),
-                    FormatValue(row.SecId),
-                    FormatValue(row.Latitude),
-                    FormatValue(row.Longitude),
-                    FormatValue(row.Tac),
-                    FormatValue(row.Pci),
-                    FormatBandValue(row.Band),
-                    FormatValue(row.Earfcn),
-                    FormatValue(row.Azimuth),
-                    FormatValue(row.Height),
-                    FormatValue(row.Bw),
-                    FormatValue(row.MTilt),
-                    FormatValue(row.ETilt),
-                    FormatValue(row.TxPower),
-                    FormatValue(row.ReferenceSignalPower),
-                    row.Frequency,
-                    row.Cluster,
-                    row.Technology));
-            }
+                sheet.Rows.Add(XlsxRow.Header(
+                    "Source", "Site", "Site Name", "Sector", "Cell ID", "Sec ID", "Latitude", "Longitude",
+                    "TAC", "PCI", "Band", "EARFCN", "Azimuth", "Height", "BW", "M Tilt", "E Tilt",
+                    "Tx Power", "Reference Signal Power", "Frequency", "Cluster", "Technology"));
 
-            if (siteRows.Count == 0)
-                sheet.Rows.Add(XlsxRow.Data("No site prediction rows found for this project."));
+                foreach (var row in siteRows)
+                {
+                    sheet.Rows.Add(XlsxRow.Data(
+                        row.Source,
+                        FormatValue(row.Site),
+                        FormatValue(row.SiteName),
+                        row.Sector,
+                        FormatValue(row.CellId),
+                        FormatValue(row.SecId),
+                        FormatValue(row.Latitude),
+                        FormatValue(row.Longitude),
+                        FormatValue(row.Tac),
+                        FormatValue(row.Pci),
+                        FormatBandValue(row.Band),
+                        FormatValue(row.Earfcn),
+                        FormatValue(row.Azimuth),
+                        FormatValue(row.Height),
+                        FormatValue(row.Bw),
+                        FormatValue(row.MTilt),
+                        FormatValue(row.ETilt),
+                        FormatValue(row.TxPower),
+                        FormatValue(row.ReferenceSignalPower),
+                        row.Frequency,
+                        row.Cluster,
+                        row.Technology));
+                }
+            }
 
             return sheet;
         }
@@ -1425,7 +1535,7 @@ namespace SignalTracker.Controllers
             for (int c = 0; c < 15; c++)
                 columnWidths[c] = 13.5; // ~100 px per cell
 
-            var sheet = new XlsxSheet(bandName) { ColumnWidths = columnWidths };
+            var sheet = new XlsxSheet(bandName) { ColumnWidths = columnWidths, FreezeTopRow = false };
 
             const int colLeft    = 0;  // A – left map image anchor
             const int colRight   = 9;  // J – right map image anchor
@@ -1463,7 +1573,7 @@ namespace SignalTracker.Controllers
 
                 // ── 2. Resolve legend photo & overlay onto map image ──────────────────
                 var leftRawBytes    = leftItem.Bytes!;
-                var leftLegendBytes = TryResolveLegendPhoto(imageBytesByUrl, primarySessionId, leftItem.Header, allRows, thresholds);
+                var leftLegendBytes = TryResolveLegendPhoto(imageBytesByUrl, primarySessionId, leftItem.Header, bandRows, thresholds);
                 var leftBytes       = OverlayLegendOnMap(leftRawBytes, leftLegendBytes);
                 var leftSize        = ScaleToEmu(ReadPngSizePx(leftBytes), maxWidthEmu);
 
@@ -1472,7 +1582,7 @@ namespace SignalTracker.Controllers
                 if (rightItem != null)
                 {
                     var rightRawBytes    = rightItem.Bytes!;
-                    var rightLegendBytes = TryResolveLegendPhoto(imageBytesByUrl, primarySessionId, rightItem.Header, allRows, thresholds);
+                    var rightLegendBytes = TryResolveLegendPhoto(imageBytesByUrl, primarySessionId, rightItem.Header, bandRows, thresholds);
                     rightBytes           = OverlayLegendOnMap(rightRawBytes, rightLegendBytes);
                     rightSize            = ScaleToEmu(ReadPngSizePx(rightBytes), maxWidthEmu);
                 }
@@ -1585,9 +1695,14 @@ namespace SignalTracker.Controllers
             IReadOnlyDictionary<string, byte[]?> imageBytesByUrl,
             int primarySessionId,
             string header,
-            List<WalkTestLogRow> allRows,
+            List<WalkTestLogRow> bandRows,
             ReportThresholdConfig thresholds)
         {
+            if (bandRows != null && bandRows.Count > 0)
+            {
+                return GenerateLegendPng(header, bandRows, thresholds);
+            }
+
             var headerUpper = header.ToUpperInvariant();
             var headerLower = header.ToLowerInvariant();
 
@@ -1618,7 +1733,7 @@ namespace SignalTracker.Controllers
                 }
             }
 
-            return GenerateLegendPng(header, allRows, thresholds);
+            return GenerateLegendPng(header, bandRows, thresholds);
         }
 
         private static byte[] OverlayLegendOnMap(byte[] mapBytes, byte[]? legendBytes)
@@ -1697,11 +1812,14 @@ namespace SignalTracker.Controllers
 
             var headerUpper = (header ?? "").ToUpperInvariant().Trim();
 
+            var validImageRows = rows.Where(r => RowHasImageName(r, headerUpper)).ToList();
+            var targetRows = validImageRows.Count > 0 ? validImageRows : rows;
+
             if (headerUpper == "RSRP" || headerUpper == "RSRQ" || headerUpper == "SINR" ||
                 headerUpper == "DL_THPT" || headerUpper == "UL_THPT" || headerUpper == "LTE_BLER" ||
                 headerUpper == "MOS" || headerUpper == "PUSCH_TX" || headerUpper == "EARFCN")
             {
-                var values = rows.Select(x =>
+                var values = targetRows.Select(x =>
                     headerUpper == "RSRP" ? (double?)x.Rsrp :
                     headerUpper == "RSRQ" ? (double?)x.Rsrq :
                     headerUpper == "SINR" ? (double?)x.Sinr :
@@ -1731,19 +1849,19 @@ namespace SignalTracker.Controllers
             }
             else
             {
-                int total = rows.Count > 0 ? rows.Count : 1;
+                int total = targetRows.Count > 0 ? targetRows.Count : 1;
                 foreach (var item in result)
                 {
                     if (!string.IsNullOrWhiteSpace(item.Range.ValueMatch))
                     {
-                        item.Count = rows.Count(x =>
+                        item.Count = targetRows.Count(x =>
                             (x.Band ?? "").Contains(item.Range.ValueMatch, StringComparison.OrdinalIgnoreCase) ||
                             (x.Earfcn ?? "").Contains(item.Range.ValueMatch, StringComparison.OrdinalIgnoreCase) ||
                             (x.VolteCall ?? "").Contains(item.Range.ValueMatch, StringComparison.OrdinalIgnoreCase));
                     }
                     else
                     {
-                        item.Count = rows.Count;
+                        item.Count = targetRows.Count;
                     }
 
                     item.Percentage = (item.Count * 100.0) / total;
@@ -1902,6 +2020,9 @@ namespace SignalTracker.Controllers
             public List<ThresholdRange> Bler { get; set; } = new();
             public List<ThresholdRange> VolteCall { get; set; } = new();
             public List<ThresholdRange> PuschTx { get; set; } = new();
+            public List<ThresholdRange> Pci { get; set; } = new();
+            public List<ThresholdRange> NodeBId { get; set; } = new();
+            public List<ThresholdRange> CellId { get; set; } = new();
 
             public List<ThresholdRange> GetRangesForHeader(string header)
             {
@@ -1918,8 +2039,43 @@ namespace SignalTracker.Controllers
                     "LTE_BLER" or "BLER" => Bler,
                     "VOLTE_CALL" or "VOLTE" => VolteCall,
                     "PUSCH_TX" => PuschTx,
+                    "PCI" => Pci,
+                    "NODEB_ID" or "NODEB" => NodeBId,
+                    "CELL_ID" or "CI" or "CELLID" or "CID" => CellId,
                     _ => Rsrp
                 };
+            }
+
+            public string? GetColorForValue(string header, string value)
+            {
+                if (string.IsNullOrWhiteSpace(value)) return null;
+
+                var ranges = GetRangesForHeader(header);
+                if (ranges == null || ranges.Count == 0) return null;
+
+                var trimmedValue = value.Trim();
+
+                foreach (var r in ranges)
+                {
+                    if (!string.IsNullOrWhiteSpace(r.ValueMatch) &&
+                        r.ValueMatch.Equals(trimmedValue, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return r.ColorHex;
+                    }
+                }
+
+                if (double.TryParse(trimmedValue, NumberStyles.Any, CultureInfo.InvariantCulture, out var dVal))
+                {
+                    foreach (var r in ranges)
+                    {
+                        if (string.IsNullOrWhiteSpace(r.ValueMatch) && dVal >= r.Min && dVal <= r.Max)
+                        {
+                            return r.ColorHex;
+                        }
+                    }
+                }
+
+                return null;
             }
 
             public static ReportThresholdConfig? FromSessionNotes(string? notes, string source)
@@ -2236,7 +2392,7 @@ namespace SignalTracker.Controllers
             if (imageBytesByUrl.TryGetValue(url2, out var b3) && b3 != null && b3.Length > 0)
                 return b3;
 
-            return GenerateLegendPng(header);
+            return GenerateLegendPng(header, bandRows, thresholds);
         }
 
         /// <summary>
@@ -2259,23 +2415,51 @@ namespace SignalTracker.Controllers
             var lines = new List<(string Label, Rgba32 Color)>();
             if (isUniqueValues && uniqueVals != null)
             {
-                var totalCount = allRows.Count;
                 var headerUpper = header.ToUpperInvariant().Trim();
+                var validImageRows = allRows.Where(r => RowHasImageName(r, headerUpper)).ToList();
+                var targetRows = validImageRows.Count > 0 ? validImageRows : allRows;
+                var totalCount = targetRows.Count;
 
                 for (int i = 0; i < uniqueVals.Count; i++)
                 {
                     var val = uniqueVals[i];
-                    int valCount = allRows.Count(r =>
+                    var matchingRows = targetRows.Where(r =>
                         string.Equals(headerUpper switch
                         {
                             "PCI" => r.Pci,
                             "NODEB_ID" => r.NodeBId,
                             _ => r.CellId
-                        }, val, StringComparison.OrdinalIgnoreCase));
+                        }, val, StringComparison.OrdinalIgnoreCase)).ToList();
+
+                    int valCount = matchingRows.Count;
 
                     double pct = totalCount > 0 ? (valCount * 100.0 / totalCount) : 0;
                     string lineLabel = $"{headerUpper} {val}  ({valCount} : {pct:0.00}%)";
-                    lines.Add((lineLabel, new Rgba32(80, 85, 95)));
+
+                    // Strict 2-step color lookup:
+                    // 1. From Image Name (MetricColors) of matching rows
+                    string? hexColor = GetHexColorFromRows(matchingRows, headerUpper);
+
+                    // 2. From ColorSettings / thresholds
+                    if (string.IsNullOrWhiteSpace(hexColor))
+                    {
+                        hexColor = thresholds.GetColorForValue(headerUpper, val);
+                    }
+
+                    // 3. Fallback to distinct palette color per unique value
+                    if (string.IsNullOrWhiteSpace(hexColor))
+                    {
+                        var palette = new[]
+                        {
+                            "#4A148C", "#2196F3", "#4CAF50", "#FF9800", "#E91E63", "#9C27B0",
+                            "#00BCD4", "#FF5722", "#795548", "#607D8B", "#3F51B5", "#009688",
+                            "#D81B60", "#8E24AA", "#1E88E5", "#00ACC1", "#43A047", "#FB8C00"
+                        };
+                        hexColor = palette[i % palette.Length];
+                    }
+
+                    var (r, g, b) = ParseHexColor(hexColor);
+                    lines.Add((lineLabel, new Rgba32(r, g, b)));
                 }
 
                 if (lines.Count == 0)
@@ -2287,7 +2471,15 @@ namespace SignalTracker.Controllers
             {
                 foreach (var stat in stats)
                 {
-                    var (r, g, b) = ParseHexColor(stat.Range.ColorHex);
+                    var hexColor = stat.Range.ColorHex;
+                    if (string.IsNullOrWhiteSpace(hexColor) || hexColor.Equals("#808080", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var imgColor = GetHexColorFromRows(allRows, header);
+                        if (!string.IsNullOrWhiteSpace(imgColor))
+                            hexColor = imgColor;
+                    }
+
+                    var (r, g, b) = ParseHexColor(hexColor);
                     var rangeDisplay = isEarfcn ? stat.Range.Display : stat.Range.RangeOnlyDisplay;
                     if (string.IsNullOrWhiteSpace(rangeDisplay)) rangeDisplay = stat.Range.Display;
 
@@ -2332,7 +2524,7 @@ namespace SignalTracker.Controllers
             }
             var titleWidth = titlePaint.MeasureText(titleText);
 
-            int width = Math.Max(420, padding * 2 + (isUniqueValues ? 0 : boxW + textPadding) + (int)Math.Ceiling(maxTextWidth) + 16);
+            int width = Math.Max(420, padding * 2 + boxW + textPadding + (int)Math.Ceiling(maxTextWidth) + 16);
             width = Math.Max(width, padding * 2 + (int)Math.Ceiling(titleWidth) + 16);
 
             int titleBlockHeight = titleFontSize + titleGap + 6;
@@ -2372,14 +2564,11 @@ namespace SignalTracker.Controllers
                 var (label, color) = lines[i];
                 int boxTop = listTop + i * (boxH + spacing);
 
-                if (!isUniqueValues)
-                {
-                    using var boxFill = new SKPaint { Color = new SKColor(color.R, color.G, color.B), IsAntialias = true };
-                    var rect = new SKRect(padding, boxTop, padding + boxW, boxTop + boxH);
-                    canvas.DrawRect(rect, boxFill);
-                }
+                using var boxFill = new SKPaint { Color = new SKColor(color.R, color.G, color.B), IsAntialias = true };
+                var rect = new SKRect(padding, boxTop, padding + boxW, boxTop + boxH);
+                canvas.DrawRect(rect, boxFill);
 
-                var textX = isUniqueValues ? padding : padding + boxW + textPadding;
+                var textX = padding + boxW + textPadding;
                 var textY = boxTop + boxH - 1;
                 canvas.DrawText(label ?? "", textX, textY, font, textPaint);
             }
@@ -2580,6 +2769,8 @@ namespace SignalTracker.Controllers
             public string? Ta { get; set; }
             public int? Level { get; set; }
             public string? Primary { get; set; }
+            public string? RawImageName { get; set; }
+            public Dictionary<string, string>? MetricColors { get; set; }
         }
 
         private sealed class WalkTestSiteSummaryRow
@@ -2627,6 +2818,7 @@ namespace SignalTracker.Controllers
             public double[]? ColumnWidths { get; set; }
             public List<XlsxRow> Rows { get; } = new();
             public List<XlsxImage> Images { get; } = new();
+            public bool FreezeTopRow { get; set; } = false;
         }
 
         /// <summary>
@@ -2797,7 +2989,8 @@ namespace SignalTracker.Controllers
                     var name = MakeUniqueSheetName(SanitizeSheetName(sheet.Name), used);
                     var copy = new XlsxSheet(name)
                     {
-                        ColumnWidths = sheet.ColumnWidths
+                        ColumnWidths = sheet.ColumnWidths,
+                        FreezeTopRow = sheet.FreezeTopRow
                     };
                     copy.Rows.AddRange(sheet.Rows);
                     copy.Images.AddRange(sheet.Images);
@@ -2979,12 +3172,15 @@ namespace SignalTracker.Controllers
                     writer.WriteStartElement("sheetViews", MainNs);
                     writer.WriteStartElement("sheetView", MainNs);
                     writer.WriteAttributeString("workbookViewId", "0");
-                    writer.WriteStartElement("pane", MainNs);
-                    writer.WriteAttributeString("ySplit", "1");
-                    writer.WriteAttributeString("topLeftCell", "A2");
-                    writer.WriteAttributeString("activePane", "bottomLeft");
-                    writer.WriteAttributeString("state", "frozen");
-                    writer.WriteEndElement();
+                    if (sheet.FreezeTopRow)
+                    {
+                        writer.WriteStartElement("pane", MainNs);
+                        writer.WriteAttributeString("ySplit", "1");
+                        writer.WriteAttributeString("topLeftCell", "A2");
+                        writer.WriteAttributeString("activePane", "bottomLeft");
+                        writer.WriteAttributeString("state", "frozen");
+                        writer.WriteEndElement();
+                    }
                     writer.WriteEndElement();
                     writer.WriteEndElement();
 
