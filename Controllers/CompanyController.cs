@@ -738,6 +738,135 @@ public async Task<IActionResult> GetUsedLicenses(
 }
 
 // ======================================================
+// CREATE USER FOR COMPANY
+// Super Admin can pass company_id. Company Admin is locked to own company.
+// ======================================================
+[HttpPost("createUser")]
+public async Task<IActionResult> CreateCompanyUser([FromBody] CreateCompanyUserRequest request)
+{
+    try
+    {
+        if (request == null)
+            return BadRequest(new { Status = 0, Message = "Invalid request data" });
+
+        if (string.IsNullOrWhiteSpace(request.name))
+            return BadRequest(new { Status = 0, Message = "Name is required" });
+
+        if (string.IsNullOrWhiteSpace(request.email))
+            return BadRequest(new { Status = 0, Message = "Email is required" });
+
+        if (string.IsNullOrWhiteSpace(request.password))
+            return BadRequest(new { Status = 0, Message = "Password is required" });
+
+        var email = request.email.Trim().ToLowerInvariant();
+        var targetCompanyId = _userScope.GetTargetCompanyId(User, request.company_id);
+
+        if (targetCompanyId <= 0)
+            return BadRequest(new { Status = 0, Message = "A valid company_id is required" });
+
+        var company = await _db.tbl_company.FirstOrDefaultAsync(c => c.id == targetCompanyId && c.status != 99);
+        if (company == null)
+            return NotFound(new { Status = 0, Message = "Company not found" });
+
+        var emailExists = await _db.tbl_user
+            .AsNoTracking()
+            .AnyAsync(u => u.isactive != 2 && u.email != null && u.email.ToLower() == email);
+
+        if (emailExists)
+            return Conflict(new { Status = 0, Message = "User already exists with this email" });
+
+        var issuedLicenseCount = await _db.tbl_company_user_license_issued
+            .AsNoTracking()
+            .CountAsync(l => l.tbl_company_id == targetCompanyId && l.status != 2);
+
+        var grantedLicenses = company.total_granted_licenses ?? 0;
+        if (grantedLicenses > 0 && issuedLicenseCount >= grantedLicenses)
+            return BadRequest(new { Status = 0, Message = "No available licenses for this company" });
+
+        var hashedPassword = PasswordSecurity.HashPassword(request.password.Trim());
+        var user = new tbl_user
+        {
+            name = request.name.Trim(),
+            mobile = request.mobile?.Trim(),
+            email = email,
+            password = hashedPassword,
+            company_id = targetCompanyId,
+            country_code = !string.IsNullOrWhiteSpace(request.country_code) ? request.country_code.Trim() : company.country_code,
+            isd_code = !string.IsNullOrWhiteSpace(request.isd_code) ? request.isd_code.Trim() : company.isd_code,
+            date_created = DateTime.UtcNow,
+            isactive = request.isactive ?? 1,
+            m_user_type_id = request.m_user_type_id ?? 3,
+            token = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N"),
+            uid = Guid.NewGuid().ToString()
+        };
+
+        _db.tbl_user.Add(user);
+        await _db.SaveChangesAsync();
+
+        var validityMonths = request.license_validity_in_months
+            ?? company.license_validity_in_months
+            ?? 12;
+        if (validityMonths <= 0)
+            validityMonths = 12;
+
+        var license = new tbl_company_user_license_issued
+        {
+            tbl_company_id = targetCompanyId,
+            tbl_user_id = user.id,
+            license_code = string.IsNullOrWhiteSpace(request.license_code)
+                ? $"LIC-{targetCompanyId}-{user.id}-{Guid.NewGuid():N}".Substring(0, 24).ToUpperInvariant()
+                : request.license_code.Trim(),
+            valid_till = request.valid_till ?? DateTime.UtcNow.AddMonths(validityMonths),
+            created_on = DateTime.UtcNow,
+            status = request.license_status ?? 1
+        };
+
+        _db.tbl_company_user_license_issued.Add(license);
+        company.total_used_licenses = issuedLicenseCount + 1;
+        await _db.SaveChangesAsync();
+
+        var requestedFeatures = LicenseFeatureService.ExtractFeaturesFromRequest(
+            features: request.features,
+            featureList: request.feature_list,
+            enabledFeatures: request.enabled_features,
+            permissions: request.permissions,
+            featureCodes: request.feature_codes,
+            featuresCsv: request.features_csv);
+
+        if (requestedFeatures != null)
+            await _licenseFeatureService.UpsertLicenseFeaturesAsync(license.id, requestedFeatures);
+
+        return Ok(new
+        {
+            Status = 1,
+            Message = "User created successfully",
+            Data = new
+            {
+                user_id = user.id,
+                user_name = user.name,
+                user_email = user.email,
+                user_mobile = user.mobile,
+                company_id = targetCompanyId,
+                company_name = company.company_name,
+                license_id = license.id,
+                license.license_code,
+                license.valid_till,
+                license_status = license.status
+            }
+        });
+    }
+    catch (Exception ex)
+    {
+        return StatusCode(500, new
+        {
+            Status = 0,
+            Message = "Error creating user",
+            Error = SafeException.Get(ex?.InnerException) ?? SafeException.Get(ex)
+        });
+    }
+}
+
+// ======================================================
 // REVOKE LICENSE
 // ======================================================
 // ======================================================
@@ -1123,6 +1252,29 @@ public class UpdateCompanyUserRequest
     public string? password { get; set; }
     public int? isactive { get; set; }
     public int? m_user_type_id { get; set; }
+}
+
+public class CreateCompanyUserRequest
+{
+    public int? company_id { get; set; }
+    public string? name { get; set; }
+    public string? email { get; set; }
+    public string? mobile { get; set; }
+    public string? country_code { get; set; }
+    public string? isd_code { get; set; }
+    public string? password { get; set; }
+    public int? isactive { get; set; }
+    public int? m_user_type_id { get; set; }
+    public int? license_validity_in_months { get; set; }
+    public string? license_code { get; set; }
+    public DateTime? valid_till { get; set; }
+    public int? license_status { get; set; }
+    public List<string>? features { get; set; }
+    public List<string>? feature_list { get; set; }
+    public List<string>? enabled_features { get; set; }
+    public List<string>? permissions { get; set; }
+    public string? feature_codes { get; set; }
+    public string? features_csv { get; set; }
 }
 
 public class UpdateIssuedLicenseRequest
