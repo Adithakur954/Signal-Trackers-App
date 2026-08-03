@@ -615,15 +615,26 @@ public class IndoorOutdoorSessionFilter
     public string? SessionIds { get; set; }      // "101,102,103"
     public string? sessionIds { get; set; }
     public string? session_ids { get; set; }
-    public string? session_Ids { get; set; }
     public string? sessionId { get; set; }
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? ExtensionData { get; set; }
     public string? Operator { get; set; }       // OPTIONAL (JIO / AIRTEL / VI)
     public string? Technology { get; set; }     // OPTIONAL (4G / 5G / NSA / SA)
 
     public string? GetRawSessionIds()
     {
-        return new[] { SessionIds, sessionIds, session_ids, session_Ids, sessionId }
+        return new[] { SessionIds, sessionIds, session_ids, GetExtensionString("session_Ids"), sessionId }
             .FirstOrDefault(v => !string.IsNullOrWhiteSpace(v));
+    }
+
+    private string? GetExtensionString(string name)
+    {
+        if (ExtensionData == null || !ExtensionData.TryGetValue(name, out var value))
+            return null;
+
+        return value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : value.ToString();
     }
 }
 

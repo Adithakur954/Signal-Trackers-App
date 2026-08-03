@@ -1,5 +1,6 @@
 ﻿using System.Globalization;
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;     // for Regex
 using System.Collections.Concurrent;
@@ -2868,8 +2869,9 @@ public class MapFilter1
 {
     public string? session_ids { get; set; }
     public string? sessionIds { get; set; }
-    public string? session_Ids { get; set; }
     public string? sessionId { get; set; }
+    [System.Text.Json.Serialization.JsonExtensionData]
+    public Dictionary<string, JsonElement>? ExtensionData { get; set; }
     public int page { get; set; } = 1;
     public int limit { get; set; } = 20000;
     public string NetworkType { get; set; } = "ALL";
@@ -2884,7 +2886,7 @@ public class MapFilter1
 
     public List<long> GetSessionIds()
     {
-        var raw = new[] { session_ids, sessionIds, session_Ids, sessionId }
+        var raw = new[] { session_ids, sessionIds, GetExtensionString("session_Ids"), sessionId }
             .FirstOrDefault(v => !string.IsNullOrWhiteSpace(v));
 
         if (string.IsNullOrWhiteSpace(raw))
@@ -2896,6 +2898,16 @@ public class MapFilter1
             .Where(id => id > 0)
             .Distinct()
             .ToList();
+    }
+
+    private string? GetExtensionString(string name)
+    {
+        if (ExtensionData == null || !ExtensionData.TryGetValue(name, out var value))
+            return null;
+
+        return value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : value.ToString();
     }
 }
 [HttpGet, Route("GetNetworkLog")]
