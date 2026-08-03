@@ -1849,6 +1849,50 @@ public IActionResult UploadSitePrediction(
             EnsureColumn(tableName, columnName, "LONGTEXT NULL");
         }
 
+        private void EnsureVarcharColumn(string tableName, string columnName, string columnDefinition)
+        {
+            var conn = db.Database.GetDbConnection();
+            var shouldClose = conn.State != ConnectionState.Open;
+            if (shouldClose)
+                conn.Open();
+
+            try
+            {
+                using var inspect = conn.CreateCommand();
+                inspect.CommandText = @"
+                    SELECT DATA_TYPE
+                    FROM information_schema.columns
+                    WHERE table_schema = DATABASE()
+                      AND table_name = @tableName
+                      AND column_name = @columnName
+                    LIMIT 1;";
+                var tableParam = inspect.CreateParameter();
+                tableParam.ParameterName = "@tableName";
+                tableParam.Value = tableName;
+                inspect.Parameters.Add(tableParam);
+                var columnParam = inspect.CreateParameter();
+                columnParam.ParameterName = "@columnName";
+                columnParam.Value = columnName;
+                inspect.Parameters.Add(columnParam);
+
+                var dataType = Convert.ToString(inspect.ExecuteScalar())?.Trim().ToLowerInvariant();
+                if (string.IsNullOrWhiteSpace(dataType) ||
+                    dataType is "char" or "varchar" or "tinytext" or "text" or "mediumtext" or "longtext")
+                {
+                    return;
+                }
+
+                using var alter = conn.CreateCommand();
+                alter.CommandText = $"ALTER TABLE `{tableName}` MODIFY COLUMN `{columnName}` {columnDefinition};";
+                alter.ExecuteNonQuery();
+            }
+            finally
+            {
+                if (shouldClose)
+                    conn.Close();
+            }
+        }
+
         private void EnsureColumn(string tableName, string columnName, string columnDefinition)
         {
             var conn = db.Database.GetDbConnection();
@@ -2320,6 +2364,9 @@ public bool ProcessSitePredictionSheet(
 
     try
     {
+        EnsureVarcharColumn("site_prediction", "cell_id", "VARCHAR(64) NULL");
+        EnsureVarcharColumn("site_prediction_optimized", "cell_id", "VARCHAR(64) NULL");
+
         using var reader = new StreamReader(filePath, Encoding.UTF8);
         var config = CreateLenientCsvConfiguration();
         using var csv = new CsvReader(reader, config);
@@ -2398,7 +2445,6 @@ public bool ProcessSitePredictionSheet(
 
             foreach (var row in records)
             {
-                var parsedCellId = ParseCompositeCellId(row.cell_id);
                 var temp = new site_prediction
                 {
                     earfcn = TryInt(row.earfcn),
@@ -2415,7 +2461,7 @@ public bool ProcessSitePredictionSheet(
                     site_name = TryInt(row.site_name),
                     sector = row.sector,
 
-                    cell_id = parsedCellId,
+                    cell_id = string.IsNullOrWhiteSpace(row.cell_id) ? null : row.cell_id.Trim(),
 
                     longitude = TryDouble(row.longitude),
                     latitude = TryDouble(row.latitude),

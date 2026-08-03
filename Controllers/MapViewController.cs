@@ -2248,6 +2248,12 @@ public class AvailablePolygonsResponse
             await EnsureSitePredictionTextColumnAsync(conn, "site_prediction_optimized", "site_name");
         }
 
+        private async Task EnsureSitePredictionCellIdColumnsAsync(DbConnection conn)
+        {
+            await EnsureSitePredictionTextColumnAsync(conn, "site_prediction", "cell_id", "VARCHAR(64) NULL");
+            await EnsureSitePredictionTextColumnAsync(conn, "site_prediction_optimized", "cell_id", "VARCHAR(64) NULL");
+        }
+
         private async Task EnsureSitePredictionColorColumnAsync(DbConnection conn)
         {
             await using var existsCmd = conn.CreateCommand();
@@ -8202,6 +8208,8 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
     if (conn.State != System.Data.ConnectionState.Open)
         await conn.OpenAsync();
 
+    await EnsureSitePredictionCellIdColumnsAsync(conn);
+
     await using var tx = await conn.BeginTransactionAsync();
 
     string sql = @"
@@ -8246,7 +8254,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
 
         Add(cmd, "@site",    ToInt(cols[idxSite]));
         Add(cmd, "@sector",  ToInt(cols[idxSector]));
-        Add(cmd, "@cell_id", cols[idxCellId]);
+        Add(cmd, "@cell_id", cols[idxCellId].Trim());
         Add(cmd, "@lon",     ToDouble(cols[idxLon]));
         Add(cmd, "@lat",     ToDouble(cols[idxLat]));
         Add(cmd, "@pci",     ToInt(cols[idxPci]));

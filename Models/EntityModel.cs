@@ -816,7 +816,7 @@ public class IndoorOutdoorLogDto
     public int? site { get; set; }
     public int? site_name { get; set; }
     public string? sector { get; set; }
-    public int? cell_id { get; set; }
+    public string? cell_id { get; set; }
     public double? longitude { get; set; }
     public double? latitude { get; set; }
     public int? tac { get; set; }
@@ -883,7 +883,7 @@ public class IndoorOutdoorLogDto
         public int? site { get; set; }
         public int? site_name { get; set; }
         public string? sector { get; set; }
-        public int? cell_id { get; set; }
+        public string? cell_id { get; set; }
         public int? sec_id { get; set; }
         public double? longitude { get; set; }
         public double? latitude { get; set; }
