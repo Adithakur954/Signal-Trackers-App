@@ -613,7 +613,6 @@ public class IndoorOutdoorSessionFilter
 {
     public string? IndoorOutdoor { get; set; }   // "INDOOR" or "OUTDOOR"
     public string? SessionIds { get; set; }      // "101,102,103"
-    public string? sessionIds { get; set; }
     public string? session_ids { get; set; }
     public string? sessionId { get; set; }
     [JsonExtensionData]
@@ -623,7 +622,7 @@ public class IndoorOutdoorSessionFilter
 
     public string? GetRawSessionIds()
     {
-        return new[] { SessionIds, sessionIds, session_ids, GetExtensionString("session_Ids"), sessionId }
+        return new[] { SessionIds, GetExtensionString("sessionIds"), session_ids, GetExtensionString("session_Ids"), sessionId }
             .FirstOrDefault(v => !string.IsNullOrWhiteSpace(v));
     }
 
