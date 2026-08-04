@@ -85,7 +85,6 @@ namespace SignalTracker.Controllers
                             on lic.tbl_user_id equals usr.id
                         where companyIds.Contains(lic.tbl_company_id)
                               && usr.isactive != 2
-                              && lic.status != 2
                         group lic by lic.tbl_company_id into g
                         select new
                         {
@@ -719,10 +718,6 @@ public async Task<IActionResult> GetUsedLicenses(
                 return BadRequest(new { Status = 0, Message = "Invalid status. Allowed values: 0, 1, 2" });
 
             query = query.Where(x => x.license_status == status.Value);
-        }
-        else
-        {
-            query = query.Where(x => x.license_status != 2);
         }
 
         //  Company scope enforcement
