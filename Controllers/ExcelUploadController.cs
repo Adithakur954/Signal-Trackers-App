@@ -40,7 +40,7 @@ namespace SignalTracker.Controllers
         // enforced by the DB server itself and serializes every connection from every
         // process/host that acquires the same lock name, regardless of where it runs.
         private const string NetworkLogIngestLockName = "stracer_networklog_ingest";
-        private const int NetworkLogIngestLockTimeoutSeconds = 90;
+        private const int NetworkLogIngestLockTimeoutSeconds = 7200;
 
         // Robust timezone: Windows ("India Standard Time") and Linux ("Asia/Kolkata")
         private static readonly TimeZoneInfo INDIAN_ZONE = GetIndianZone();
@@ -227,6 +227,9 @@ namespace SignalTracker.Controllers
         // locks if the connection is lost). If another process/host is already
         // holding the lock past the timeout, uploading fails fast with a clear
         // message instead of racing into a long, confusing "Lock wait timeout".
+        // The timeout is intentionally long so multiple uploaded files queue and
+        // process one-by-one instead of being marked failed while another upload
+        // is still running.
         private async Task<(bool Success, string? ErrorMessage)> RunNetworkLogIngestSerializedAsync(
             Func<(bool Success, string? ErrorMessage)> work)
         {
@@ -245,6 +248,7 @@ namespace SignalTracker.Controllers
             await using (var acquireCmd = lockConnection.CreateCommand())
             {
                 acquireCmd.CommandText = "SELECT GET_LOCK(@lockName, @timeoutSeconds)";
+                acquireCmd.CommandTimeout = NetworkLogIngestLockTimeoutSeconds + 30;
                 acquireCmd.Parameters.AddWithValue("@lockName", NetworkLogIngestLockName);
                 acquireCmd.Parameters.AddWithValue("@timeoutSeconds", NetworkLogIngestLockTimeoutSeconds);
                 var result = await acquireCmd.ExecuteScalarAsync();
@@ -254,7 +258,7 @@ namespace SignalTracker.Controllers
             if (!lockAcquired)
             {
                 return (false,
-                    "Another network-log upload is currently being processed on the server. Please try again in a minute.");
+                    "Another network-log upload is still being processed on the server. This upload could not start before the queue timeout.");
             }
 
             try
@@ -427,7 +431,6 @@ namespace SignalTracker.Controllers
 
         // POST: /ExcelUpload/UploadExcelFile
         [HttpPost("UploadExcelFile")]
-        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("Upload")]
         [RequestSizeLimit(524_288_000)]
         [RequestFormLimits(MultipartBodyLengthLimit = 524_288_000, ValueLengthLimit = int.MaxValue, MultipartHeadersLengthLimit = int.MaxValue)]
         public async Task<IActionResult> UploadExcelFile(
