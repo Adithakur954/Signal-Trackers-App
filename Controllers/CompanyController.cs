@@ -76,6 +76,32 @@ namespace SignalTracker.Controllers
                     .OrderBy(c => c.company_name)
                     .ToListAsync();
 
+                var companyIds = companies.Select(c => c.id).ToList();
+                if (companyIds.Count > 0)
+                {
+                    var usedLicenseCounts = await (
+                        from lic in _db.tbl_company_user_license_issued.AsNoTracking()
+                        join usr in _db.tbl_user.AsNoTracking()
+                            on lic.tbl_user_id equals usr.id
+                        where companyIds.Contains(lic.tbl_company_id)
+                              && usr.isactive != 2
+                              && lic.status != 2
+                        group lic by lic.tbl_company_id into g
+                        select new
+                        {
+                            CompanyId = g.Key,
+                            Count = g.Count()
+                        })
+                        .ToDictionaryAsync(x => x.CompanyId, x => x.Count);
+
+                    foreach (var company in companies)
+                    {
+                        company.total_used_licenses = usedLicenseCounts.TryGetValue(company.id, out var count)
+                            ? count
+                            : 0;
+                    }
+                }
+
                 return Ok(new { Status = 1, Message = "Success", Data = companies });
             }
             catch (Exception)
@@ -631,7 +657,7 @@ public async Task<IActionResult> GetUsedLicenses(
     [FromQuery] string? mobile,
     [FromQuery] string? company,
     [FromQuery] int? companyId,
-    [FromQuery] int status = 1
+    [FromQuery] int? status = null
 )
 {
     try
@@ -686,6 +712,18 @@ public async Task<IActionResult> GetUsedLicenses(
         if (!string.IsNullOrWhiteSpace(company))
             query = query.Where(x => x.company_name != null &&
                                      x.company_name.ToLower().Contains(company.ToLower()));
+
+        if (status.HasValue)
+        {
+            if (status.Value != 0 && status.Value != 1 && status.Value != 2)
+                return BadRequest(new { Status = 0, Message = "Invalid status. Allowed values: 0, 1, 2" });
+
+            query = query.Where(x => x.license_status == status.Value);
+        }
+        else
+        {
+            query = query.Where(x => x.license_status != 2);
+        }
 
         //  Company scope enforcement
         if (targetCompanyId > 0)
