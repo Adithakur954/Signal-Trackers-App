@@ -2257,6 +2257,15 @@ public class AvailablePolygonsResponse
             await EnsureSitePredictionTextColumnAsync(conn, "site_prediction_optimized", "cell_id", "VARCHAR(64) NULL");
         }
 
+        private async Task EnsureProjectRefSessionIdColumnAsync()
+        {
+            var conn = db.Database.GetDbConnection();
+            if (conn.State != ConnectionState.Open)
+                await conn.OpenAsync();
+
+            await EnsureSitePredictionTextColumnAsync(conn, "tbl_project", "ref_session_id", "LONGTEXT NULL");
+        }
+
         private async Task EnsureSitePredictionColorColumnAsync(DbConnection conn)
         {
             await using var existsCmd = conn.CreateCommand();
@@ -2552,6 +2561,8 @@ public async Task<JsonResult> CreateProjectWithPolygons([FromBody] CreateProject
 
     try
     {
+        await EnsureProjectRefSessionIdColumnAsync();
+
         await strategy.ExecuteAsync(async () =>
         {
             await using var transaction = await db.Database.BeginTransactionAsync();
@@ -4431,6 +4442,8 @@ public async Task<IActionResult> UpdateProjectSessions([FromBody] UpdateProjectS
 
     try
     {
+        await EnsureProjectRefSessionIdColumnAsync();
+
         var project = await db.tbl_project.FirstOrDefaultAsync(p => p.id == model.ProjectId);
         if (project == null)
         {
@@ -11260,6 +11273,8 @@ public async Task<IActionResult> CreateSimpleProject([FromBody] CreateProjectMod
 
     try
     {
+        await EnsureProjectRefSessionIdColumnAsync();
+
         // 2. Security: Resolve the Company ID from the authenticated user context
         var companyResolution = await ResolveProjectCompanyIdAsync(model);
         if (!companyResolution.CompanyId.HasValue)
