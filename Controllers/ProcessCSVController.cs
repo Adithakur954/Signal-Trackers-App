@@ -1555,7 +1555,11 @@ public IActionResult UploadSitePrediction(
                         }
                         UpdateSessionBoundsFromLogs(sessionId);
                     }
-                    Apply5GAlphaAndBandFillRules(sessionId);
+                    // This 5G backfill runs a heavy self-join update on tbl_network_log.
+                    // Running it inline during upload can block the next upload inserts
+                    // for minutes and cause MySQL lock wait timeouts. Keep the raw
+                    // upload fast and let reports/read APIs handle missing labels.
+                    // Apply5GAlphaAndBandFillRules(sessionId);
 	                InvalidateNetworkLogCachesBestEffort();
 	            }
 	            else
