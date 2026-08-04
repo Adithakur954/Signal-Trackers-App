@@ -5247,6 +5247,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
             }
             from = effectiveFrom;
             to = effectiveTo;
+            var toExclusive = effectiveTo.Date.AddDays(1);
 
             var totalSw = System.Diagnostics.Stopwatch.StartNew();
 
@@ -5328,63 +5329,55 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
                         ? "1=1"
                         : (useUserScope ? "s.user_id = @userId" : "u.company_id = @companyId");
                     var sqlBuilder = new StringBuilder(@"
-                SELECT 
-                    t.operatorName,
-                    t.network,
+                SELECT
+                    CASE
+                        WHEN UPPER(TRIM(n.m_alpha_long)) LIKE '%AIRTEL%' THEN 'Airtel'
+                        WHEN UPPER(TRIM(n.m_alpha_long)) LIKE '%JIO%' OR UPPER(TRIM(n.m_alpha_long)) LIKE '%JIOTRUE%' THEN 'Jio'
+                        WHEN UPPER(TRIM(n.m_alpha_long)) = 'VI'
+                          OR UPPER(TRIM(n.m_alpha_long)) LIKE '%VODAFONE%'
+                          OR UPPER(TRIM(n.m_alpha_long)) LIKE '%IDEA%'
+                          OR UPPER(TRIM(n.m_alpha_long)) LIKE '%VI INDIA%' THEN 'VI India'
+                        WHEN UPPER(TRIM(n.m_alpha_long)) LIKE '%BSNL%' THEN 'BSNL'
+                        ELSE TRIM(n.m_alpha_long)
+                    END AS operatorName,
+                    CASE
+                        WHEN UPPER(TRIM(n.network)) LIKE '%5G%'
+                          OR UPPER(TRIM(n.network)) LIKE '%NR%'
+                          OR UPPER(TRIM(n.network)) LIKE '%NSA%'
+                          OR UPPER(TRIM(n.network)) = 'SA'
+                          OR UPPER(TRIM(n.network)) LIKE '% SA%' THEN '5G'
+                        WHEN UPPER(TRIM(n.network)) LIKE '%4G%' OR UPPER(TRIM(n.network)) LIKE '%LTE%' THEN '4G'
+                        WHEN UPPER(TRIM(n.network)) LIKE '%3G%'
+                          OR UPPER(TRIM(n.network)) LIKE '%WCDMA%'
+                          OR UPPER(TRIM(n.network)) LIKE '%UMTS%'
+                          OR UPPER(TRIM(n.network)) LIKE '%HSPA%' THEN '3G'
+                        WHEN UPPER(TRIM(n.network)) LIKE '%2G%'
+                          OR UPPER(TRIM(n.network)) LIKE '%EDGE%'
+                          OR UPPER(TRIM(n.network)) LIKE '%GSM%'
+                          OR UPPER(TRIM(n.network)) LIKE '%GPRS%' THEN '2G'
+                        ELSE TRIM(n.network)
+                    END AS network,
                     COUNT(*) AS value,
-                    ROUND(AVG(COALESCE(t.rsrp, 0)), 2) AS avg_rsrp,
-                    ROUND(AVG(COALESCE(t.rsrq, 0)), 2) AS avg_rsrq,
-                    ROUND(AVG(COALESCE(t.sinr, 0)), 2) AS avg_sinr,
-                    ROUND(AVG(COALESCE(t.mos, 0)), 2) AS avg_mos,
-                    ROUND(AVG(COALESCE(t.jitter, 0)), 2) AS avg_jitter,
-                    ROUND(AVG(COALESCE(t.packet_loss, 0)), 2) AS avg_packet_loss
-                FROM (
-                    SELECT
-                        CASE
-                            WHEN UPPER(TRIM(n.m_alpha_long)) LIKE '%AIRTEL%' THEN 'Airtel'
-                            WHEN UPPER(TRIM(n.m_alpha_long)) LIKE '%JIO%' OR UPPER(TRIM(n.m_alpha_long)) LIKE '%JIOTRUE%' THEN 'Jio'
-                            WHEN UPPER(TRIM(n.m_alpha_long)) = 'VI'
-                              OR UPPER(TRIM(n.m_alpha_long)) LIKE '%VODAFONE%'
-                              OR UPPER(TRIM(n.m_alpha_long)) LIKE '%IDEA%'
-                              OR UPPER(TRIM(n.m_alpha_long)) LIKE '%VI INDIA%' THEN 'VI India'
-                            WHEN UPPER(TRIM(n.m_alpha_long)) LIKE '%BSNL%' THEN 'BSNL'
-                            ELSE TRIM(n.m_alpha_long)
-                        END AS operatorName,
-                        CASE
-                            WHEN UPPER(TRIM(n.network)) LIKE '%5G%' 
-                              OR UPPER(TRIM(n.network)) LIKE '%NR%'
-                              OR UPPER(TRIM(n.network)) LIKE '%NSA%'
-                              OR UPPER(TRIM(n.network)) = 'SA'
-                              OR UPPER(TRIM(n.network)) LIKE '% SA%' THEN '5G'
-                            WHEN UPPER(TRIM(n.network)) LIKE '%4G%' OR UPPER(TRIM(n.network)) LIKE '%LTE%' THEN '4G'
-                            WHEN UPPER(TRIM(n.network)) LIKE '%3G%'
-                              OR UPPER(TRIM(n.network)) LIKE '%WCDMA%'
-                              OR UPPER(TRIM(n.network)) LIKE '%UMTS%'
-                              OR UPPER(TRIM(n.network)) LIKE '%HSPA%' THEN '3G'
-                            WHEN UPPER(TRIM(n.network)) LIKE '%2G%'
-                              OR UPPER(TRIM(n.network)) LIKE '%EDGE%'
-                              OR UPPER(TRIM(n.network)) LIKE '%GSM%'
-                              OR UPPER(TRIM(n.network)) LIKE '%GPRS%' THEN '2G'
-                            ELSE TRIM(n.network)
-                        END AS network,
-                        n.rsrp,
-                        n.rsrq,
-                        n.sinr,
-                        n.mos,
-                        n.jitter,
-                        n.packet_loss
-                    FROM tbl_network_log n
-                    JOIN tbl_session s ON n.session_id = s.id
-                    JOIN tbl_user u ON s.user_id = u.id
-                    WHERE __COMPANY_CLAUSE__
-                      AND n.m_alpha_long IS NOT NULL 
-                      AND TRIM(n.m_alpha_long) <> ''
-                      AND n.network IS NOT NULL 
-                      AND TRIM(n.network) <> ''
-                      AND (@from IS NULL OR n.timestamp >= @from)
-                      AND (@to IS NULL OR n.timestamp < DATE_ADD(@to, INTERVAL 1 DAY))
-                ) t
-                WHERE 1=1
+                    ROUND(AVG(COALESCE(n.rsrp, 0)), 2) AS avg_rsrp,
+                    ROUND(AVG(COALESCE(n.rsrq, 0)), 2) AS avg_rsrq,
+                    ROUND(AVG(COALESCE(n.sinr, 0)), 2) AS avg_sinr,
+                    ROUND(AVG(COALESCE(n.mos, 0)), 2) AS avg_mos,
+                    ROUND(AVG(COALESCE(n.jitter, 0)), 2) AS avg_jitter,
+                    ROUND(AVG(COALESCE(n.packet_loss, 0)), 2) AS avg_packet_loss
+                FROM tbl_network_log n
+                WHERE n.m_alpha_long IS NOT NULL
+                  AND TRIM(n.m_alpha_long) <> ''
+                  AND n.network IS NOT NULL
+                  AND TRIM(n.network) <> ''
+                  AND n.timestamp >= @from
+                  AND n.timestamp < @toExclusive
+                  AND EXISTS (
+                      SELECT 1
+                      FROM tbl_session s
+                      JOIN tbl_user u ON s.user_id = u.id
+                      WHERE s.id = n.session_id
+                        AND __COMPANY_CLAUSE__
+                  )
             ");
 
                     if (opSet is { Count: > 0 })
@@ -5401,7 +5394,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
                             opParams.Add(paramName);
                         }
 
-                        sqlBuilder.AppendLine($"  AND t.operatorName IN ({string.Join(", ", opParams)})");
+                        sqlBuilder.AppendLine($"HAVING operatorName IN ({string.Join(", ", opParams)})");
                     }
 
                     if (netSet is { Count: > 0 })
@@ -5418,10 +5411,12 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
                             netParams.Add(paramName);
                         }
 
-                        sqlBuilder.AppendLine($"  AND t.network IN ({string.Join(", ", netParams)})");
+                        sqlBuilder.AppendLine(opSet is { Count: > 0 }
+                            ? $"   AND network IN ({string.Join(", ", netParams)})"
+                            : $"HAVING network IN ({string.Join(", ", netParams)})");
                     }
 
-                    sqlBuilder.AppendLine("GROUP BY t.operatorName, t.network");
+                    sqlBuilder.AppendLine("GROUP BY operatorName, network");
                     sqlBuilder.AppendLine("ORDER BY value DESC;");
 
                     cmd.CommandText = sqlBuilder.ToString().Replace("__COMPANY_CLAUSE__", companyClause);
@@ -5436,9 +5431,8 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
                         var pUser = cmd.CreateParameter(); pUser.ParameterName = "@userId"; pUser.Value = currentUserId; cmd.Parameters.Add(pUser);
                     }
 
-                    var pFrom = cmd.CreateParameter(); pFrom.ParameterName = "@from"; pFrom.Value = (object?)from ?? DBNull.Value; cmd.Parameters.Add(pFrom);
-
-                    var pTo = cmd.CreateParameter(); pTo.ParameterName = "@to"; pTo.Value = (object?)to ?? DBNull.Value; cmd.Parameters.Add(pTo);
+                    var pFrom = cmd.CreateParameter(); pFrom.ParameterName = "@from"; pFrom.Value = from!.Value; cmd.Parameters.Add(pFrom);
+                    var pToExclusive = cmd.CreateParameter(); pToExclusive.ParameterName = "@toExclusive"; pToExclusive.Value = toExclusive; cmd.Parameters.Add(pToExclusive);
 
                     using (var reader = await cmd.ExecuteReaderAsync())
                     {
@@ -7127,4 +7121,3 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
         }
     }
 }
-

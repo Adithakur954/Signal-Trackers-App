@@ -661,7 +661,9 @@ public async Task<IActionResult> GetUsedLicenses(
                 user_isactive = usr.isactive,
 
                 company_id = comp.id,
-                company_name = comp.company_name
+                company_name = comp.company_name,
+                company_created_on = comp.created_on,
+                company_license_validity_in_months = comp.license_validity_in_months
             };
 
         //  Filters
@@ -701,6 +703,11 @@ public async Task<IActionResult> GetUsedLicenses(
             var features = featuresByLicenseId.TryGetValue(x.license_id, out var vals)
                 ? vals
                 : new List<string>();
+            DateTime? companyValidTill = null;
+            if (x.company_created_on.HasValue && x.company_license_validity_in_months.HasValue && x.company_license_validity_in_months.Value > 0)
+            {
+                companyValidTill = x.company_created_on.Value.AddMonths(x.company_license_validity_in_months.Value);
+            }
             return new
             {
                 x.license_id,
@@ -715,6 +722,9 @@ public async Task<IActionResult> GetUsedLicenses(
                 x.user_isactive,
                 x.company_id,
                 x.company_name,
+                x.company_created_on,
+                x.company_license_validity_in_months,
+                company_valid_till = companyValidTill,
                 feature_codes = string.Join(",", features),
                 enabled_features = features
             };
