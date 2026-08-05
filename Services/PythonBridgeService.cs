@@ -2752,24 +2752,6 @@ namespace SignalTracker.Services
             }
 
             var selectedScenarioId = scenarioId;
-            if (!selectedScenarioId.HasValue)
-            {
-                await using var scenarioCommand = conn.CreateCommand();
-                scenarioCommand.CommandText = @"
-                    SELECT scenario_id
-                    FROM grid_analytics_results
-                    WHERE project_id = @project_id
-                    GROUP BY scenario_id
-                    ORDER BY COUNT(*) DESC, MAX(created_at) DESC
-                    LIMIT 1;";
-                PythonBridgeDbTool.AddParam(scenarioCommand, "@project_id", projectId);
-                var scalar = await scenarioCommand.ExecuteScalarAsync(cancellationToken);
-                if (scalar == null || scalar == DBNull.Value)
-                {
-                    return (limit, offset, new List<Dictionary<string, object?>>());
-                }
-                selectedScenarioId = Convert.ToInt64(scalar);
-            }
 
             await using var command = conn.CreateCommand();
             var filters = new List<string> { "project_id = @project_id" };
