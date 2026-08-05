@@ -1971,7 +1971,7 @@ namespace SignalTracker.Controllers
         {
             if (bandRows != null && bandRows.Count > 0)
             {
-                return GenerateLegendPng(header, bandRows, thresholds, filterByImageName);
+                return SafeGenerateLegendPng(header, bandRows, thresholds, filterByImageName);
             }
 
             var headerUpper = header.ToUpperInvariant();
@@ -2004,7 +2004,27 @@ namespace SignalTracker.Controllers
                 }
             }
 
-            return GenerateLegendPng(header, bandRows, thresholds);
+            return SafeGenerateLegendPng(header, bandRows, thresholds);
+        }
+
+        private static byte[] SafeGenerateLegendPng(
+            string header,
+            List<WalkTestLogRow> bandRows,
+            ReportThresholdConfig thresholds,
+            bool filterByImageName = true)
+        {
+            try
+            {
+                return GenerateLegendPng(header, bandRows, thresholds, filterByImageName);
+            }
+            catch (DllNotFoundException)
+            {
+                return Array.Empty<byte>();
+            }
+            catch (TypeInitializationException ex) when (ex.InnerException is DllNotFoundException)
+            {
+                return Array.Empty<byte>();
+            }
         }
 
         private static byte[] OverlayLegendOnMap(byte[] mapBytes, byte[]? legendBytes)
