@@ -16,26 +16,9 @@ namespace SignalTracker.Controllers
             _pythonBridgeService = pythonBridgeService;
         }
 
-        private bool IsAuthorized()
-        {
-            Request.Headers.TryGetValue("X-Python-Bridge-Key", out var incoming);
-            return _pythonBridgeService.IsAuthorized(incoming.ToString());
-        }
-
-        private IActionResult? EnsureAuthorized()
-        {
-            // Local Python tools do not consistently send X-Python-Bridge-Key.
-            // Keep bridge read/write routes reachable from the packaged backend
-            // instead of failing with 401 before the Python job can run.
-            return null;
-        }
-
         [HttpPost("GetDriveTestRows")]
         public async Task<IActionResult> GetDriveTestRows([FromBody] DriveTestRowsRequest request)
         {
-            var authResult = EnsureAuthorized();
-            if (authResult is not null) return authResult;
-
             if (request == null || request.SessionIds == null || request.SessionIds.Count == 0)
             {
                 return BadRequest(new { Status = 0, Message = "SessionIds are required." });
@@ -70,9 +53,6 @@ namespace SignalTracker.Controllers
         [HttpGet("GetLteTiltBaselineResults")]
         public async Task<IActionResult> GetLteTiltBaselineResults([FromQuery] LteTiltBaselineRowsRequest request)
         {
-            var authResult = EnsureAuthorized();
-            if (authResult is not null) return authResult;
-
             if (request == null || request.ProjectId <= 0)
             {
                 return BadRequest(new { Status = 0, Message = "ProjectId is required." });
@@ -101,9 +81,6 @@ namespace SignalTracker.Controllers
         [HttpGet("GetLteTiltAntennaRows")]
         public async Task<IActionResult> GetLteTiltAntennaRows([FromQuery] LteTiltAntennaRowsRequest request)
         {
-            var authResult = EnsureAuthorized();
-            if (authResult is not null) return authResult;
-
             if (request == null || request.ProjectId <= 0)
             {
                 return BadRequest(new { Status = 0, Message = "ProjectId is required." });
@@ -132,9 +109,6 @@ namespace SignalTracker.Controllers
         [HttpGet("GetLtePredictionGeoFeatures")]
         public async Task<IActionResult> GetLtePredictionGeoFeatures([FromQuery] LtePredictionGeoFeatureRowsRequest request)
         {
-            var authResult = EnsureAuthorized();
-            if (authResult is not null) return authResult;
-
             if (request == null || request.ProjectId <= 0)
             {
                 return BadRequest(new { Status = 0, Message = "ProjectId is required." });
@@ -175,9 +149,6 @@ namespace SignalTracker.Controllers
             [FromQuery] int limit = 20000,
             [FromQuery] int offset = 0)
         {
-            var authResult = EnsureAuthorized();
-            if (authResult is not null) return authResult;
-
             if (projectId <= 0)
             {
                 return BadRequest(new { Status = 0, Message = "projectId is required." });
@@ -208,9 +179,6 @@ namespace SignalTracker.Controllers
         [HttpGet("GetLteSitePredictionRows")]
         public async Task<IActionResult> GetLteSitePredictionRows([FromQuery] LteSitePredictionRowsRequest request)
         {
-            var authResult = EnsureAuthorized();
-            if (authResult is not null) return authResult;
-
             if (request == null || request.ProjectId <= 0)
             {
                 return BadRequest(new { Status = 0, Message = "ProjectId is required." });
@@ -238,9 +206,6 @@ namespace SignalTracker.Controllers
         [HttpGet("GetLteBuildingRows")]
         public async Task<IActionResult> GetLteBuildingRows([FromQuery] LteBuildingRowsRequest request)
         {
-            var authResult = EnsureAuthorized();
-            if (authResult is not null) return authResult;
-
             if (request == null || request.ProjectId <= 0)
             {
                 return BadRequest(new { Status = 0, Message = "ProjectId is required." });
@@ -262,9 +227,6 @@ namespace SignalTracker.Controllers
         [HttpGet("GetLteBaselineRows")]
         public async Task<IActionResult> GetLteBaselineRows([FromQuery] LteBaselineRowsRequest request)
         {
-            var authResult = EnsureAuthorized();
-            if (authResult is not null) return authResult;
-
             if (request == null || request.ProjectId <= 0)
             {
                 return BadRequest(new { Status = 0, Message = "ProjectId is required." });
@@ -281,9 +243,6 @@ namespace SignalTracker.Controllers
         [HttpPost("SavePredictionData")]
         public async Task<IActionResult> SavePredictionData([FromBody] PredictionDataBulkRequest request)
         {
-            var authResult = EnsureAuthorized();
-            if (authResult is not null) return authResult;
-
             if (request == null || request.ProjectId <= 0)
             {
                 return BadRequest(new { Status = 0, Message = "ProjectId is required." });
@@ -312,9 +271,6 @@ namespace SignalTracker.Controllers
         [HttpPost("SaveLtePredictionResults")]
         public async Task<IActionResult> SaveLtePredictionResults([FromBody] LtePredictionBulkRequest request)
         {
-            var authResult = EnsureAuthorized();
-            if (authResult is not null) return authResult;
-
             if (request == null || request.ProjectId <= 0)
             {
                 return BadRequest(new { Status = 0, Message = "ProjectId is required." });
@@ -336,9 +292,6 @@ namespace SignalTracker.Controllers
         [HttpPost("SaveLtePredictionRefined")]
         public async Task<IActionResult> SaveLtePredictionRefined([FromBody] LtePredictionRefinedBulkRequest request)
         {
-            var authResult = EnsureAuthorized();
-            if (authResult is not null) return authResult;
-
             if (request == null || request.ProjectId <= 0)
             {
                 return BadRequest(new { Status = 0, Message = "ProjectId is required." });
@@ -360,9 +313,6 @@ namespace SignalTracker.Controllers
         [HttpPost("SaveLtePredictionOptimisedResults")]
         public async Task<IActionResult> SaveLtePredictionOptimisedResults([FromBody] LtePredictionOptimisedBulkRequest request)
         {
-            var authResult = EnsureAuthorized();
-            if (authResult is not null) return authResult;
-
             if (request == null || request.ProjectId <= 0)
             {
                 return BadRequest(new { Status = 0, Message = "ProjectId is required." });
@@ -389,9 +339,6 @@ namespace SignalTracker.Controllers
         [HttpPost("SaveLtePredictionBaselineResults")]
         public async Task<IActionResult> SaveLtePredictionBaselineResults([FromBody] DictionaryRowsBulkRequest request)
         {
-            var authResult = EnsureAuthorized();
-            if (authResult is not null) return authResult;
-
             if (request == null || request.ProjectId <= 0)
             {
                 return BadRequest(new { Status = 0, Message = "ProjectId is required." });
@@ -418,9 +365,6 @@ namespace SignalTracker.Controllers
         [HttpPost("SaveLtePredictionGeoFeatures")]
         public async Task<IActionResult> SaveLtePredictionGeoFeatures([FromBody] DictionaryRowsBulkRequest request)
         {
-            var authResult = EnsureAuthorized();
-            if (authResult is not null) return authResult;
-
             if (request == null || request.ProjectId <= 0)
             {
                 return BadRequest(new { Status = 0, Message = "ProjectId is required." });
@@ -447,9 +391,6 @@ namespace SignalTracker.Controllers
         [HttpPost("DeleteLtePredictionGeoFeatures")]
         public async Task<IActionResult> DeleteLtePredictionGeoFeatures([FromBody] DictionaryRowsBulkRequest request)
         {
-            var authResult = EnsureAuthorized();
-            if (authResult is not null) return authResult;
-
             if (request == null || request.ProjectId <= 0)
             {
                 return BadRequest(new { Status = 0, Message = "ProjectId is required." });
@@ -476,9 +417,6 @@ namespace SignalTracker.Controllers
         [HttpGet("GetNextRfOptimizationScenarioId")]
         public async Task<IActionResult> GetNextRfOptimizationScenarioId([FromQuery] long projectId)
         {
-            var authResult = EnsureAuthorized();
-            if (authResult is not null) return authResult;
-
             if (projectId <= 0)
             {
                 return BadRequest(new { Status = 0, Message = "projectId is required." });
@@ -497,9 +435,6 @@ namespace SignalTracker.Controllers
             [FromQuery] long projectId,
             [FromQuery] string? @operator)
         {
-            var authResult = EnsureAuthorized();
-            if (authResult is not null) return authResult;
-
             if (projectId <= 0)
             {
                 return BadRequest(new { Status = 0, Message = "projectId is required." });
@@ -517,9 +452,6 @@ namespace SignalTracker.Controllers
         [HttpGet("GetRfOptimizationRows")]
         public async Task<IActionResult> GetRfOptimizationRows([FromQuery] RfOptimizationRowsRequest request)
         {
-            var authResult = EnsureAuthorized();
-            if (authResult is not null) return authResult;
-
             if (request == null || request.ProjectId <= 0)
             {
                 return BadRequest(new { Status = 0, Message = "ProjectId is required." });
@@ -543,9 +475,6 @@ namespace SignalTracker.Controllers
             [FromQuery] string? region,
             [FromQuery] string? @operator)
         {
-            var authResult = EnsureAuthorized();
-            if (authResult is not null) return authResult;
-
             if (projectId <= 0)
             {
                 return BadRequest(new { Status = 0, Message = "projectId is required." });
@@ -564,9 +493,6 @@ namespace SignalTracker.Controllers
         [HttpGet("GetNextLteOptimizationScenarioId")]
         public async Task<IActionResult> GetNextLteOptimizationScenarioId([FromQuery] long projectId)
         {
-            var authResult = EnsureAuthorized();
-            if (authResult is not null) return authResult;
-
             if (projectId <= 0)
             {
                 return BadRequest(new { Status = 0, Message = "projectId is required." });
@@ -583,9 +509,6 @@ namespace SignalTracker.Controllers
         [HttpPost("CreateLteOptimizationScenario")]
         public async Task<IActionResult> CreateLteOptimizationScenario([FromBody] LteOptimizationScenarioCreateRequest request)
         {
-            var authResult = EnsureAuthorized();
-            if (authResult is not null) return authResult;
-
             if (request == null || request.ProjectId <= 0)
             {
                 return BadRequest(new { Status = 0, Message = "ProjectId is required." });
@@ -602,9 +525,6 @@ namespace SignalTracker.Controllers
         [HttpPost("UpdateLteOptimizationScenarioStatus")]
         public async Task<IActionResult> UpdateLteOptimizationScenarioStatus([FromBody] LteOptimizationScenarioStatusRequest request)
         {
-            var authResult = EnsureAuthorized();
-            if (authResult is not null) return authResult;
-
             if (request == null || request.ScenarioRowId <= 0)
             {
                 return BadRequest(new { Status = 0, Message = "ScenarioRowId is required." });
@@ -621,9 +541,6 @@ namespace SignalTracker.Controllers
         [HttpPost("SaveRfOptimizationResults")]
         public async Task<IActionResult> SaveRfOptimizationResults([FromBody] RfOptimizationBulkRequest request)
         {
-            var authResult = EnsureAuthorized();
-            if (authResult is not null) return authResult;
-
             if (request == null || request.ProjectId <= 0)
             {
                 return BadRequest(new { Status = 0, Message = "ProjectId is required." });
@@ -645,9 +562,6 @@ namespace SignalTracker.Controllers
         [HttpGet("PredictionDebugSummary")]
         public async Task<IActionResult> PredictionDebugSummary([FromQuery] long projectId)
         {
-            var authResult = EnsureAuthorized();
-            if (authResult is not null) return authResult;
-
             if (projectId <= 0)
             {
                 return BadRequest(new { Status = 0, Message = "projectId is required" });
@@ -675,9 +589,6 @@ namespace SignalTracker.Controllers
             [FromQuery] int limit = 50000,
             [FromQuery] int offset = 0)
         {
-            var authResult = EnsureAuthorized();
-            if (authResult is not null) return authResult;
-
             if (projectId <= 0)
             {
                 return BadRequest(new { Status = 0, Message = "projectId is required." });
@@ -726,9 +637,6 @@ namespace SignalTracker.Controllers
         [HttpGet("GetThresholds")]
         public async Task<IActionResult> GetThresholds()
         {
-            var authResult = EnsureAuthorized();
-            if (authResult is not null) return authResult;
-
             var rows = await _pythonBridgeService.GetThresoldsAsync(HttpContext.RequestAborted);
 
             return Ok(new { Status = 1, Count = rows.Count, Data = rows });
@@ -840,9 +748,6 @@ namespace SignalTracker.Controllers
         [HttpPost("UpdateProjectDownloadPath")]
         public async Task<IActionResult> UpdateProjectDownloadPath([FromBody] ProjectDownloadPathUpdateRequest request)
         {
-            var authResult = EnsureAuthorized();
-            if (authResult is not null) return authResult;
-
             if (request == null || request.ProjectId <= 0 || string.IsNullOrWhiteSpace(request.DownloadPath))
             {
                 return BadRequest(new { Status = 0, Message = "ProjectId and DownloadPath are required." });
