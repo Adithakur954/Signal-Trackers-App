@@ -127,7 +127,8 @@ namespace SignalTracker.Services
             var builder = new MySqlConnectionStringBuilder(connectionString)
             {
                 ["Allow Zero DateTime"] = true,
-                ["Convert Zero DateTime"] = true
+                ["Convert Zero DateTime"] = true,
+                ["AllowLoadLocalInfile"] = true
             };
 
             if (builder.MaximumPoolSize <= 0 || builder.MaximumPoolSize > 30)

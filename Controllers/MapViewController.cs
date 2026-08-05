@@ -2233,7 +2233,15 @@ public class AvailablePolygonsResponse
                 ? null
                 : Convert.ToString(dataTypeObj)?.Trim();
 
-            if (string.IsNullOrWhiteSpace(dataType) || IsTextColumnType(dataType))
+            if (string.IsNullOrWhiteSpace(dataType))
+            {
+                await using var addCmd = conn.CreateCommand();
+                addCmd.CommandText = $@"ALTER TABLE `{tableName}` ADD COLUMN `{columnName}` {varcharDefinition};";
+                await addCmd.ExecuteNonQueryAsync();
+                return;
+            }
+
+            if (IsTextColumnType(dataType))
             {
                 return;
             }
@@ -2255,6 +2263,12 @@ public class AvailablePolygonsResponse
         {
             await EnsureSitePredictionTextColumnAsync(conn, "site_prediction", "cell_id", "VARCHAR(64) NULL");
             await EnsureSitePredictionTextColumnAsync(conn, "site_prediction_optimized", "cell_id", "VARCHAR(64) NULL");
+        }
+
+        private async Task EnsureSitePredictionFrequencyColumnsAsync(DbConnection conn)
+        {
+            await EnsureSitePredictionTextColumnAsync(conn, "site_prediction", "frequency", "VARCHAR(64) NULL");
+            await EnsureSitePredictionTextColumnAsync(conn, "site_prediction_optimized", "frequency", "VARCHAR(64) NULL");
         }
 
         private async Task EnsureProjectRefSessionIdColumnAsync()
@@ -8210,6 +8224,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
     var idxAz       = Col("azimuth");
     var idxBand     = Col("band");
     var idxEarfcn   = Col("earfcn");
+    var idxFrequency = Col("frequency");
     var idxCluster  = Col("cluster");
     var idxTech     = Col("technology");
 
@@ -8223,26 +8238,38 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
 
     await EnsureSitePredictionNameColumnsAsync(conn);
     await EnsureSitePredictionCellIdColumnsAsync(conn);
+    await EnsureSitePredictionFrequencyColumnsAsync(conn);
 
-    await using var tx = await conn.BeginTransactionAsync();
+    var table = new DataTable();
+    table.Columns.Add("site", typeof(string));
+    table.Columns.Add("sector", typeof(string));
+    table.Columns.Add("cell_id", typeof(string));
+    table.Columns.Add("longitude", typeof(double));
+    table.Columns.Add("latitude", typeof(double));
+    table.Columns.Add("pci", typeof(int));
+    table.Columns.Add("azimuth", typeof(int));
+    table.Columns.Add("band", typeof(int));
+    table.Columns.Add("earfcn", typeof(int));
+    table.Columns.Add("frequency", typeof(string));
+    table.Columns.Add("cluster", typeof(string));
+    table.Columns.Add("Technology", typeof(string));
+    table.Columns.Add("m_tilt", typeof(int));
+    table.Columns.Add("e_tilt", typeof(int));
+    table.Columns.Add("height", typeof(double));
+    table.Columns.Add("tbl_project_id", typeof(int));
 
-    string sql = @"
-        INSERT INTO site_prediction
-            (site, sector, cell_id, longitude, latitude,
-             pci, azimuth, band, earfcn, cluster, Technology,
-             m_tilt, e_tilt, height, tbl_project_id)
-        VALUES
-            (@site, @sector, @cell_id, @lon, @lat,
-             @pci, @az, @band, @earfcn, @cluster, @tech,
-             @m_tilt, @e_tilt, @height, @pid);";
-
+    var skipped = 0;
     string? line;
     while ((line = await reader.ReadLineAsync()) != null)
     {
         if (string.IsNullOrWhiteSpace(line)) continue;
 
         var cols = SplitCsv(line, headers.Length);
-        if (cols.Length != headers.Length) continue;
+        if (cols.Length != headers.Length)
+        {
+            skipped++;
+            continue;
+        }
 
         if (string.IsNullOrWhiteSpace(cols[idxSite])     ||
             string.IsNullOrWhiteSpace(cols[idxSector])   ||
@@ -8254,47 +8281,46 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             string.IsNullOrWhiteSpace(cols[idxBand])     ||
             string.IsNullOrWhiteSpace(cols[idxEarfcn])   ||
             string.IsNullOrWhiteSpace(cols[idxCluster])  ||
-            string.IsNullOrWhiteSpace(cols[idxTech])     ||
-            string.IsNullOrWhiteSpace(cols[idxMTilt])    ||   // âœ… ADDED
-            string.IsNullOrWhiteSpace(cols[idxETilt])    ||   // âœ… ADDED
-            string.IsNullOrWhiteSpace(cols[idxHeight]))       // âœ… ADDED
+            string.IsNullOrWhiteSpace(cols[idxTech]))
         {
+            skipped++;
             continue;
         }
 
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = sql;
-        cmd.Transaction = tx;
-
-        Add(cmd, "@site",    cols[idxSite].Trim());
-        Add(cmd, "@sector",  cols[idxSector].Trim());
-        Add(cmd, "@cell_id", cols[idxCellId].Trim());
-        Add(cmd, "@lon",     ToDouble(cols[idxLon]));
-        Add(cmd, "@lat",     ToDouble(cols[idxLat]));
-        Add(cmd, "@pci",     ToInt(cols[idxPci]));
-        Add(cmd, "@az",      ToInt(cols[idxAz]));
-        Add(cmd, "@band",    ToInt(cols[idxBand]));
-        Add(cmd, "@earfcn",  ToInt(cols[idxEarfcn]));
-        Add(cmd, "@cluster", cols[idxCluster]);
-        Add(cmd, "@tech",    cols[idxTech]);
-
-        Add(cmd, "@m_tilt",  ToInt(cols[idxMTilt]));      // âœ… ADDED
-        Add(cmd, "@e_tilt",  ToInt(cols[idxETilt]));      // âœ… ADDED
-        Add(cmd, "@height",  ToDouble(cols[idxHeight]));  // âœ… ADDED
-
-        Add(cmd, "@pid",     req.ProjectId);
-
-        inserted += await cmd.ExecuteNonQueryAsync();
+        table.Rows.Add(
+            ToDbText(cols[idxSite]),
+            ToDbText(cols[idxSector]),
+            ToDbText(cols[idxCellId]),
+            ToDbValue(ToDouble(cols[idxLon])),
+            ToDbValue(ToDouble(cols[idxLat])),
+            ToDbValue(ToInt(cols[idxPci])),
+            ToDbValue(ToInt(cols[idxAz])),
+            ToDbValue(ToInt(cols[idxBand])),
+            ToDbValue(ToInt(cols[idxEarfcn])),
+            idxFrequency >= 0 ? ToDbText(cols[idxFrequency]) : DBNull.Value,
+            ToDbText(cols[idxCluster]),
+            ToDbText(cols[idxTech]),
+            ToDbValue(ToInt(cols[idxMTilt])),
+            ToDbValue(ToInt(cols[idxETilt])),
+            ToDbValue(ToDouble(cols[idxHeight])),
+            req.ProjectId);
+        inserted++;
     }
 
-    await tx.CommitAsync();
+    if (table.Rows.Count > 0)
+    {
+        await InsertSitePredictionRowsInBatchesAsync(conn, table);
+    }
+
     await InvalidateMapViewCachesAsync();
 
     return Ok(new
     {
         Status = 1,
         Message = "Uploaded.",
-        Inserted = inserted
+        Inserted = inserted,
+        Skipped = skipped,
+        FrequencyColumnFound = idxFrequency >= 0
     });
 }
 
@@ -13842,6 +13868,66 @@ public class LocationStats
             return int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var v)
                 ? v
                 : null;
+        }
+
+        private static object ToDbValue<T>(T? value) where T : struct
+        {
+            return value.HasValue ? value.Value : DBNull.Value;
+        }
+
+        private static object ToDbText(string? value)
+        {
+            return string.IsNullOrWhiteSpace(value) ? DBNull.Value : value.Trim();
+        }
+
+        private static async Task InsertSitePredictionRowsInBatchesAsync(DbConnection conn, DataTable table)
+        {
+            const int batchSize = 500;
+            var columnNames = table.Columns.Cast<DataColumn>().Select(c => c.ColumnName).ToList();
+            var escapedColumns = string.Join(", ", columnNames.Select(c => $"`{c}`"));
+
+            await using var tx = await conn.BeginTransactionAsync();
+            try
+            {
+                for (var start = 0; start < table.Rows.Count; start += batchSize)
+                {
+                    var count = Math.Min(batchSize, table.Rows.Count - start);
+                    await using var cmd = conn.CreateCommand();
+                    cmd.Transaction = tx;
+
+                    var values = new List<string>(count);
+                    for (var rowOffset = 0; rowOffset < count; rowOffset++)
+                    {
+                        var row = table.Rows[start + rowOffset];
+                        var parameterNames = new List<string>(columnNames.Count);
+
+                        for (var colIndex = 0; colIndex < columnNames.Count; colIndex++)
+                        {
+                            var parameterName = $"@p_{rowOffset}_{colIndex}";
+                            parameterNames.Add(parameterName);
+
+                            var parameter = cmd.CreateParameter();
+                            parameter.ParameterName = parameterName;
+                            parameter.Value = row[colIndex] == DBNull.Value ? DBNull.Value : row[colIndex];
+                            cmd.Parameters.Add(parameter);
+                        }
+
+                        values.Add($"({string.Join(", ", parameterNames)})");
+                    }
+
+                    cmd.CommandText = $@"
+                        INSERT INTO site_prediction ({escapedColumns})
+                        VALUES {string.Join(", ", values)};";
+                    await cmd.ExecuteNonQueryAsync();
+                }
+
+                await tx.CommitAsync();
+            }
+            catch
+            {
+                await tx.RollbackAsync();
+                throw;
+            }
         }
 
         private static double? ToDouble(string s)
