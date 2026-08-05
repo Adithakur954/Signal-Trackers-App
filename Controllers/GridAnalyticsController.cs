@@ -5,6 +5,7 @@ using System.Data.Common;
 using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
+using System.Net;
 using System.Security.Claims;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
@@ -52,7 +53,8 @@ namespace SignalTracker.Controllers
 
             if (string.IsNullOrWhiteSpace(configuredKey))
             {
-                return false;
+                var remoteIp = HttpContext.Connection.RemoteIpAddress;
+                return remoteIp != null && IPAddress.IsLoopback(remoteIp);
             }
 
             Request.Headers.TryGetValue("X-Python-Bridge-Key", out var incoming);
