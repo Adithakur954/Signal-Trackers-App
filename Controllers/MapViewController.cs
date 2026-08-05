@@ -5455,7 +5455,7 @@ public async Task<IActionResult> GetN78Neighbours([FromQuery] string session_ids
     string projectKey = project_id.HasValue && project_id.Value > 0
         ? project_id.Value.ToString(CultureInfo.InvariantCulture)
         : "no_project";
-    string cacheKey = $"n78_neighbours:v2:{GetProjectListCacheScope()}:{sessionCsv}:project:{projectKey}";
+    string cacheKey = $"n78_neighbours:v3:{GetProjectListCacheScope()}:{sessionCsv}:project:{projectKey}";
     var projectPolygonWkt = await ResolveProjectFilterWktAsync(project_id);
 
     // ================= 2. REDIS READ =================
@@ -5480,14 +5480,13 @@ public async Task<IActionResult> GetN78Neighbours([FromQuery] string session_ids
         catch { /* Redis unavailable â€” fall through to DB */ }
     }
 
-    // ================= 3. RAW SQL (all processing in DB via CTE) =================
+    // ================= 3. RAW SQL =================
     string polygonFilterClause = !string.IsNullOrWhiteSpace(projectPolygonWkt)
         ? "AND p.lat IS NOT NULL AND p.lon IS NOT NULL AND ST_Contains(ST_GeomFromText(@projectPolygonWkt, 4326), ST_SRID(POINT(p.lon, p.lat), 4326))"
         : string.Empty;
 
-    string sql = $@"
-WITH PrimaryLogs AS (
-    SELECT 
+    string primarySql = $@"
+    SELECT
         id, session_id, timestamp, lat, lon, indoor_outdoor, 
         m_alpha_long AS provider,
         network AS primary_network, 
@@ -5502,53 +5501,24 @@ WITH PrimaryLogs AS (
     FROM tbl_network_log p
     WHERE p.session_id IN ({sessionCsv}) AND p.`primary` = 'yes'
       {polygonFilterClause}
-),
-JoinedData AS (
-    SELECT 
-        p.*,
-        n.network AS neighbour_network, 
-        n.band AS neighbour_band, 
-        n.pci AS neighbour_pci,
-        n.rsrp AS neighbour_rsrp, 
-        n.rsrq AS neighbour_rsrq, 
-        n.sinr AS neighbour_sinr,
-        n.m_alpha_long AS neighbour_provider,
-        CAST(NULLIF(n.dl_tpt, '') AS DECIMAL(12,4)) AS neighbour_dl_tpt,
-        CAST(NULLIF(n.ul_tpt, '') AS DECIMAL(12,4)) AS neighbour_ul_tpt,
-        ROW_NUMBER() OVER (
-            PARTITION BY p.id 
-            ORDER BY CAST(n.rsrp AS SIGNED) DESC
-        ) AS rn
-    FROM PrimaryLogs p
-    INNER JOIN tbl_network_log_neighbour n 
-        ON p.session_id = n.session_id 
-        AND p.lat = n.lat 
-        AND p.lon = n.lon
-    WHERE (
-          ((p.primary_network LIKE '%4G%' OR p.primary_network LIKE '%LTE%') AND (n.network LIKE '%5G%' OR n.network LIKE '%NR%'))
-          OR
-          ((p.primary_network LIKE '%5G%' OR p.primary_network LIKE '%NR%') AND (n.network LIKE '%4G%' OR n.network LIKE '%LTE%'))
-          OR
-          ((p.primary_network LIKE '%2G%' OR p.primary_network LIKE '%GSM%' OR p.primary_network LIKE '%EDGE%' OR p.primary_network LIKE '%GPRS%') AND (n.network LIKE '%4G%' OR n.network LIKE '%LTE%'))
-          OR
-          ((p.primary_network LIKE '%4G%' OR p.primary_network LIKE '%LTE%') AND (n.network LIKE '%2G%' OR n.network LIKE '%GSM%' OR n.network LIKE '%EDGE%' OR n.network LIKE '%GPRS%'))
-          OR
-          ((p.primary_network LIKE '%2G%' OR p.primary_network LIKE '%GSM%' OR p.primary_network LIKE '%EDGE%' OR p.primary_network LIKE '%GPRS%') AND (n.network LIKE '%5G%' OR n.network LIKE '%NR%'))
-          OR
-          ((p.primary_network LIKE '%5G%' OR p.primary_network LIKE '%NR%') AND (n.network LIKE '%2G%' OR n.network LIKE '%GSM%' OR n.network LIKE '%EDGE%' OR n.network LIKE '%GPRS%'))
-    )
-)
-SELECT 
-    id, session_id, timestamp, lat, lon, indoor_outdoor, provider,
-    primary_network, primary_band, primary_pci, primary_rsrp, primary_rsrq, primary_sinr,
-    mos, dl_tpt, ul_tpt,
-    neighbour_network, neighbour_band, neighbour_pci, neighbour_rsrp, neighbour_rsrq, 
-    neighbour_sinr, neighbour_provider, neighbour_dl_tpt, neighbour_ul_tpt
-FROM JoinedData 
-WHERE rn = 1 
-ORDER BY timestamp;";
+    ORDER BY p.timestamp, p.id;";
 
-    // ================= 4. RAW ADO.NET READ â€” fetch raw rows from DB =================
+    string neighbourSql = $@"
+    SELECT
+        id, session_id, lat, lon,
+        network, band, pci, rsrp, rsrq, sinr, m_alpha_long,
+        CAST(NULLIF(dl_tpt, '') AS DECIMAL(12,4)) AS dl_tpt,
+        CAST(NULLIF(ul_tpt, '') AS DECIMAL(12,4)) AS ul_tpt
+    FROM tbl_network_log_neighbour
+    WHERE session_id IN ({sessionCsv})
+      AND (
+            network LIKE '%5G%' OR network LIKE '%NR%'
+            OR network LIKE '%4G%' OR network LIKE '%LTE%'
+            OR network LIKE '%2G%' OR network LIKE '%GSM%'
+            OR network LIKE '%EDGE%' OR network LIKE '%GPRS%'
+      );";
+
+    // ================= 4. RAW ADO.NET READ =================
     var data = new List<LTE5GNeighbourDto>();
     const int N78NeighbourCommandTimeoutSeconds = 300;
 
@@ -5563,120 +5533,110 @@ ORDER BY timestamp;";
         }
 
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = sql;
+        cmd.CommandText = primarySql;
         cmd.CommandTimeout = N78NeighbourCommandTimeoutSeconds;
         if (!string.IsNullOrWhiteSpace(projectPolygonWkt))
         {
             AddParameter(cmd, "@projectPolygonWkt", projectPolygonWkt);
         }
 
-        await using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        var primaryRows = new List<LTE5GNeighbourDto>();
+        await using (var reader = await cmd.ExecuteReaderAsync())
         {
-            // ========= Backend processing: all type conversions done here =========
-            data.Add(new LTE5GNeighbourDto
+            while (await reader.ReadAsync())
             {
-                // --- Identity ---
-                id           = reader.IsDBNull(0)  ? 0 : reader.GetInt32(0),
-                session_id   = reader.IsDBNull(1)  ? 0 : reader.GetInt32(1),
-                timestamp    = reader.IsDBNull(2)  ? default : reader.GetDateTime(2),
-                lat          = reader.IsDBNull(3)  ? 0d : Convert.ToDouble(reader.GetValue(3)),
-                lon          = reader.IsDBNull(4)  ? 0d : Convert.ToDouble(reader.GetValue(4)),
-                indoor_outdoor = reader.IsDBNull(5) ? null : reader.GetString(5),
-                provider       = reader.IsDBNull(6) ? null : reader.GetString(6),
+                primaryRows.Add(new LTE5GNeighbourDto
+                {
+                    id           = reader.IsDBNull(0)  ? 0 : reader.GetInt32(0),
+                    session_id   = reader.IsDBNull(1)  ? 0 : reader.GetInt32(1),
+                    timestamp    = reader.IsDBNull(2)  ? default : reader.GetDateTime(2),
+                    lat          = reader.IsDBNull(3)  ? 0d : Convert.ToDouble(reader.GetValue(3)),
+                    lon          = reader.IsDBNull(4)  ? 0d : Convert.ToDouble(reader.GetValue(4)),
+                    indoor_outdoor = reader.IsDBNull(5) ? null : reader.GetString(5),
+                    provider       = reader.IsDBNull(6) ? null : reader.GetString(6),
 
-                // --- Primary KPIs (float? in DB â†’ double? in DTO) ---
-                primary_network = reader.IsDBNull(7)  ? null : reader.GetString(7),
-                primary_band    = reader.IsDBNull(8)  ? null : reader.GetString(8),
-                primary_pci     = reader.IsDBNull(9)  ? null : reader.GetString(9),
-                primary_rsrp    = reader.IsDBNull(10) ? null : (double?)Convert.ToDouble(reader.GetValue(10)),
-                primary_rsrq    = reader.IsDBNull(11) ? null : (double?)Convert.ToDouble(reader.GetValue(11)),
-                primary_sinr    = reader.IsDBNull(12) ? null : (double?)Convert.ToDouble(reader.GetValue(12)),
-                mos             = reader.IsDBNull(13) ? null : (double?)Convert.ToDouble(reader.GetValue(13)),
+                    // --- Primary KPIs (float? in DB -> double? in DTO) ---
+                    primary_network = reader.IsDBNull(7)  ? null : reader.GetString(7),
+                    primary_band    = reader.IsDBNull(8)  ? null : reader.GetString(8),
+                    primary_pci     = reader.IsDBNull(9)  ? null : reader.GetString(9),
+                    primary_rsrp    = reader.IsDBNull(10) ? null : (double?)Convert.ToDouble(reader.GetValue(10)),
+                    primary_rsrq    = reader.IsDBNull(11) ? null : (double?)Convert.ToDouble(reader.GetValue(11)),
+                    primary_sinr    = reader.IsDBNull(12) ? null : (double?)Convert.ToDouble(reader.GetValue(12)),
+                    mos             = reader.IsDBNull(13) ? null : (double?)Convert.ToDouble(reader.GetValue(13)),
 
-                // --- Throughput (DECIMAL(12,4) from CAST in SQL â†’ decimal? in DTO) ---
-                dl_tpt = reader.IsDBNull(14) ? null : (decimal?)Convert.ToDecimal(reader.GetValue(14)),
-                ul_tpt = reader.IsDBNull(15) ? null : (decimal?)Convert.ToDecimal(reader.GetValue(15)),
+                    dl_tpt = reader.IsDBNull(14) ? null : (decimal?)Convert.ToDecimal(reader.GetValue(14)),
+                    ul_tpt = reader.IsDBNull(15) ? null : (decimal?)Convert.ToDecimal(reader.GetValue(15)),
+                });
+            }
+        }
 
-                // --- Neighbour KPIs (float? in DB â†’ double? in DTO) ---
-                neighbour_network  = reader.IsDBNull(16) ? null : reader.GetString(16),
-                neighbour_band     = reader.IsDBNull(17) ? null : reader.GetString(17),
-                neighbour_pci      = reader.IsDBNull(18) ? null : reader.GetString(18),
-                neighbour_rsrp     = reader.IsDBNull(19) ? null : (double?)Convert.ToDouble(reader.GetValue(19)),
-                neighbour_rsrq     = reader.IsDBNull(20) ? null : (double?)Convert.ToDouble(reader.GetValue(20)),
-                neighbour_sinr     = reader.IsDBNull(21) ? null : (double?)Convert.ToDouble(reader.GetValue(21)),
-                neighbour_provider = reader.IsDBNull(22) ? null : reader.GetString(22),
-                neighbour_dl_tpt   = reader.IsDBNull(23) ? null : (decimal?)Convert.ToDecimal(reader.GetValue(23)),
-                neighbour_ul_tpt   = reader.IsDBNull(24) ? null : (decimal?)Convert.ToDecimal(reader.GetValue(24)),
-            });
+        var neighboursByLocation = new Dictionary<string, List<LTE5GNeighbourDto>>(StringComparer.Ordinal);
+        await using var neighbourCmd = conn.CreateCommand();
+        neighbourCmd.CommandText = neighbourSql;
+        neighbourCmd.CommandTimeout = N78NeighbourCommandTimeoutSeconds;
+        await using (var neighbourReader = await neighbourCmd.ExecuteReaderAsync())
+        {
+            while (await neighbourReader.ReadAsync())
+            {
+                var row = new LTE5GNeighbourDto
+                {
+                    id = neighbourReader.IsDBNull(0) ? 0 : neighbourReader.GetInt32(0),
+                    session_id = neighbourReader.IsDBNull(1) ? 0 : neighbourReader.GetInt32(1),
+                    lat = neighbourReader.IsDBNull(2) ? 0d : Convert.ToDouble(neighbourReader.GetValue(2)),
+                    lon = neighbourReader.IsDBNull(3) ? 0d : Convert.ToDouble(neighbourReader.GetValue(3)),
+                    neighbour_network = neighbourReader.IsDBNull(4) ? null : neighbourReader.GetString(4),
+                    neighbour_band = neighbourReader.IsDBNull(5) ? null : neighbourReader.GetString(5),
+                    neighbour_pci = neighbourReader.IsDBNull(6) ? null : neighbourReader.GetString(6),
+                    neighbour_rsrp = neighbourReader.IsDBNull(7) ? null : (double?)Convert.ToDouble(neighbourReader.GetValue(7)),
+                    neighbour_rsrq = neighbourReader.IsDBNull(8) ? null : (double?)Convert.ToDouble(neighbourReader.GetValue(8)),
+                    neighbour_sinr = neighbourReader.IsDBNull(9) ? null : (double?)Convert.ToDouble(neighbourReader.GetValue(9)),
+                    neighbour_provider = neighbourReader.IsDBNull(10) ? null : neighbourReader.GetString(10),
+                    neighbour_dl_tpt = neighbourReader.IsDBNull(11) ? null : (decimal?)Convert.ToDecimal(neighbourReader.GetValue(11)),
+                    neighbour_ul_tpt = neighbourReader.IsDBNull(12) ? null : (decimal?)Convert.ToDecimal(neighbourReader.GetValue(12)),
+                };
+
+                var key = BuildN78LocationKey(row.session_id, row.lat, row.lon);
+                if (!neighboursByLocation.TryGetValue(key, out var list))
+                {
+                    list = new List<LTE5GNeighbourDto>();
+                    neighboursByLocation[key] = list;
+                }
+                list.Add(row);
+            }
+        }
+
+        foreach (var primary in primaryRows)
+        {
+            var key = BuildN78LocationKey(primary.session_id, primary.lat, primary.lon);
+            if (!neighboursByLocation.TryGetValue(key, out var neighbours))
+                continue;
+
+            var primaryTech = ResolveN78Tech(primary.primary_network);
+            var best = neighbours
+                .Where(n => IsN78TechPair(primaryTech, ResolveN78Tech(n.neighbour_network)))
+                .OrderByDescending(n => n.neighbour_rsrp ?? double.NegativeInfinity)
+                .ThenBy(n => n.id)
+                .FirstOrDefault();
+
+            if (best == null)
+                continue;
+
+            primary.neighbour_network = best.neighbour_network;
+            primary.neighbour_band = best.neighbour_band;
+            primary.neighbour_pci = best.neighbour_pci;
+            primary.neighbour_rsrp = best.neighbour_rsrp;
+            primary.neighbour_rsrq = best.neighbour_rsrq;
+            primary.neighbour_sinr = best.neighbour_sinr;
+            primary.neighbour_provider = best.neighbour_provider;
+            primary.neighbour_dl_tpt = best.neighbour_dl_tpt;
+            primary.neighbour_ul_tpt = best.neighbour_ul_tpt;
+            data.Add(primary);
         }
     }
     finally
     {
         if (shouldClose && conn.State == System.Data.ConnectionState.Open)
             await conn.CloseAsync();
-    }
-
-    // Fallback: if polygon filtering produced no rows, retry once without polygon filter.
-    if (data.Count == 0 && !string.IsNullOrWhiteSpace(projectPolygonWkt) && project_id.HasValue && project_id.Value > 0)
-    {
-        var fallbackSql = sql.Replace(
-            "AND p.lat IS NOT NULL AND p.lon IS NOT NULL AND ST_Contains(ST_GeomFromText(@projectPolygonWkt, 4326), ST_SRID(POINT(p.lon, p.lat), 4326))",
-            string.Empty
-        );
-
-        conn = db.Database.GetDbConnection();
-        shouldClose = false;
-        try
-        {
-            if (conn.State != System.Data.ConnectionState.Open)
-            {
-                await conn.OpenAsync();
-                shouldClose = true;
-            }
-
-            await using var fallbackCmd = conn.CreateCommand();
-            fallbackCmd.CommandText = fallbackSql;
-            fallbackCmd.CommandTimeout = N78NeighbourCommandTimeoutSeconds;
-
-            await using var reader = await fallbackCmd.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
-            {
-                data.Add(new LTE5GNeighbourDto
-                {
-                    id = reader.IsDBNull(0) ? 0 : reader.GetInt32(0),
-                    session_id = reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
-                    timestamp = reader.IsDBNull(2) ? default : reader.GetDateTime(2),
-                    lat = reader.IsDBNull(3) ? 0d : Convert.ToDouble(reader.GetValue(3)),
-                    lon = reader.IsDBNull(4) ? 0d : Convert.ToDouble(reader.GetValue(4)),
-                    indoor_outdoor = reader.IsDBNull(5) ? null : reader.GetString(5),
-                    provider = reader.IsDBNull(6) ? null : reader.GetString(6),
-                    primary_network = reader.IsDBNull(7) ? null : reader.GetString(7),
-                    primary_band = reader.IsDBNull(8) ? null : reader.GetString(8),
-                    primary_pci = reader.IsDBNull(9) ? null : reader.GetString(9),
-                    primary_rsrp = reader.IsDBNull(10) ? null : (double?)Convert.ToDouble(reader.GetValue(10)),
-                    primary_rsrq = reader.IsDBNull(11) ? null : (double?)Convert.ToDouble(reader.GetValue(11)),
-                    primary_sinr = reader.IsDBNull(12) ? null : (double?)Convert.ToDouble(reader.GetValue(12)),
-                    mos = reader.IsDBNull(13) ? null : (double?)Convert.ToDouble(reader.GetValue(13)),
-                    dl_tpt = reader.IsDBNull(14) ? null : (decimal?)Convert.ToDecimal(reader.GetValue(14)),
-                    ul_tpt = reader.IsDBNull(15) ? null : (decimal?)Convert.ToDecimal(reader.GetValue(15)),
-                    neighbour_network = reader.IsDBNull(16) ? null : reader.GetString(16),
-                    neighbour_band = reader.IsDBNull(17) ? null : reader.GetString(17),
-                    neighbour_pci = reader.IsDBNull(18) ? null : reader.GetString(18),
-                    neighbour_rsrp = reader.IsDBNull(19) ? null : (double?)Convert.ToDouble(reader.GetValue(19)),
-                    neighbour_rsrq = reader.IsDBNull(20) ? null : (double?)Convert.ToDouble(reader.GetValue(20)),
-                    neighbour_sinr = reader.IsDBNull(21) ? null : (double?)Convert.ToDouble(reader.GetValue(21)),
-                    neighbour_provider = reader.IsDBNull(22) ? null : reader.GetString(22),
-                    neighbour_dl_tpt = reader.IsDBNull(23) ? null : (decimal?)Convert.ToDecimal(reader.GetValue(23)),
-                    neighbour_ul_tpt = reader.IsDBNull(24) ? null : (decimal?)Convert.ToDecimal(reader.GetValue(24)),
-                });
-            }
-        }
-        finally
-        {
-            if (shouldClose && conn.State == System.Data.ConnectionState.Open)
-                await conn.CloseAsync();
-        }
     }
 
     // ================= 5. REDIS WRITE =================
@@ -5696,6 +5656,32 @@ ORDER BY timestamp;";
         RecordCount = data.Count,
         Data = data
     });
+}
+
+private static string BuildN78LocationKey(int sessionId, double lat, double lon)
+{
+    return string.Create(
+        CultureInfo.InvariantCulture,
+        $"{sessionId}|{lat:R}|{lon:R}");
+}
+
+private static string ResolveN78Tech(string? network)
+{
+    var value = network?.Trim().ToUpperInvariant() ?? "";
+    if (value.Contains("5G") || value.Contains("NR"))
+        return "5G";
+    if (value.Contains("4G") || value.Contains("LTE"))
+        return "4G";
+    if (value.Contains("2G") || value.Contains("GSM") || value.Contains("EDGE") || value.Contains("GPRS"))
+        return "2G";
+    return "";
+}
+
+private static bool IsN78TechPair(string primaryTech, string neighbourTech)
+{
+    return !string.IsNullOrWhiteSpace(primaryTech)
+        && !string.IsNullOrWhiteSpace(neighbourTech)
+        && !string.Equals(primaryTech, neighbourTech, StringComparison.OrdinalIgnoreCase);
 }
 
 
