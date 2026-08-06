@@ -12,6 +12,7 @@ public static class SecurityServiceExtensions
 {
     public const string CorsPolicyName = "AllowReactApp";
     private const string UserLoginLockKeyPrefix = "auth:login-lock:user:";
+    private const int DefaultPersistentSessionDays = 3650;
 
     public static void AddSignalTrackerCors(this IServiceCollection services, IConfiguration configuration, IWebHostEnvironment environment)
     {
@@ -48,14 +49,19 @@ public static class SecurityServiceExtensions
 
     public static void AddSignalTrackerCookieAuth(this IServiceCollection services, IConfiguration configuration, IWebHostEnvironment environment)
     {
-        var sessionMinutes = Math.Clamp(configuration.GetValue("Security:SessionIdleMinutes", 60), 15, 300);
+        var persistentSessionDays = Math.Clamp(
+            configuration.GetValue("Security:PersistentSessionDays", DefaultPersistentSessionDays),
+            1,
+            DefaultPersistentSessionDays);
+        var persistentSessionTtlSeconds = (int)TimeSpan.FromDays(persistentSessionDays).TotalSeconds;
+        var persistentSessionLifetime = TimeSpan.FromDays(persistentSessionDays);
         var isDevelopment = environment.IsDevelopment();
         var cookieSameSite = isDevelopment ? SameSiteMode.Lax : SameSiteMode.None;
         var cookieSecurePolicy = isDevelopment ? CookieSecurePolicy.None : CookieSecurePolicy.Always;
 
         services.AddSession(options =>
         {
-            options.IdleTimeout = TimeSpan.FromMinutes(sessionMinutes);
+            options.IdleTimeout = persistentSessionLifetime;
             options.Cookie.Name = "st.session";
             options.Cookie.HttpOnly = true;
             options.Cookie.IsEssential = true;
@@ -71,7 +77,7 @@ public static class SecurityServiceExtensions
                 options.Cookie.SameSite = cookieSameSite;
                 options.Cookie.SecurePolicy = cookieSecurePolicy;
                 options.Cookie.IsEssential = true;
-                options.ExpireTimeSpan = TimeSpan.FromMinutes(sessionMinutes);
+                options.ExpireTimeSpan = persistentSessionLifetime;
                 options.SlidingExpiration = true;
 
                 options.Events.OnRedirectToLogin = ctx =>
@@ -113,7 +119,12 @@ public static class SecurityServiceExtensions
                     {
                         ctx.RejectPrincipal();
                         await ctx.HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+                        ctx.HttpContext.Session.Clear();
+                        ctx.HttpContext.Response.Headers["X-Session-Invalidated"] = "same-user-login";
+                        return;
                     }
+
+                    await redis.ExtendTtlAsync($"{UserLoginLockKeyPrefix}{userId}", persistentSessionTtlSeconds);
                 };
             });
 

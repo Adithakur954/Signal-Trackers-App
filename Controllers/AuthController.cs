@@ -22,7 +22,7 @@ namespace SignalTracker.Controllers
     {
         private const string LegacyGlobalLoginLockKey = "auth:global-login-lock";
         private const string UserLoginLockKeyPrefix = "auth:login-lock:user:";
-        private const int UserLoginLockTtlSeconds = 18000;
+        private const int UserLoginLockTtlSeconds = 315360000;
 
         private readonly ApplicationDbContext _db;
         private readonly ILogger<AuthController> _logger;
@@ -356,19 +356,8 @@ namespace SignalTracker.Controllers
                 }
                 else
                 {
-                    var lockResult = await _redis.TrySetStringWhenNotExistsAsync(userLockKey, lockValue, UserLoginLockTtlSeconds);
-                    if (lockResult == RedisSetWhenNotExistsResult.AlreadyExists)
-                    {
-                        var activeLogin = ParseLoginLockValue(await _redis.GetStringAsync(userLockKey));
-                        return Unauthorized(new
-                        {
-                            message = "Sorry, someone is already logged in. Please logout from old devices.",
-                            already_logged_in = true,
-                            can_force_logout = true,
-                            active_login = activeLogin
-                        });
-                    }
-                    if (lockResult == RedisSetWhenNotExistsResult.Unavailable)
+                    var lockAcquired = await _redis.SetStringAsync(userLockKey, lockValue, UserLoginLockTtlSeconds);
+                    if (!lockAcquired)
                     {
                         if (_configuration.GetValue<bool>("Security:RequireRedisLoginLock"))
                         {

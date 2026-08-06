@@ -20,7 +20,7 @@ namespace SignalTracker.Controllers
     {
         private const string LegacyGlobalLoginLockKey = "auth:global-login-lock";
         private const string UserLoginLockKeyPrefix = "auth:login-lock:user:";
-        private const int UserLoginLockTtlSeconds = 18000;
+        private const int UserLoginLockTtlSeconds = 315360000;
 
         private readonly ApplicationDbContext _db;
         private readonly CommonFunction? _cf = null;
@@ -277,12 +277,8 @@ namespace SignalTracker.Controllers
                     }
                     else
                     {
-                        var lockResult = await _redis.TrySetStringWhenNotExistsAsync(userLockKey, lockValue, UserLoginLockTtlSeconds);
-                        if (lockResult == RedisSetWhenNotExistsResult.AlreadyExists)
-                        {
-                            return Json(new { success = false, message = "Sorry, someone is already logged in. Please try again later." });
-                        }
-                        if (lockResult == RedisSetWhenNotExistsResult.Unavailable)
+                        var lockSet = await _redis.SetStringAsync(userLockKey, lockValue, UserLoginLockTtlSeconds);
+                        if (!lockSet)
                         {
                             if (_configuration.GetValue<bool>("Security:RequireRedisLoginLock"))
                             {
@@ -315,7 +311,8 @@ namespace SignalTracker.Controllers
                     new Claim("UserTypeId", user.m_user_type_id.ToString()),
                     new Claim("CompanyId", user.company_id?.ToString() ?? "0"),
                     new Claim("company_id", user.company_id?.ToString() ?? "0"),
-                    new Claim("country_code", resolvedCountryCode)
+                    new Claim("country_code", resolvedCountryCode),
+                    new Claim("LoginLockValue", lockValue)
                 };
 
                 var claimsIdentity = new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme);
@@ -331,7 +328,6 @@ namespace SignalTracker.Controllers
                     {
                         IsPersistent = true,
                         AllowRefresh = true,
-                        ExpiresUtc = DateTimeOffset.UtcNow.AddMinutes(300),
                     });
 
                 var companyIdValue = user.company_id?.ToString() ?? "0";
