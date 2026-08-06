@@ -277,8 +277,20 @@ namespace SignalTracker.Controllers
                     }
                     else
                     {
-                        var lockSet = await _redis.SetStringAsync(userLockKey, lockValue, UserLoginLockTtlSeconds);
-                        if (!lockSet)
+                        var lockResult = await _redis.TrySetStringWhenNotExistsAsync(userLockKey, lockValue, UserLoginLockTtlSeconds);
+                        if (lockResult == RedisSetWhenNotExistsResult.AlreadyExists)
+                        {
+                            var activeLogin = ParseLoginLockValue(await _redis.GetStringAsync(userLockKey));
+                            return Json(new
+                            {
+                                success = false,
+                                message = "Sorry, someone is already logged in. Please logout from old devices.",
+                                already_logged_in = true,
+                                can_force_logout = true,
+                                active_login = activeLogin
+                            });
+                        }
+                        if (lockResult == RedisSetWhenNotExistsResult.Unavailable)
                         {
                             if (_configuration.GetValue<bool>("Security:RequireRedisLoginLock"))
                             {
@@ -553,6 +565,49 @@ namespace SignalTracker.Controllers
 
         private static string BuildUserLoginLockKey(int userId)
             => $"{UserLoginLockKeyPrefix}{userId}";
+
+        private static object? ParseLoginLockValue(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return null;
+
+            var parts = value.Split('|');
+            if (parts.Length >= 6)
+            {
+                return new
+                {
+                    user_id = int.TryParse(parts[0], out var parsedUserId) ? parsedUserId : 0,
+                    email = DecodeBase64(parts[1]),
+                    login_time_utc = parts[2],
+                    ip_address = DecodeBase64(parts[3]),
+                    user_agent = DecodeBase64(parts[4]),
+                    device = DecodeBase64(parts[5])
+                };
+            }
+
+            var legacyParts = value.Split(':');
+            return new
+            {
+                user_id = legacyParts.Length > 0 && int.TryParse(legacyParts[0], out var userId) ? userId : 0,
+                email = legacyParts.Length > 1 ? legacyParts[1] : string.Empty,
+                login_time_utc = legacyParts.Length > 2 ? string.Join(":", legacyParts.Skip(2)) : string.Empty,
+                ip_address = string.Empty,
+                user_agent = string.Empty,
+                device = "Unknown device"
+            };
+        }
+
+        private static string DecodeBase64(string value)
+        {
+            try
+            {
+                return Encoding.UTF8.GetString(Convert.FromBase64String(value));
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
 
         #endregion
 

@@ -356,8 +356,19 @@ namespace SignalTracker.Controllers
                 }
                 else
                 {
-                    var lockAcquired = await _redis.SetStringAsync(userLockKey, lockValue, UserLoginLockTtlSeconds);
-                    if (!lockAcquired)
+                    var lockResult = await _redis.TrySetStringWhenNotExistsAsync(userLockKey, lockValue, UserLoginLockTtlSeconds);
+                    if (lockResult == RedisSetWhenNotExistsResult.AlreadyExists)
+                    {
+                        var activeLogin = ParseLoginLockValue(await _redis.GetStringAsync(userLockKey));
+                        return Unauthorized(new
+                        {
+                            message = "Sorry, someone is already logged in. Please logout from old devices.",
+                            already_logged_in = true,
+                            can_force_logout = true,
+                            active_login = activeLogin
+                        });
+                    }
+                    if (lockResult == RedisSetWhenNotExistsResult.Unavailable)
                     {
                         if (_configuration.GetValue<bool>("Security:RequireRedisLoginLock"))
                         {
