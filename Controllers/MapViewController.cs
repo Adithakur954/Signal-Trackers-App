@@ -1016,6 +1016,54 @@ public class ProjectPolygonItem
                 };
             }
 
+            private static string NormalizeStatusLabel(string? statusRaw)
+            {
+                if (string.IsNullOrWhiteSpace(statusRaw))
+                {
+                    return "not_connected";
+                }
+
+                var normalized = statusRaw.Trim().ToUpperInvariant();
+                var compact = Regex.Replace(normalized, @"[\s_\-]+", "");
+
+                if (compact is "SUCCESS" or "SUCCEEDED" or "SUCCESSFUL" or "PASS" or "PASSED" or "OK" or "TRUE" or "1" or "COMPLETE" or "COMPLETED" or "DONE" or "CONNECTED")
+                {
+                    return "connected";
+                }
+
+                if (compact.Contains("TIMEOUT", StringComparison.OrdinalIgnoreCase))
+                {
+                    return "timeout";
+                }
+
+                if (compact.Contains("CANCEL", StringComparison.OrdinalIgnoreCase))
+                {
+                    return "cancel";
+                }
+
+                if (compact is "DISCONNECTED")
+                {
+                    return "disconnected";
+                }
+
+                if (compact is "NOTCONNECTED" or "FALSE" or "0" or "2" or "NO")
+                {
+                    return "not_connected";
+                }
+
+                if (compact.Contains("FAIL", StringComparison.OrdinalIgnoreCase))
+                {
+                    return "failed";
+                }
+
+                if (compact.Contains("ERROR", StringComparison.OrdinalIgnoreCase))
+                {
+                    return "error";
+                }
+
+                return "not_connected";
+            }
+
             private static string MergeStatus(string? currentStatus, string? nextStatusRaw)
             {
                 var nextStatus = NormalizeStatus(nextStatusRaw);
@@ -1220,7 +1268,7 @@ public class ProjectPolygonItem
                         duration_ms = x.DurationMs.HasValue ? RoundMetric(x.DurationMs.Value) : (double?)null,
                         setup_ms = x.SetupMs.HasValue ? RoundMetric(x.SetupMs.Value) : (double?)null,
                         result_status_raw = x.ResultStatusRaw,
-                        result_status = string.Equals(x.ResultStatus, "1", StringComparison.OrdinalIgnoreCase) ? "connected" : "not_connected"
+                        result_status = NormalizeStatusLabel(x.ResultStatusRaw)
                     })
                     .ToList();
 
