@@ -173,7 +173,7 @@ namespace SignalTracker.Controllers
 
                     if (filterByImageName)
                     {
-                        var imageRows = rows.Where(r => mapImages != null && mapImages.Count > 0).ToList();
+                        var imageRows = rows.Where(RowHasImageName).ToList();
                         if (imageRows.Count > 0) rows = imageRows;
                     }
 
@@ -438,6 +438,11 @@ namespace SignalTracker.Controllers
 
                 var filterByImageName = ResolveFilterByImageName(request, Request.HasFormContentType ? Request.Form : null, Request.Query);
                 var rowsToSummarize = allRows;
+                if (filterByImageName)
+                {
+                    var imageRows = allRows.Where(RowHasImageName).ToList();
+                    if (imageRows.Count > 0) rowsToSummarize = imageRows;
+                }
 
                 var validRows = rowsToSummarize
                     .Where(r => !string.IsNullOrWhiteSpace(r.Band) &&
@@ -753,7 +758,7 @@ namespace SignalTracker.Controllers
                 Rsrp = -1, Rsrq = -1, Sinr = -1, DlTpt = -1, UlTpt = -1, Earfcn = -1,
                 VolteCall = -1, Band = -1, Bler = -1, AlphaLong = -1, AlphaShort = -1,
                 Rssi = -1, NodebId = -1, Apps = -1, PuschTx = -1, Primary = -1,
-                PrimaryCellInfo = -1;
+                PrimaryCellInfo = -1, ImageName = -1;
         }
 
         private static ColumnMap BuildColumnMap(List<string> headers)
@@ -793,7 +798,8 @@ namespace SignalTracker.Controllers
                 Apps = FindColumn(headers, "running apps", "apps", "app_name"),
                 PuschTx = FindColumn(headers, "pusch tx", "pusch_tx", "pusch"),
                 Primary = FindColumnByName(headers, "primary"),
-                PrimaryCellInfo = FindColumnByName(headers, "cellinfo_1", "primary_cell_info_1", "primary_cell_info", "cell_info", "cellinfo")
+                PrimaryCellInfo = FindColumnByName(headers, "cellinfo_1", "primary_cell_info_1", "primary_cell_info", "cell_info", "cellinfo"),
+                ImageName = FindColumn(headers, "image_name", "imagename", "image name", "image")
             };
         }
 
@@ -918,7 +924,8 @@ namespace SignalTracker.Controllers
                 Apps = GetCol(cols, map.Apps),
                 IndoorOutdoor = GetCol(cols, map.IndoorOutdoor),
                 CellId = cellId,
-                PuschTx = GetCol(cols, map.PuschTx)
+                PuschTx = GetCol(cols, map.PuschTx),
+                RawImageName = GetCol(cols, map.ImageName)
             };
         }
 
@@ -998,6 +1005,16 @@ namespace SignalTracker.Controllers
             }
 
             return value.Length <= 31 ? value : value[..31];
+        }
+
+        private static bool RowHasImageName(UnifiedMapReportRow r)
+        {
+            if (string.IsNullOrWhiteSpace(r.RawImageName)) return false;
+            var v = r.RawImageName.Trim();
+            return !v.Equals("NA", StringComparison.OrdinalIgnoreCase) &&
+                   !v.Equals("N/A", StringComparison.OrdinalIgnoreCase) &&
+                   !v.Equals("null", StringComparison.OrdinalIgnoreCase) &&
+                   !v.Equals("Unknown", StringComparison.OrdinalIgnoreCase);
         }
 
         private static bool IsPrimaryRegisteredRow(List<string> cols, ColumnMap map)

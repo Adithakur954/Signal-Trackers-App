@@ -664,6 +664,7 @@ namespace SignalTracker.Controllers
         public string? Bler { get; set; }
         public int? VolteCall { get; set; } // Kept as int?
         public string? PuschTx { get; set; } 
+        public string? RawImageName { get; set; }
     }
 
     internal sealed class UnifiedMapReport
