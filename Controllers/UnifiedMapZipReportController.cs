@@ -51,104 +51,214 @@ namespace SignalTracker.Controllers
         //   ProjectName     -> optional (defaults to zip file name)
         //   SessionIdOverride -> optional, forces the session id used for image lookup
         //   BandFilter/Bands -> optional, one or more selected bands; ALL/empty = no filter
+        private static List<IFormFile> ResolveUploadedFiles(ZipReportUploadRequest request, HttpRequest? httpRequest = null)
+        {
+            var files = new List<IFormFile>();
+            if (httpRequest != null && httpRequest.HasFormContentType && httpRequest.Form.Files.Count > 0)
+            {
+                foreach (var f in httpRequest.Form.Files)
+                {
+                    if (f != null && f.Length > 0 && !files.Contains(f))
+                        files.Add(f);
+                }
+            }
+
+            if (files.Count == 0)
+            {
+                if (request.LogZips?.Count > 0)
+                    files.AddRange(request.LogZips.Where(f => f != null && f.Length > 0));
+                if (request.LogZip != null && request.LogZip.Length > 0 && !files.Contains(request.LogZip))
+                    files.Add(request.LogZip);
+            }
+            return files;
+        }
+
+        private static List<IFormFile> ResolveUploadedFilesForDiscovery(ZipBandDiscoveryRequest request, HttpRequest? httpRequest = null)
+        {
+            var files = new List<IFormFile>();
+            if (httpRequest != null && httpRequest.HasFormContentType && httpRequest.Form.Files.Count > 0)
+            {
+                foreach (var f in httpRequest.Form.Files)
+                {
+                    if (f != null && f.Length > 0 && !files.Contains(f))
+                        files.Add(f);
+                }
+            }
+
+            if (files.Count == 0)
+            {
+                if (request.LogZips?.Count > 0)
+                    files.AddRange(request.LogZips.Where(f => f != null && f.Length > 0));
+                if (request.LogZip != null && request.LogZip.Length > 0 && !files.Contains(request.LogZip))
+                    files.Add(request.LogZip);
+            }
+            return files;
+        }
+
+        private static bool ResolveFilterByImageName(object? request, IFormCollection? form, IQueryCollection? query = null)
+        {
+            var keysToMatch = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "FilterByImageName", "UseImageNameFilter", "OnlyWithImage", "ImageFilter", "WithImageName", "ImageNameFilter", "ByImage", "ImageOnly"
+            };
+
+            if (query != null)
+            {
+                foreach (var qKey in query.Keys)
+                {
+                    var normalized = qKey.Replace("_", "").Replace("-", "");
+                    if (keysToMatch.Contains(normalized) || keysToMatch.Contains(qKey))
+                    {
+                        var v = query[qKey].ToString().Trim().ToLowerInvariant();
+                        if (v == "false" || v == "0" || v == "no" || v == "without_image" || v == "withoutimage" || v == "all" || v == "off") return false;
+                        if (v == "true" || v == "1" || v == "yes" || v == "with_image" || v == "withimage" || v == "only_image" || v == "on") return true;
+                    }
+                }
+            }
+
+            if (form != null)
+            {
+                foreach (var fKey in form.Keys)
+                {
+                    var normalized = fKey.Replace("_", "").Replace("-", "");
+                    if (keysToMatch.Contains(normalized) || keysToMatch.Contains(fKey))
+                    {
+                        var v = form[fKey].ToString().Trim().ToLowerInvariant();
+                        if (v == "false" || v == "0" || v == "no" || v == "without_image" || v == "withoutimage" || v == "all" || v == "off") return false;
+                        if (v == "true" || v == "1" || v == "yes" || v == "with_image" || v == "withimage" || v == "only_image" || v == "on") return true;
+                    }
+                }
+            }
+
+            return true;
+        }
+
+        // POST api/UnifiedMapZipReport/GenerateFromZip
         [HttpPost("GenerateFromZip")]
         [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("Report")]
         [Consumes("multipart/form-data")]
-        [RequestSizeLimit(200_000_000)]
+        [RequestSizeLimit(1_000_000_000)]
         public async Task<IActionResult> GenerateFromZip([FromForm] ZipReportUploadRequest request)
         {
-            if (request.LogZip == null || request.LogZip.Length == 0)
-                return BadRequest(new { Message = "A log zip file is required." });
+            var uploads = ResolveUploadedFiles(request, Request);
+            if (uploads.Count == 0)
+                return BadRequest(new { Message = "At least one log zip file is required." });
 
-            var tempZipPath = await SaveUploadToTempFileAsync(request.LogZip, HttpContext.RequestAborted);
-            try
-            {
-            await using var zipStream = new FileStream(
-                tempZipPath,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.Read,
-                bufferSize: 128 * 1024,
-                useAsync: true);
-
-            using var archive = new ZipArchive(zipStream, ZipArchiveMode.Read, leaveOpen: true);
-
-            var mapImages = ExtractMapImages(archive, out var detectedSessionId);
-            var sessionId = request.SessionIdOverride ?? detectedSessionId ?? 0;
-
-            var rawRows = ExtractNetworkRows(archive, sessionId);
-            var rows = CleanRows(rawRows);
-            if (rows.Count == 0)
-                return BadRequest(new { Message = "No usable network log rows were found inside the zip." });
-
-            // Tell the caller which bands were present in this zip (before any
-            // BandFilter is applied) so they know what values are valid.
-            var bandsPresent = rows
-                .Select(r => r.Band)
-                .Where(b => !string.IsNullOrWhiteSpace(b) &&
-                            !b.Equals("Unknown", StringComparison.OrdinalIgnoreCase) &&
-                            !b.Equals("Unknown Band", StringComparison.OrdinalIgnoreCase))
-                .Distinct(StringComparer.OrdinalIgnoreCase)!
-                .OrderBy(b => b, StringComparer.OrdinalIgnoreCase)
-                .ToList();
-            Response.Headers["X-Available-Bands"] = string.Join(",", bandsPresent);
-
+            var filterByImageName = ResolveFilterByImageName(request, Request.HasFormContentType ? Request.Form : null, Request.Query);
             var selectedBands = ResolveSelectedBands(request, Request.HasFormContentType ? Request.Form : null);
-            if (selectedBands.Count > 0)
-            {
-                rows = FilterRowsByBands(rows, selectedBands);
 
-                if (rows.Count == 0)
-                    return BadRequest(new
+            var generatedPdfs = new List<(string Filename, byte[] PdfBytes)>();
+
+            foreach (var upload in uploads)
+            {
+                var tempZipPath = await SaveUploadToTempFileAsync(upload, HttpContext.RequestAborted);
+                try
+                {
+                    await using var zipStream = new FileStream(
+                        tempZipPath,
+                        FileMode.Open,
+                        FileAccess.Read,
+                        FileShare.Read,
+                        bufferSize: 128 * 1024,
+                        useAsync: true);
+
+                    using var archive = new ZipArchive(zipStream, ZipArchiveMode.Read, leaveOpen: true);
+
+                    var mapImages = ExtractMapImages(archive, out var detectedSessionId);
+                    var sessionId = request.SessionIdOverride ?? detectedSessionId ?? 0;
+
+                    var rawRows = ExtractNetworkRows(archive, sessionId);
+                    var rows = CleanRows(rawRows);
+                    if (rows.Count == 0) continue;
+
+                    if (filterByImageName)
                     {
-                        Message = $"No samples found for band(s): {string.Join(", ", selectedBands)}. Check the band value (e.g. B3, B8, B40, n78).",
-                        AvailableBands = bandsPresent
-                    });
+                        var imageRows = rows.Where(r => mapImages != null && mapImages.Count > 0).ToList();
+                        if (imageRows.Count > 0) rows = imageRows;
+                    }
+
+                    if (selectedBands.Count > 0)
+                    {
+                        rows = FilterRowsByBands(rows, selectedBands);
+                    }
+
+                    if (rows.Count == 0) continue;
+
+                    var thresholds = ExtractThresholdConfig(archive);
+                    var companyLogo = LoadCompanyLogo();
+                    var productLogo = LoadProductLogo();
+
+                    var sessionIds = sessionId > 0 ? new List<long> { sessionId } : new List<long>();
+
+                    var pdfRequest = new UnifiedMapPdfRequest
+                    {
+                        ProjectId = 0,
+                        Title = string.IsNullOrWhiteSpace(request.Title) ? "Drive Test Analytics Report" : request.Title,
+                        GeneratedBy = request.GeneratedBy,
+                        SessionIds = sessionIds,
+                        NetworkType = "ALL"
+                    };
+
+                    var baseName = Path.GetFileNameWithoutExtension(upload.FileName);
+                    var projectName = string.IsNullOrWhiteSpace(request.ProjectName)
+                        ? baseName
+                        : request.ProjectName;
+
+                    if (selectedBands.Count > 0)
+                    {
+                        projectName += $" ({(selectedBands.Count == 1 ? "Band" : "Bands")}: {string.Join(", ", selectedBands)})";
+                    }
+
+                    var report = UnifiedMapReportFactory.Create(
+                        pdfRequest,
+                        projectName,
+                        sessionIds,
+                        rows,
+                        thresholds,
+                        companyLogo,
+                        productLogo);
+
+                    report.MapImages = mapImages;
+
+                    var pdfBytes = UnifiedMapRawPdfBuilder.Build(report);
+                    var pdfFilename = $"UnifiedMap_ZipReport_{sessionId}_{baseName}_{DateTime.Now:yyyy-MM-dd}.pdf";
+                    generatedPdfs.Add((pdfFilename, pdfBytes));
+                }
+                finally
+                {
+                    if (System.IO.File.Exists(tempZipPath))
+                    {
+                        try { System.IO.File.Delete(tempZipPath); } catch { }
+                    }
+                }
             }
 
-            var thresholds = ExtractThresholdConfig(archive);
-            var companyLogo = LoadCompanyLogo();
-            var productLogo = LoadProductLogo();
-
-            var sessionIds = sessionId > 0 ? new List<long> { sessionId } : new List<long>();
-
-            var pdfRequest = new UnifiedMapPdfRequest
+            if (generatedPdfs.Count == 0)
             {
-                ProjectId = 0,
-                Title = string.IsNullOrWhiteSpace(request.Title) ? "Drive Test Analytics Report" : request.Title,
-                GeneratedBy = request.GeneratedBy,
-                SessionIds = sessionIds,
-                NetworkType = "ALL"
-            };
+                return BadRequest(new { Message = "No usable network log rows were found in the uploaded zip file(s)." });
+            }
 
-            var projectName = string.IsNullOrWhiteSpace(request.ProjectName)
-                ? Path.GetFileNameWithoutExtension(request.LogZip.FileName)
-                : request.ProjectName;
-
-            if (selectedBands.Count > 0)
+            // Single zip file -> return single PDF directly
+            if (generatedPdfs.Count == 1)
             {
-                projectName += $" ({(selectedBands.Count == 1 ? "Band" : "Bands")}: {string.Join(", ", selectedBands)})";
+                return File(generatedPdfs[0].PdfBytes, "application/pdf", generatedPdfs[0].Filename);
             }
 
-            var report = UnifiedMapReportFactory.Create(
-                pdfRequest,
-                projectName,
-                sessionIds,
-                rows,
-                thresholds,
-                companyLogo,
-                productLogo);
-
-            report.MapImages = mapImages;
-
-            var pdf = UnifiedMapRawPdfBuilder.Build(report);
-            var filename = $"UnifiedMap_ZipReport_{sessionId}_{DateTime.Now:yyyy-MM-dd}.pdf";
-            return File(pdf, "application/pdf", filename);
-            }
-            finally
+            // Multiple zip files -> package a separate PDF for each file into a ZIP archive
+            using var zipMs = new MemoryStream();
+            using (var zipArchive = new ZipArchive(zipMs, ZipArchiveMode.Create, leaveOpen: true))
             {
-                System.IO.File.Delete(tempZipPath);
+                foreach (var (pdfName, pdfBytes) in generatedPdfs)
+                {
+                    var zipEntry = zipArchive.CreateEntry(pdfName, CompressionLevel.Fastest);
+                    using var entryStream = zipEntry.Open();
+                    entryStream.Write(pdfBytes, 0, pdfBytes.Length);
+                }
             }
+
+            zipMs.Seek(0, SeekOrigin.Begin);
+            var zipDownloadName = $"UnifiedMap_PDF_Reports_{DateTime.Now:yyyy-MM-dd}.zip";
+            return File(zipMs.ToArray(), "application/zip", zipDownloadName);
         }
 
         // ---------------------------------------------------------------
@@ -195,7 +305,7 @@ namespace SignalTracker.Controllers
                 //    timestamp). Treat session + timestamp + pci + rsrp + rsrq +
                 //    band as the identity of one reading.
                 var dedupeKey = string.Join('|',
-                    r.SessionId, r.Timestamp?.Ticks, r.Pci, r.Rsrp, r.Rsrq, r.Band);
+                    r.SessionId, r.Timestamp?.Ticks, r.Pci, r.Rsrp, r.Rsrq, r.Band, r.Lat, r.Lon, r.Id);
                 if (!seen.Add(dedupeKey)) continue;
 
                 cleaned.Add(r);
@@ -291,71 +401,87 @@ namespace SignalTracker.Controllers
         }
 
         // POST api/UnifiedMapZipReport/DiscoverBands
-        // Upload the same zip here first to see which band values it contains,
-        // so you know what to pass as BandFilter to GenerateFromZip.
         [HttpPost("DiscoverBands")]
         [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("Report")]
         [Consumes("multipart/form-data")]
-        [RequestSizeLimit(200_000_000)]
+        [RequestSizeLimit(1_000_000_000)]
         public async Task<IActionResult> DiscoverBands([FromForm] ZipBandDiscoveryRequest request)
         {
-            if (request.LogZip == null || request.LogZip.Length == 0)
-                return BadRequest(new { Message = "A log zip file is required." });
+            var uploads = ResolveUploadedFilesForDiscovery(request, Request);
+            if (uploads.Count == 0)
+                return BadRequest(new { Message = "At least one log zip file is required." });
 
-            var tempZipPath = await SaveUploadToTempFileAsync(request.LogZip, HttpContext.RequestAborted);
+            var allTempPaths = new List<string>();
+            var allRows = new List<UnifiedMapReportRow>();
+            var sessionIds = new List<int>();
+
             try
             {
-            await using var zipStream = new FileStream(
-                tempZipPath,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.Read,
-                bufferSize: 128 * 1024,
-                useAsync: true);
+                foreach (var upload in uploads)
+                {
+                    var tempZipPath = await SaveUploadToTempFileAsync(upload, HttpContext.RequestAborted);
+                    allTempPaths.Add(tempZipPath);
 
-            using var archive = new ZipArchive(zipStream, ZipArchiveMode.Read, leaveOpen: true);
+                    await using var zipStream = new FileStream(
+                        tempZipPath, FileMode.Open, FileAccess.Read,
+                        FileShare.Read, bufferSize: 128 * 1024, useAsync: true);
 
-            ExtractMapImages(archive, out var detectedSessionId);
-            var sessionId = request.SessionIdOverride ?? detectedSessionId ?? 0;
+                    using var archive = new ZipArchive(zipStream, ZipArchiveMode.Read, leaveOpen: true);
 
-            var rawRows = ExtractNetworkRows(archive, sessionId);
-            var rows = CleanRows(rawRows);
+                    ExtractMapImages(archive, out var detectedSessionId);
+                    var sid = (int)(request.SessionIdOverride ?? detectedSessionId ?? 0);
+                    if (sid > 0 && !sessionIds.Contains(sid)) sessionIds.Add(sid);
 
-            var bandSummary = BuildBandSummary(rows);
+                    var rawRows = ExtractNetworkRows(archive, sid);
+                    allRows.AddRange(CleanRows(rawRows));
+                }
 
-            return Ok(new
-            {
-                SessionId = sessionId,
-                TotalRows = rows.Count,
-                AvailableBands = bandSummary
-            });
+                var filterByImageName = ResolveFilterByImageName(request, Request.HasFormContentType ? Request.Form : null, Request.Query);
+                var rowsToSummarize = allRows;
+
+                var validRows = rowsToSummarize
+                    .Where(r => !string.IsNullOrWhiteSpace(r.Band) &&
+                                !r.Band.Equals("Unknown", StringComparison.OrdinalIgnoreCase) &&
+                                !r.Band.Equals("Unknown Band", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+
+                if (validRows.Count == 0 && rowsToSummarize.Count > 0)
+                {
+                    validRows = rowsToSummarize;
+                }
+
+                var totalValid = validRows.Count;
+                var bandSummary = validRows
+                    .GroupBy(r => r.Band!, StringComparer.OrdinalIgnoreCase)
+                    .Select(g => new
+                    {
+                        Band = g.Key,
+                        Count = g.Count(),
+                        Percentage = totalValid == 0 ? 0 : Math.Round(g.Count() * 100.0 / totalValid, 2)
+                    })
+                    .OrderByDescending(x => x.Count)
+                    .Cast<object>()
+                    .ToList();
+
+                return Ok(new
+                {
+                    SessionId = sessionIds.FirstOrDefault(),
+                    SessionIds = sessionIds,
+                    FileCount = uploads.Count,
+                    TotalRows = rowsToSummarize.Count,
+                    AvailableBands = bandSummary
+                });
             }
             finally
             {
-                System.IO.File.Delete(tempZipPath);
-            }
-        }
-
-        private static List<object> BuildBandSummary(List<UnifiedMapReportRow> rows)
-        {
-            var validRows = rows
-                .Where(r => !string.IsNullOrWhiteSpace(r.Band) &&
-                            !r.Band.Equals("Unknown", StringComparison.OrdinalIgnoreCase) &&
-                            !r.Band.Equals("Unknown Band", StringComparison.OrdinalIgnoreCase))
-                .ToList();
-
-            var total = validRows.Count;
-            return validRows
-                .GroupBy(r => r.Band!, StringComparer.OrdinalIgnoreCase)
-                .Select(g => new
+                foreach (var path in allTempPaths)
                 {
-                    Band = g.Key,
-                    Count = g.Count(),
-                    Percentage = total == 0 ? 0 : Math.Round(g.Count() * 100.0 / total, 2)
-                })
-                .OrderByDescending(x => x.Count)
-                .Cast<object>()
-                .ToList();
+                    if (System.IO.File.Exists(path))
+                    {
+                        try { System.IO.File.Delete(path); } catch { }
+                    }
+                }
+            }
         }
 
         private static ReportThresholdConfig ExtractThresholdConfig(ZipArchive archive)
@@ -577,7 +703,21 @@ namespace SignalTracker.Controllers
 
             var csvEntries = archive.Entries
                 .Where(e => e.FullName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase))
-                .Where(e => NetworkLogCsvNamePattern.IsMatch(Path.GetFileName(e.FullName)))
+                .Where(e => {
+                    var fn = Path.GetFileName(e.FullName);
+                    if (fn.StartsWith("ColorSettings", StringComparison.OrdinalIgnoreCase) ||
+                        fn.StartsWith("SiteSummary", StringComparison.OrdinalIgnoreCase) ||
+                        fn.StartsWith("sites", StringComparison.OrdinalIgnoreCase) ||
+                        fn.StartsWith("Event", StringComparison.OrdinalIgnoreCase) ||
+                        fn.StartsWith("L3", StringComparison.OrdinalIgnoreCase) ||
+                        fn.Contains("Unsent", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return false;
+                    }
+                    return fn.StartsWith("NetworkLog", StringComparison.OrdinalIgnoreCase) ||
+                           fn.StartsWith("log", StringComparison.OrdinalIgnoreCase) ||
+                           fn.Contains("network", StringComparison.OrdinalIgnoreCase);
+                })
                 .OrderBy(e => e.FullName, StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
@@ -623,25 +763,25 @@ namespace SignalTracker.Controllers
                 Timestamp = FindColumn(headers, "timestamp"),
                 Lat = FindColumn(headers, "latitude"),
                 Lon = FindColumn(headers, "longitude"),
-                Network = FindColumn(headers, "network type"),
-                IndoorOutdoor = FindColumn(headers, "indoor/outdoor"),
+                Network = FindColumn(headers, "network type", "network_type", "networktype", "network", "technology", "tech", "rat", "system", "mode"),
+                IndoorOutdoor = FindColumn(headers, "indoor/outdoor", "indoor_outdoor", "location_type"),
                 Mos = FindColumn(headers, "mos"),
                 Jitter = FindColumn(headers, "jitter"),
                 Latency = FindColumn(headers, "latency"),
                 PacketLoss = FindColumn(headers, "packet loss"),
                 CellId = FindColumn(headers, "cell id", "cell_id", "cellid", "ci", "cid", "cell identity", "cell_index"),
-                Pci = FindColumn(headers, "pci / psc"),
-                Rsrp = FindColumn(headers, "ssrsrp"),
-                Rsrq = FindColumn(headers, "ssrsrq"),
-                Sinr = FindColumn(headers, "rxqual"),
-                DlTpt = FindColumn(headers, "dl thpt"),
-                UlTpt = FindColumn(headers, "ul thpt"),
-                Earfcn = FindColumn(headers, "earfcn"),
-                VolteCall = FindColumn(headers, "volte call"),
-                Band = FindColumn(headers, "band"),
+                Pci = FindColumn(headers, "pci / psc", "pci", "psc"),
+                Rsrp = FindColumn(headers, "ssrsrp", "rsrp"),
+                Rsrq = FindColumn(headers, "ssrsrq", "rsrq"),
+                Sinr = FindColumn(headers, "rxqual", "sinr"),
+                DlTpt = FindColumn(headers, "dl thpt", "dl_tpt", "dl_throughput", "dl throughput"),
+                UlTpt = FindColumn(headers, "ul thpt", "ul_tpt", "ul_throughput", "ul throughput"),
+                Earfcn = FindColumn(headers, "nr_earfcn", "nrfcn", "nrarfcn", "nr_arfcn", "arfcn", "dl_earfcn", "dl_frequency", "earfcn", "frequency", "freq"),
+                VolteCall = FindColumn(headers, "volte call", "volte_call", "volte"),
+                Band = FindColumn(headers, "primary_band", "primary band", "freq_band", "freq band", "frequency_band", "frequency band", "serving_band", "serving band", "lte_band", "nr_band", "5g_band", "operating_band", "working_band", "band"),
                 Bler = FindColumn(headers, "bler"),
-                AlphaLong = FindColumn(headers, "alpha long"),
-                AlphaShort = FindColumn(headers, "alpha short"),
+                AlphaLong = FindColumn(headers, "alpha long", "m_alpha_long"),
+                AlphaShort = FindColumn(headers, "alpha short", "m_alpha_short"),
                 Rssi = FindColumn(headers, "rssi"),
                 NodebId = FindColumn(headers,
                     "nodeb id", "nodeb_id", "node_b_id", "nodeb", "node_b",
@@ -650,10 +790,10 @@ namespace SignalTracker.Controllers
                     "gnodeb id", "gnodeb_id", "gnodebid", "gnodeb",
                     "gnb id", "gnb_id", "gnbid", "gnb",
                     "site id", "site_id", "siteid"),
-                Apps = FindColumn(headers, "running apps"),
-                PuschTx = FindColumn(headers, "pusch tx"),
+                Apps = FindColumn(headers, "running apps", "apps", "app_name"),
+                PuschTx = FindColumn(headers, "pusch tx", "pusch_tx", "pusch"),
                 Primary = FindColumnByName(headers, "primary"),
-                PrimaryCellInfo = FindColumnByName(headers, "cellinfo_1", "primary_cell_info_1")
+                PrimaryCellInfo = FindColumnByName(headers, "cellinfo_1", "primary_cell_info_1", "primary_cell_info", "cell_info", "cellinfo")
             };
         }
 
@@ -691,8 +831,34 @@ namespace SignalTracker.Controllers
         private UnifiedMapReportRow? ParseStandardRow(List<string> cols, ColumnMap map, long sessionId, ref int nextId)
         {
             var tsRaw = GetCol(cols, map.Timestamp);
-            if (!DateTime.TryParse(tsRaw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var ts))
-                return null; // skips header/metadata lines automatically
+            if (!string.IsNullOrWhiteSpace(tsRaw) && tsRaw.Contains("@@"))
+                return null; // Discard legend/metadata header rows with shifted columns
+
+            DateTime ts;
+            if (!DateTime.TryParse(tsRaw, CultureInfo.InvariantCulture, DateTimeStyles.None, out ts))
+            {
+                // Handle relative timestamp formats like "48:48.9" (mm:ss.s or hh:mm:ss)
+                var relMatch = Regex.Match(tsRaw ?? "", @"^(\d+):(\d+)(?:\.(\d+))?$");
+                if (relMatch.Success)
+                {
+                    int part1 = int.Parse(relMatch.Groups[1].Value);
+                    int part2 = int.Parse(relMatch.Groups[2].Value);
+                    ts = part1 >= 24
+                        ? DateTime.Today.AddMinutes(part1).AddSeconds(part2)
+                        : DateTime.Today.AddHours(part1).AddMinutes(part2);
+                }
+                else
+                {
+                    if (string.IsNullOrWhiteSpace(tsRaw))
+                    {
+                        ts = DateTime.Today.AddSeconds(nextId);
+                    }
+                    else
+                    {
+                        return null; // Discard corrupted/shifted CSV rows with unparseable timestamp text
+                    }
+                }
+            }
 
             if (!IsPrimaryRegisteredRow(cols, map))
                 return null;
@@ -837,11 +1003,14 @@ namespace SignalTracker.Controllers
         private static bool IsPrimaryRegisteredRow(List<string> cols, ColumnMap map)
         {
             var primary = GetCol(cols, map.Primary);
-            if (!primary.Equals("Yes", StringComparison.OrdinalIgnoreCase))
+            if (!string.IsNullOrWhiteSpace(primary) && !primary.Equals("Yes", StringComparison.OrdinalIgnoreCase))
                 return false;
 
             var primaryCellInfo = GetCol(cols, map.PrimaryCellInfo);
-            return primaryCellInfo.Contains("mRegistered=YES", StringComparison.OrdinalIgnoreCase);
+            if (!string.IsNullOrWhiteSpace(primaryCellInfo))
+                return primaryCellInfo.Contains("mRegistered=YES", StringComparison.OrdinalIgnoreCase);
+
+            return true;
         }
 
         private static string GetCol(List<string> cols, int idx) =>
@@ -932,13 +1101,29 @@ namespace SignalTracker.Controllers
 
     public sealed class ZipBandDiscoveryRequest
     {
-        public IFormFile LogZip { get; set; } = null!;
+        /// <summary>Single zip file — kept for backward compatibility.</summary>
+        public IFormFile? LogZip { get; set; }
+
+        /// <summary>Multiple zip files. Takes precedence over LogZip when provided.</summary>
+        public List<IFormFile>? LogZips { get; set; }
+
         public long? SessionIdOverride { get; set; }
     }
 
     public sealed class ZipReportUploadRequest
     {
-        public IFormFile LogZip { get; set; } = null!;
+        /// <summary>Single zip file — kept for backward compatibility.</summary>
+        public IFormFile? LogZip { get; set; }
+
+        /// <summary>Multiple zip files. Takes precedence over LogZip when provided.</summary>
+        public List<IFormFile>? LogZips { get; set; }
+
+        /// <summary>
+        /// When true, legend entries show sample count alongside percentage,
+        /// e.g. "-75 to 0  (152 | 42.30%)". Default false = percentage only.
+        /// </summary>
+        public bool? ShowSampleCount { get; set; }
+
         public string? Title { get; set; }
         public string? GeneratedBy { get; set; }
         public string? ProjectName { get; set; }
