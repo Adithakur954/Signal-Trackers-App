@@ -41,6 +41,8 @@ namespace SignalTracker.Controllers
         // process/host that acquires the same lock name, regardless of where it runs.
         private const string NetworkLogIngestLockName = "stracer_networklog_ingest";
         private const int NetworkLogIngestLockTimeoutSeconds = 7200;
+        private const int NetworkLogIngestLockPollSeconds = 15;
+        private static readonly SemaphoreSlim NetworkLogIngestLocalGate = new(1, 1);
 
         // Robust timezone: Windows ("India Standard Time") and Linux ("Asia/Kolkata")
         private static readonly TimeZoneInfo INDIAN_ZONE = GetIndianZone();
@@ -225,11 +227,9 @@ namespace SignalTracker.Controllers
         // connected to, runs `work`, then always releases the lock (including on
         // exceptions and connection drops — MySQL auto-releases a session's named
         // locks if the connection is lost). If another process/host is already
-        // holding the lock past the timeout, uploading fails fast with a clear
-        // message instead of racing into a long, confusing "Lock wait timeout".
-        // The timeout is intentionally long so multiple uploaded files queue and
-        // process one-by-one instead of being marked failed while another upload
-        // is still running.
+        // holding the lock, wait outside MySQL and retry. Do not block inside
+        // GET_LOCK for hours, because every waiting GET_LOCK consumes one pooled
+        // database connection and can starve the whole web app.
         private async Task<(bool Success, string? ErrorMessage)> RunNetworkLogIngestSerializedAsync(
             Func<(bool Success, string? ErrorMessage)> work)
         {
@@ -241,43 +241,78 @@ namespace SignalTracker.Controllers
             Func<(bool Success, string? ErrorMessage)> work)
         {
             var connectionString = targetDb.Database.GetConnectionString();
-            await using var lockConnection = new MySqlConnection(connectionString);
-            await lockConnection.OpenAsync();
-
-            bool lockAcquired;
-            await using (var acquireCmd = lockConnection.CreateCommand())
-            {
-                acquireCmd.CommandText = "SELECT GET_LOCK(@lockName, @timeoutSeconds)";
-                acquireCmd.CommandTimeout = NetworkLogIngestLockTimeoutSeconds + 30;
-                acquireCmd.Parameters.AddWithValue("@lockName", NetworkLogIngestLockName);
-                acquireCmd.Parameters.AddWithValue("@timeoutSeconds", NetworkLogIngestLockTimeoutSeconds);
-                var result = await acquireCmd.ExecuteScalarAsync();
-                lockAcquired = result is long l && l == 1;
-            }
-
-            if (!lockAcquired)
-            {
-                return (false,
-                    "Another network-log upload is still being processed on the server. This upload could not start before the queue timeout.");
-            }
+            var waitStarted = DateTime.UtcNow;
+            var localGateAcquired = false;
 
             try
             {
-                return work();
+                while (!localGateAcquired)
+                {
+                    localGateAcquired = await NetworkLogIngestLocalGate.WaitAsync(TimeSpan.FromSeconds(NetworkLogIngestLockPollSeconds));
+                    if (localGateAcquired)
+                    {
+                        break;
+                    }
+
+                    if ((DateTime.UtcNow - waitStarted).TotalSeconds >= NetworkLogIngestLockTimeoutSeconds)
+                    {
+                        return (false,
+                            "Another network-log upload is still being processed on the server. This upload could not start before the queue timeout.");
+                    }
+                }
+
+                while (true)
+                {
+                    await using var lockConnection = new MySqlConnection(connectionString);
+                    await lockConnection.OpenAsync();
+
+                    bool lockAcquired;
+                    await using (var acquireCmd = lockConnection.CreateCommand())
+                    {
+                        acquireCmd.CommandText = "SELECT GET_LOCK(@lockName, 0)";
+                        acquireCmd.CommandTimeout = 30;
+                        acquireCmd.Parameters.AddWithValue("@lockName", NetworkLogIngestLockName);
+                        var result = await acquireCmd.ExecuteScalarAsync();
+                        lockAcquired = result is long l && l == 1;
+                    }
+
+                    if (lockAcquired)
+                    {
+                        try
+                        {
+                            return work();
+                        }
+                        finally
+                        {
+                            try
+                            {
+                                await using var releaseCmd = lockConnection.CreateCommand();
+                                releaseCmd.CommandText = "SELECT RELEASE_LOCK(@lockName)";
+                                releaseCmd.Parameters.AddWithValue("@lockName", NetworkLogIngestLockName);
+                                await releaseCmd.ExecuteScalarAsync();
+                            }
+                            catch
+                            {
+                                // Best-effort release; closing the connection below also
+                                // releases the lock server-side if this fails for any reason.
+                            }
+                        }
+                    }
+
+                    if ((DateTime.UtcNow - waitStarted).TotalSeconds >= NetworkLogIngestLockTimeoutSeconds)
+                    {
+                        return (false,
+                            "Another network-log upload is still being processed on the server. This upload could not start before the queue timeout.");
+                    }
+
+                    await Task.Delay(TimeSpan.FromSeconds(NetworkLogIngestLockPollSeconds));
+                }
             }
             finally
             {
-                try
+                if (localGateAcquired)
                 {
-                    await using var releaseCmd = lockConnection.CreateCommand();
-                    releaseCmd.CommandText = "SELECT RELEASE_LOCK(@lockName)";
-                    releaseCmd.Parameters.AddWithValue("@lockName", NetworkLogIngestLockName);
-                    await releaseCmd.ExecuteScalarAsync();
-                }
-                catch
-                {
-                    // Best-effort release; closing the connection below also releases
-                    // the lock server-side if this fails for any reason.
+                    NetworkLogIngestLocalGate.Release();
                 }
             }
         }
