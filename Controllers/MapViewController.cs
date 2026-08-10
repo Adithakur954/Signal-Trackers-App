@@ -3279,6 +3279,10 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyEF(
         .Where(log => sessionIds.Contains((long)log.session_id));
 
     query = query.Where(log =>
+        log.band == null ||
+        log.band.Trim().ToUpper() != "UNKNOWN");
+
+    query = query.Where(log =>
         log.primary_cell_info_1 != null &&
         log.primary_cell_info_1.Trim() != "");
 
@@ -3863,6 +3867,7 @@ private (string Clause, Dictionary<string, object> Params) BuildSqlWhere(
     var clauses = new List<string>();
     if (idParams.Any()) clauses.Add($"session_id IN ({string.Join(",", idParams)})");
     else clauses.Add("1 = 0"); 
+    clauses.Add("UPPER(TRIM(COALESCE(band, ''))) <> 'UNKNOWN'");
     clauses.Add("primary_cell_info_1 IS NOT NULL AND TRIM(primary_cell_info_1) <> ''");
     // clauses.Add(@"(
     //     COALESCE(
@@ -4076,7 +4081,7 @@ private string BuildNetworkLogCacheKey(
         : "no_project";
     string versionKey = NormalizeCacheKeyPart(dataVersion);
 
-    return $"networklog:v12:{GetProjectListCacheScope()}:{sortedSessionIds}:{providerKey}:{networkTypeKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
+    return $"networklog:v13:{GetProjectListCacheScope()}:{sortedSessionIds}:{providerKey}:{networkTypeKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
 }
 
 private static string CleanProviderDisplayName(string value)
