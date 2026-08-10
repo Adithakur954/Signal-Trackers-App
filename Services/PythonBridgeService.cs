@@ -123,22 +123,33 @@ namespace SignalTracker.Services
             if (polygonIds.Count == 0) return string.Empty;
 
             var polyParams = string.Join(", ", polygonIds.Select((_, i) => $"@poly_{i}"));
+
+            // Global-safe handling for MySQL geographic SRID 4326:
+            // - Polygons are stored from frontend WKT in lat/lng text order.
+            // - Matching points should be built with POINT(lon, lat) via the POINT constructor,
+            //   not via ST_GeomFromText('POINT(...)'), which can misinterpret axis order.
+            // - Use CASE so MySQL never evaluates an invalid fallback branch.
             return $@"
                 AND EXISTS (
                     SELECT 1
                     FROM map_regions mr_filter
                     WHERE mr_filter.tbl_project_id = @pid
                       AND mr_filter.id IN ({polyParams})
-                      AND (
-                        ST_Contains(
+                      AND CASE
+                        WHEN ({latExpr}) BETWEEN -90 AND 90
+                          AND ({lonExpr}) BETWEEN -180 AND 180
+                        THEN ST_Contains(
                           mr_filter.region,
-                          ST_GeomFromText(CONCAT('POINT(', {lonExpr}, ' ', {latExpr}, ')'), 4326)
+                          ST_SRID(POINT({lonExpr}, {latExpr}), 4326)
                         )
-                        OR ST_Contains(
+                        WHEN ({lonExpr}) BETWEEN -90 AND 90
+                          AND ({latExpr}) BETWEEN -180 AND 180
+                        THEN ST_Contains(
                           mr_filter.region,
-                          ST_GeomFromText(CONCAT('POINT(', {latExpr}, ' ', {lonExpr}, ')'), 4326)
+                          ST_SRID(POINT({latExpr}, {lonExpr}), 4326)
                         )
-                      )
+                        ELSE 0
+                      END = 1
                 )";
         }
 
@@ -150,46 +161,27 @@ namespace SignalTracker.Services
             }
         }
 
-        private static async Task<string?> ResolveProjectFilterWktAsync(
+        private static async Task<bool> ProjectHasFilterPolygonAsync(
             DbConnection conn,
             long? projectId,
             CancellationToken cancellationToken = default)
         {
             if (!projectId.HasValue || projectId.Value <= 0)
             {
-                return null;
+                return false;
             }
 
             await using var command = conn.CreateCommand();
             command.CommandText = @"
-                SELECT polygon_wkt
-                FROM (
-                    SELECT
-                        ST_AsText(p.polygon) AS polygon_wkt,
-                        1 AS prio,
-                        0 AS row_order
-                    FROM tbl_project p
-                    WHERE p.id = @pid
-
+                SELECT EXISTS (
+                    SELECT 1 FROM tbl_project p WHERE p.id = @pid AND p.polygon IS NOT NULL
                     UNION ALL
-
-                    SELECT
-                        ST_AsText(mr.region) AS polygon_wkt,
-                        2 AS prio,
-                        mr.id AS row_order
-                    FROM map_regions mr
-                    WHERE mr.tbl_project_id = @pid
-                ) src
-                WHERE polygon_wkt IS NOT NULL AND polygon_wkt <> ''
-                ORDER BY prio ASC, row_order DESC
-                LIMIT 1;";
+                    SELECT 1 FROM map_regions mr WHERE mr.tbl_project_id = @pid AND mr.region IS NOT NULL
+                );";
             PythonBridgeDbTool.AddParam(command, "@pid", projectId.Value);
 
             var result = await command.ExecuteScalarAsync(cancellationToken);
-            var wkt = result == null || result == DBNull.Value
-                ? null
-                : Convert.ToString(result, CultureInfo.InvariantCulture);
-            return string.IsNullOrWhiteSpace(wkt) ? null : wkt.Trim();
+            return result != null && result != DBNull.Value && Convert.ToInt32(result) > 0;
         }
 
         private async Task<(int Limit, int Offset, List<Dictionary<string, object?>> Rows)> GetCachedOrLoadRowsAsync(
@@ -703,12 +695,11 @@ namespace SignalTracker.Services
                     await conn.OpenAsync(cancellationToken);
                 }
 
-                var projectPolygonWkt = await ResolveProjectFilterWktAsync(
+                var hasProjectPolygon = await ProjectHasFilterPolygonAsync(
                     conn,
                     request.ProjectId,
                     cancellationToken
                 );
-                var hasProjectPolygon = !string.IsNullOrWhiteSpace(projectPolygonWkt);
 
                 await using var command = conn.CreateCommand();
                 var inClause = PythonBridgeDbTool.BuildInClause(command, sessionIds, "sid");
@@ -727,8 +718,28 @@ namespace SignalTracker.Services
                 {
                     dateClause += " AND timestamp < @endDate";
                 }
+                // Compares against the stored polygon/region GEOMETRY columns directly (no
+                // ST_AsText/ST_GeomFromText round-trip on the polygon). For SRID 4326, MySQL's
+                // ST_GeomFromText() defaults to (lat, lon) axis order (matching EPSG:4326's own
+                // axis definition) rather than the traditional GIS (lon, lat) convention, so the
+                // comparison point must be built as POINT(lat, lon) to match how the stored
+                // polygon itself is interpreted. The out-of-range guard is wrapped in IF(...)
+                // rather than a sibling AND, because MySQL's WHERE-clause AND does not guarantee
+                // short-circuit evaluation order, and IF() guarantees only the selected branch runs.
                 var polygonClause = hasProjectPolygon
-                    ? "AND lat IS NOT NULL AND lon IS NOT NULL AND ST_Contains(ST_GeomFromText(@projectPolygonWkt, 4326), ST_SRID(POINT(lon, lat), 4326))"
+                    ? @"AND lat IS NOT NULL AND lon IS NOT NULL AND EXISTS (
+                            SELECT 1
+                            FROM (
+                                SELECT p.polygon AS geom FROM tbl_project p WHERE p.id = @pid AND p.polygon IS NOT NULL
+                                UNION ALL
+                                SELECT mr.region AS geom FROM map_regions mr WHERE mr.tbl_project_id = @pid AND mr.region IS NOT NULL
+                            ) poly_src
+                            WHERE IF(
+                                lat BETWEEN -90 AND 90 AND lon BETWEEN -180 AND 180,
+                                ST_Contains(poly_src.geom, ST_GeomFromText(CONCAT('POINT(', lat, ' ', lon, ')'), 4326)),
+                                0
+                            ) = 1
+                        )"
                     : string.Empty;
                 var servingQuery = string.Format(servingSql, inClause, validBandPredicate, fiveGPredicate, $"AND ({primaryCellInfoPredicate})", operatorClause, primaryClause, dateClause, polygonClause);
                 var neighbourQuery = string.Format(neighbourSql, inClause, validBandPredicate, fiveGPredicate, $"AND ({primaryCellInfoPredicate})", operatorClause, primaryClause, dateClause, polygonClause);
@@ -753,7 +764,7 @@ namespace SignalTracker.Services
                 }
                 if (hasProjectPolygon)
                 {
-                    PythonBridgeDbTool.AddParam(command, "@projectPolygonWkt", projectPolygonWkt);
+                    PythonBridgeDbTool.AddParam(command, "@pid", request.ProjectId);
                 }
 
                 await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -1861,32 +1872,7 @@ namespace SignalTracker.Services
                      legacy_nodeb_id_cell_id, sector, band,
                      rf_identity_key, sector_identity_key, site_sector_band_key, Technology)
                     VALUES
-                    {string.Join(",", valuesSql)}
-                    ON DUPLICATE KEY UPDATE
-                     job_id = VALUES(job_id),
-                     lat = VALUES(lat),
-                     lat_6dp = VALUES(lat_6dp),
-                     lon = VALUES(lon),
-                     lon_6dp = VALUES(lon_6dp),
-                     pred_rsrp = VALUES(pred_rsrp),
-                     pred_rsrq = VALUES(pred_rsrq),
-                     pred_sinr = VALUES(pred_sinr),
-                     pred_rsrp_smoothed = VALUES(pred_rsrp_smoothed),
-                     pred_rsrq_smoothed = VALUES(pred_rsrq_smoothed),
-                     pred_sinr_smoothed = VALUES(pred_sinr_smoothed),
-                     node_b_id = VALUES(node_b_id),
-                     cell_id = VALUES(cell_id),
-                     `operator` = VALUES(`operator`),
-                     created_at = VALUES(created_at),
-                     site_id = VALUES(site_id),
-                     nodeb_id_cell_id = VALUES(nodeb_id_cell_id),
-                     legacy_nodeb_id_cell_id = VALUES(legacy_nodeb_id_cell_id),
-                     sector = VALUES(sector),
-                     band = VALUES(band),
-                     rf_identity_key = VALUES(rf_identity_key),
-                     sector_identity_key = VALUES(sector_identity_key),
-                     site_sector_band_key = VALUES(site_sector_band_key),
-                     Technology = VALUES(Technology);";
+                    {string.Join(",", valuesSql)};";
 
                 await command.ExecuteNonQueryAsync(cancellationToken);
                 inserted += batch.Length;
@@ -2663,12 +2649,26 @@ namespace SignalTracker.Services
 
         public async Task<tbl_project?> GetProjectAsync(
             long projectId,
+            string? region = null,
+            string? countryCode = null,
             CancellationToken cancellationToken = default
         )
         {
-            return await _db.tbl_project
-                .AsNoTracking()
-                .FirstOrDefaultAsync(p => p.id == projectId, cancellationToken);
+            var contextToUse = CreateDbContextForRegion(region, countryCode);
+            var ownsContext = contextToUse != _db;
+            try
+            {
+                return await contextToUse.tbl_project
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(p => p.id == projectId, cancellationToken);
+            }
+            finally
+            {
+                if (ownsContext)
+                {
+                    await contextToUse.DisposeAsync();
+                }
+            }
         }
 
         public async Task<List<Dictionary<string, object?>>> GetThresoldsAsync(
@@ -2911,12 +2911,26 @@ namespace SignalTracker.Services
 
         public async Task<tbl_user?> GetUserByIdAsync(
             int userId,
+            string? region = null,
+            string? countryCode = null,
             CancellationToken cancellationToken = default
         )
         {
-            return await _db.tbl_user
-                .AsNoTracking()
-                .FirstOrDefaultAsync(u => u.id == userId, cancellationToken);
+            var contextToUse = CreateDbContextForRegion(region, countryCode);
+            var ownsContext = contextToUse != _db;
+            try
+            {
+                return await contextToUse.tbl_user
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(u => u.id == userId, cancellationToken);
+            }
+            finally
+            {
+                if (ownsContext)
+                {
+                    await contextToUse.DisposeAsync();
+                }
+            }
         }
 
         public async Task<thresholds?> GetUserThresholdsAsync(

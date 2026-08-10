@@ -61,6 +61,16 @@ namespace SignalTracker.Services
                 country = queryCountry.ToString();
             }
             if (string.IsNullOrWhiteSpace(country) &&
+                context.Request.Query.TryGetValue("countryCode", out var queryCountryCamel))
+            {
+                country = queryCountryCamel.ToString();
+            }
+            if (string.IsNullOrWhiteSpace(country) &&
+                context.Request.Query.TryGetValue("region", out var queryRegion))
+            {
+                country = queryRegion.ToString();
+            }
+            if (string.IsNullOrWhiteSpace(country) &&
                 context.Request.Headers.TryGetValue("x-country-code", out var headerCountry))
             {
                 country = headerCountry.ToString();

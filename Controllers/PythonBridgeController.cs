@@ -1,5 +1,6 @@
 ﻿using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.Filters;
 using SignalTracker.DTO.PythonBridge;
 using SignalTracker.Services;
 
@@ -7,6 +8,7 @@ namespace SignalTracker.Controllers
 {
     [ApiController]
     [Route("api/[controller]")]
+    [TypeFilter(typeof(PythonBridgeApiKeyFilter))]
     public class PythonBridgeController : ControllerBase
     {
         private readonly PythonBridgeService _pythonBridgeService;
@@ -614,7 +616,10 @@ namespace SignalTracker.Controllers
         }
 
         [HttpGet("GetProject")]
-        public async Task<IActionResult> GetProject([FromQuery] long projectId)
+        public async Task<IActionResult> GetProject(
+            [FromQuery] long projectId,
+            [FromQuery] string? region,
+            [FromQuery] string? countryCode)
         {
             if (projectId <= 0)
             {
@@ -623,6 +628,8 @@ namespace SignalTracker.Controllers
 
             var project = await _pythonBridgeService.GetProjectAsync(
                 projectId,
+                region,
+                countryCode,
                 HttpContext.RequestAborted
             );
 
@@ -704,7 +711,10 @@ namespace SignalTracker.Controllers
         }
 
         [HttpGet("GetUser")]
-        public async Task<IActionResult> GetUser([FromQuery] int userId)
+        public async Task<IActionResult> GetUser(
+            [FromQuery] int userId,
+            [FromQuery] string? region,
+            [FromQuery] string? countryCode)
         {
             if (userId <= 0)
             {
@@ -713,6 +723,8 @@ namespace SignalTracker.Controllers
 
             var user = await _pythonBridgeService.GetUserByIdAsync(
                 userId,
+                region,
+                countryCode,
                 HttpContext.RequestAborted
             );
 
@@ -765,6 +777,29 @@ namespace SignalTracker.Controllers
             }
 
             return Ok(new { Status = 1, Updated = true });
+        }
+    }
+
+    public sealed class PythonBridgeApiKeyFilter : IAsyncActionFilter
+    {
+        private readonly PythonBridgeService _pythonBridgeService;
+
+        public PythonBridgeApiKeyFilter(PythonBridgeService pythonBridgeService)
+        {
+            _pythonBridgeService = pythonBridgeService;
+        }
+
+        public async Task OnActionExecutionAsync(ActionExecutingContext context, ActionExecutionDelegate next)
+        {
+            context.HttpContext.Request.Headers.TryGetValue("X-Python-Bridge-Key", out var incomingKey);
+
+            if (!_pythonBridgeService.IsAuthorized(incomingKey.ToString()))
+            {
+                context.Result = new UnauthorizedObjectResult(new { Status = 0, Message = "Invalid bridge key" });
+                return;
+            }
+
+            await next();
         }
     }
 }
