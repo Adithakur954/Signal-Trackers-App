@@ -53,6 +53,7 @@ namespace SignalTracker.Controllers
             "latlon:dist:*",
             "n78_simple_kpi:*",
             "n78_neighbours:*",
+            "handover_target_observations:*",
             "daterangelog:*"
         };
 
@@ -4337,6 +4338,70 @@ public class SessionIdsRequest
     public List<int> SessionIds { get; set; }
 }
 
+public sealed class HandoverTargetObservationRequest
+{
+    public List<long> session_ids { get; set; } = new();
+    public long? project_id { get; set; }
+    public int lookback_seconds { get; set; } = 30;
+    public int lookahead_seconds { get; set; } = 30;
+    public List<HandoverTargetObservationQuery> transitions { get; set; } = new();
+}
+
+public sealed class HandoverTargetObservationQuery
+{
+    public string observation_key { get; set; } = "";
+    public long session_id { get; set; }
+    public string source_pci { get; set; } = "";
+    public string target_pci { get; set; } = "";
+    public string source_earfcn { get; set; } = "";
+    public string target_earfcn { get; set; } = "";
+    public DateTime timestamp { get; set; }
+}
+
+public sealed class HandoverTargetObservationResult
+{
+    public string observation_key { get; set; } = "";
+    public bool observed { get; set; }
+    public bool forward_observed { get; set; }
+    public bool reverse_observed { get; set; }
+    public string neighbour_relation { get; set; } = "not_observed";
+    public string observed_direction { get; set; } = "none";
+    public DateTime? observed_at { get; set; }
+    public DateTime? reverse_observed_at { get; set; }
+    public double? rsrp { get; set; }
+    public double? rsrq { get; set; }
+    public double? sinr { get; set; }
+    public string pci { get; set; } = "";
+    public string earfcn { get; set; } = "";
+    public string nodeb_id { get; set; } = "";
+    public string cell_id { get; set; } = "";
+}
+
+private sealed class HandoverNeighbourCandidate
+{
+    public long session_id { get; set; }
+    public DateTime timestamp { get; set; }
+    public string pci { get; set; } = "";
+    public string earfcn { get; set; } = "";
+    public double? rsrp { get; set; }
+    public double? rsrq { get; set; }
+    public double? sinr { get; set; }
+    public string nodeb_id { get; set; } = "";
+    public string cell_id { get; set; } = "";
+    public double? lat { get; set; }
+    public double? lon { get; set; }
+}
+
+private sealed class HandoverPrimaryCandidate
+{
+    public long session_id { get; set; }
+    public DateTime timestamp { get; set; }
+    public string pci { get; set; } = "";
+    public string earfcn { get; set; } = "";
+    public double? lat { get; set; }
+    public double? lon { get; set; }
+}
+
 public class NetworkLogCacheRow
 {
     public int id { get; set; }
@@ -5717,6 +5782,357 @@ public async Task<IActionResult> GetN78Neighbours([FromQuery] string session_ids
         SessionCount = parsedIds.Count,
         RecordCount = data.Count,
         Data = data
+    });
+}
+
+[HttpPost("GetHandoverTargetObservations")]
+public async Task<IActionResult> GetHandoverTargetObservations(
+    [FromBody] HandoverTargetObservationRequest request)
+{
+    if (request == null)
+        return BadRequest(new { Status = 0, Message = "Request body is required" });
+
+    var allowedSessionIds = (request.session_ids ?? new List<long>())
+        .Where(id => id > 0)
+        .Distinct()
+        .Take(100)
+        .ToHashSet();
+    if (allowedSessionIds.Count == 0)
+        return BadRequest(new { Status = 0, Message = "At least one valid session_id is required" });
+
+    var transitions = (request.transitions ?? new List<HandoverTargetObservationQuery>())
+        .Where(item =>
+            item != null &&
+            allowedSessionIds.Contains(item.session_id) &&
+            item.timestamp != default &&
+            !string.IsNullOrWhiteSpace(item.target_pci))
+        .GroupBy(item => string.IsNullOrWhiteSpace(item.observation_key)
+            ? $"{item.session_id}|{item.timestamp:O}|{item.source_pci}|{item.target_pci}|{item.target_earfcn}"
+            : item.observation_key.Trim(), StringComparer.Ordinal)
+        .Select(group => group.First())
+        .Take(5000)
+        .ToList();
+
+    if (transitions.Count == 0)
+        return Ok(new { Status = 1, Cached = false, RecordCount = 0, Data = new List<HandoverTargetObservationResult>() });
+
+    var lookbackSeconds = Math.Clamp(request.lookback_seconds, 5, 300);
+    var lookaheadSeconds = Math.Clamp(request.lookahead_seconds, 5, 300);
+    var canonicalRequest = string.Join(";", transitions
+        .OrderBy(item => item.observation_key, StringComparer.Ordinal)
+        .Select(item => string.Create(
+            CultureInfo.InvariantCulture,
+            $"{item.observation_key}|{item.session_id}|{item.timestamp.ToUniversalTime():O}|{item.source_pci?.Trim()}|{item.target_pci.Trim()}|{item.source_earfcn?.Trim()}|{item.target_earfcn?.Trim()}")));
+    var requestHash = Convert.ToHexString(
+        System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(canonicalRequest)))
+        .ToLowerInvariant();
+    var projectKey = request.project_id.HasValue && request.project_id.Value > 0
+        ? request.project_id.Value.ToString(CultureInfo.InvariantCulture)
+        : "no_project";
+    var cacheKey = $"handover_target_observations:v3:{GetProjectListCacheScope()}:project:{projectKey}:lookback:{lookbackSeconds}:lookahead:{lookaheadSeconds}:{requestHash}";
+
+    if (_redis?.IsConnected == true)
+    {
+        try
+        {
+            var cached = await _redis.GetObjectAsync<List<HandoverTargetObservationResult>>(cacheKey);
+            if (cached != null)
+            {
+                Response.Headers["X-Cache"] = "HIT";
+                return Ok(new
+                {
+                    Status = 1,
+                    Cached = true,
+                    RecordCount = cached.Count,
+                    Data = cached
+                });
+            }
+        }
+        catch
+        {
+            // Redis is best effort; calculate from the database below.
+        }
+    }
+
+    var minTimestamp = transitions.Min(item => item.timestamp).AddSeconds(-lookbackSeconds);
+    var maxTimestamp = transitions.Max(item => item.timestamp).AddSeconds(lookaheadSeconds);
+    var relevantPcis = transitions
+        .SelectMany(item => new[] { item.source_pci?.Trim(), item.target_pci?.Trim() })
+        .Where(value => !string.IsNullOrWhiteSpace(value))
+        .Select(value => value!)
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToList();
+    var sessionIds = transitions.Select(item => item.session_id).Distinct().ToList();
+    var sessionParameters = sessionIds.Select((_, index) => $"@handoverSid{index}").ToList();
+    var pciParameters = relevantPcis.Select((_, index) => $"@handoverPci{index}").ToList();
+    var projectPolygonWkt = await ResolveProjectFilterWktAsync(request.project_id);
+    var neighbourPolygonClause = !string.IsNullOrWhiteSpace(projectPolygonWkt)
+        ? "AND n.lat IS NOT NULL AND n.lon IS NOT NULL AND ST_Contains(ST_GeomFromText(@handoverProjectPolygonWkt, 4326), ST_SRID(POINT(n.lon, n.lat), 4326))"
+        : string.Empty;
+    var primaryPolygonClause = !string.IsNullOrWhiteSpace(projectPolygonWkt)
+        ? "AND p.lat IS NOT NULL AND p.lon IS NOT NULL AND ST_Contains(ST_GeomFromText(@handoverProjectPolygonWkt, 4326), ST_SRID(POINT(p.lon, p.lat), 4326))"
+        : string.Empty;
+
+    var sql = $@"
+        SELECT
+            'neighbour' AS row_kind,
+            n.session_id,
+            n.timestamp,
+            n.pci,
+            n.earfcn,
+            n.rsrp,
+            n.rsrq,
+            n.sinr,
+            n.nodeb_id,
+            n.cell_id,
+            n.lat,
+            n.lon
+        FROM tbl_network_log_neighbour n
+        WHERE n.session_id IN ({string.Join(",", sessionParameters)})
+          AND n.timestamp >= @handoverMinTimestamp
+          AND n.timestamp <= @handoverMaxTimestamp
+          AND TRIM(n.pci) IN ({string.Join(",", pciParameters)})
+          AND UPPER(TRIM(COALESCE(n.`primary`, ''))) IN ('NO', 'N', 'FALSE', '0')
+          {neighbourPolygonClause}
+
+        UNION ALL
+
+        SELECT
+            'primary' AS row_kind,
+            p.session_id,
+            p.timestamp,
+            p.pci,
+            p.earfcn,
+            NULL AS rsrp,
+            NULL AS rsrq,
+            NULL AS sinr,
+            NULL AS nodeb_id,
+            NULL AS cell_id,
+            p.lat,
+            p.lon
+        FROM tbl_network_log p
+        WHERE p.session_id IN ({string.Join(",", sessionParameters)})
+          AND p.timestamp >= @handoverMinTimestamp
+          AND p.timestamp <= @handoverMaxTimestamp
+          AND TRIM(p.pci) IN ({string.Join(",", pciParameters)})
+          AND UPPER(TRIM(COALESCE(p.`primary`, ''))) IN ('YES', 'Y', 'TRUE', '1')
+          {primaryPolygonClause}
+
+        ORDER BY session_id, timestamp;";
+
+    var candidates = new List<HandoverNeighbourCandidate>();
+    var primaryCandidates = new List<HandoverPrimaryCandidate>();
+    var connection = db.Database.GetDbConnection();
+    var shouldClose = false;
+    try
+    {
+        if (connection.State != ConnectionState.Open)
+        {
+            await connection.OpenAsync();
+            shouldClose = true;
+        }
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.CommandTimeout = 300;
+        for (var index = 0; index < sessionIds.Count; index++)
+            AddParameter(command, sessionParameters[index], sessionIds[index]);
+        for (var index = 0; index < relevantPcis.Count; index++)
+            AddParameter(command, pciParameters[index], relevantPcis[index]);
+        AddParameter(command, "@handoverMinTimestamp", minTimestamp);
+        AddParameter(command, "@handoverMaxTimestamp", maxTimestamp);
+        if (!string.IsNullOrWhiteSpace(projectPolygonWkt))
+            AddParameter(command, "@handoverProjectPolygonWkt", projectPolygonWkt);
+
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            if (reader.IsDBNull(0) || reader.IsDBNull(1) || reader.IsDBNull(2) || reader.IsDBNull(3))
+                continue;
+
+            var rowKind = Convert.ToString(reader.GetValue(0), CultureInfo.InvariantCulture) ?? "";
+            var sessionId = Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture);
+            var timestamp = reader.GetDateTime(2);
+            var pci = Convert.ToString(reader.GetValue(3), CultureInfo.InvariantCulture)?.Trim() ?? "";
+            var earfcn = reader.IsDBNull(4) ? "" : Convert.ToString(reader.GetValue(4), CultureInfo.InvariantCulture)?.Trim() ?? "";
+            double? lat = reader.IsDBNull(10) ? null : Convert.ToDouble(reader.GetValue(10), CultureInfo.InvariantCulture);
+            double? lon = reader.IsDBNull(11) ? null : Convert.ToDouble(reader.GetValue(11), CultureInfo.InvariantCulture);
+
+            if (string.Equals(rowKind, "primary", StringComparison.OrdinalIgnoreCase))
+            {
+                primaryCandidates.Add(new HandoverPrimaryCandidate
+                {
+                    session_id = sessionId,
+                    timestamp = timestamp,
+                    pci = pci,
+                    earfcn = earfcn,
+                    lat = lat,
+                    lon = lon,
+                });
+                continue;
+            }
+
+            candidates.Add(new HandoverNeighbourCandidate
+            {
+                session_id = sessionId,
+                timestamp = timestamp,
+                pci = pci,
+                earfcn = earfcn,
+                rsrp = reader.IsDBNull(5) ? null : Convert.ToDouble(reader.GetValue(5), CultureInfo.InvariantCulture),
+                rsrq = reader.IsDBNull(6) ? null : Convert.ToDouble(reader.GetValue(6), CultureInfo.InvariantCulture),
+                sinr = reader.IsDBNull(7) ? null : Convert.ToDouble(reader.GetValue(7), CultureInfo.InvariantCulture),
+                nodeb_id = reader.IsDBNull(8) ? "" : Convert.ToString(reader.GetValue(8), CultureInfo.InvariantCulture)?.Trim() ?? "",
+                cell_id = reader.IsDBNull(9) ? "" : Convert.ToString(reader.GetValue(9), CultureInfo.InvariantCulture)?.Trim() ?? "",
+                lat = lat,
+                lon = lon,
+            });
+        }
+    }
+    finally
+    {
+        if (shouldClose && connection.State == ConnectionState.Open)
+            await connection.CloseAsync();
+    }
+
+    var candidatesBySessionAndPci = candidates
+        .GroupBy(item => $"{item.session_id}|{item.pci}", StringComparer.OrdinalIgnoreCase)
+        .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.OrdinalIgnoreCase);
+    var primariesBySessionAndPci = primaryCandidates
+        .GroupBy(item => $"{item.session_id}|{item.pci}", StringComparer.OrdinalIgnoreCase)
+        .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.OrdinalIgnoreCase);
+    var results = new List<HandoverTargetObservationResult>(transitions.Count);
+
+    static bool IsSameRadioSample(
+        HandoverNeighbourCandidate neighbour,
+        HandoverPrimaryCandidate primary)
+    {
+        var timestampMatches = Math.Abs((neighbour.timestamp - primary.timestamp).TotalSeconds) <= 1;
+        var locationMatches =
+            neighbour.lat.HasValue && neighbour.lon.HasValue &&
+            primary.lat.HasValue && primary.lon.HasValue &&
+            Math.Abs(neighbour.lat.Value - primary.lat.Value) <= 0.00001 &&
+            Math.Abs(neighbour.lon.Value - primary.lon.Value) <= 0.00001;
+        return timestampMatches || locationMatches;
+    }
+
+    foreach (var transition in transitions)
+    {
+        var observationKey = string.IsNullOrWhiteSpace(transition.observation_key)
+            ? $"{transition.session_id}|{transition.timestamp:O}|{transition.source_pci}|{transition.target_pci}|{transition.target_earfcn}"
+            : transition.observation_key.Trim();
+        var forwardLookupKey = $"{transition.session_id}|{transition.target_pci.Trim()}";
+        var sourcePrimaryLookupKey = $"{transition.session_id}|{transition.source_pci?.Trim()}";
+        HandoverNeighbourCandidate? forwardObserved = null;
+        if (
+            !string.IsNullOrWhiteSpace(transition.source_pci) &&
+            candidatesBySessionAndPci.TryGetValue(forwardLookupKey, out var forwardCandidates) &&
+            primariesBySessionAndPci.TryGetValue(sourcePrimaryLookupKey, out var sourcePrimaryCandidates)
+        )
+        {
+            var windowStart = transition.timestamp.AddSeconds(-lookbackSeconds);
+            var matchingSourcePrimaries = sourcePrimaryCandidates
+                .Where(item => item.timestamp >= windowStart && item.timestamp <= transition.timestamp)
+                .Where(item =>
+                    string.IsNullOrWhiteSpace(transition.source_earfcn) ||
+                    string.IsNullOrWhiteSpace(item.earfcn) ||
+                    string.Equals(item.earfcn, transition.source_earfcn.Trim(), StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            forwardObserved = forwardCandidates
+                .Where(item => item.timestamp >= windowStart && item.timestamp <= transition.timestamp)
+                .Where(item =>
+                    string.IsNullOrWhiteSpace(transition.target_earfcn) ||
+                    string.IsNullOrWhiteSpace(item.earfcn) ||
+                    string.Equals(item.earfcn, transition.target_earfcn.Trim(), StringComparison.OrdinalIgnoreCase))
+                .Where(item => matchingSourcePrimaries.Any(primary => IsSameRadioSample(item, primary)))
+                .OrderByDescending(item => item.timestamp)
+                .ThenByDescending(item => item.rsrp ?? double.NegativeInfinity)
+                .FirstOrDefault();
+        }
+
+        var reverseLookupKey = $"{transition.session_id}|{transition.source_pci?.Trim()}";
+        var targetPrimaryLookupKey = $"{transition.session_id}|{transition.target_pci.Trim()}";
+        HandoverNeighbourCandidate? reverseObserved = null;
+        if (
+            !string.IsNullOrWhiteSpace(transition.source_pci) &&
+            candidatesBySessionAndPci.TryGetValue(reverseLookupKey, out var reverseCandidates) &&
+            primariesBySessionAndPci.TryGetValue(targetPrimaryLookupKey, out var targetPrimaryCandidates)
+        )
+        {
+            var windowEnd = transition.timestamp.AddSeconds(lookaheadSeconds);
+            var matchingTargetPrimaries = targetPrimaryCandidates
+                .Where(item => item.timestamp >= transition.timestamp && item.timestamp <= windowEnd)
+                .Where(item =>
+                    string.IsNullOrWhiteSpace(transition.target_earfcn) ||
+                    string.IsNullOrWhiteSpace(item.earfcn) ||
+                    string.Equals(item.earfcn, transition.target_earfcn.Trim(), StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            reverseObserved = reverseCandidates
+                .Where(item => item.timestamp >= transition.timestamp && item.timestamp <= windowEnd)
+                .Where(item =>
+                    string.IsNullOrWhiteSpace(transition.source_earfcn) ||
+                    string.IsNullOrWhiteSpace(item.earfcn) ||
+                    string.Equals(item.earfcn, transition.source_earfcn.Trim(), StringComparison.OrdinalIgnoreCase))
+                .Where(item => matchingTargetPrimaries.Any(primary => IsSameRadioSample(item, primary)))
+                .OrderBy(item => item.timestamp)
+                .ThenByDescending(item => item.rsrp ?? double.NegativeInfinity)
+                .FirstOrDefault();
+        }
+
+        var forwardFound = forwardObserved != null;
+        var reverseFound = reverseObserved != null;
+        var neighbourRelation = forwardFound && reverseFound
+            ? "two_way"
+            : forwardFound || reverseFound
+                ? "one_way"
+                : "not_observed";
+        var observedDirection = forwardFound && reverseFound
+            ? "both"
+            : forwardFound
+                ? "source_to_target"
+                : reverseFound
+                    ? "target_to_source"
+                    : "none";
+
+        results.Add(new HandoverTargetObservationResult
+        {
+            observation_key = observationKey,
+            observed = forwardFound,
+            forward_observed = forwardFound,
+            reverse_observed = reverseFound,
+            neighbour_relation = neighbourRelation,
+            observed_direction = observedDirection,
+            observed_at = forwardObserved?.timestamp,
+            reverse_observed_at = reverseObserved?.timestamp,
+            rsrp = forwardObserved?.rsrp,
+            rsrq = forwardObserved?.rsrq,
+            sinr = forwardObserved?.sinr,
+            pci = forwardObserved?.pci ?? transition.target_pci.Trim(),
+            earfcn = forwardObserved?.earfcn ?? transition.target_earfcn?.Trim() ?? "",
+            nodeb_id = forwardObserved?.nodeb_id ?? "",
+            cell_id = forwardObserved?.cell_id ?? "",
+        });
+    }
+
+    if (_redis?.IsConnected == true)
+    {
+        try
+        {
+            await _redis.SetObjectAsync(cacheKey, results, ttlSeconds: 300);
+        }
+        catch
+        {
+            // Best-effort cache only.
+        }
+    }
+
+    Response.Headers["X-Cache"] = "MISS";
+    return Ok(new
+    {
+        Status = 1,
+        Cached = false,
+        RecordCount = results.Count,
+        CandidateCount = candidates.Count,
+        Data = results
     });
 }
 
