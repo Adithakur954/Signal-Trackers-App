@@ -1017,6 +1017,8 @@ public class IndoorOutdoorLogDto
         public int file_type { get; set; }
         [Column(TypeName = "longtext")]
         public string file_name { get; set; } = string.Empty;
+        [NotMapped]
+        public string? original_file_name { get; set; }
         public int uploaded_by { get; set; }
         public string? remarks { get; set; }
         [Column(TypeName = "longtext")]

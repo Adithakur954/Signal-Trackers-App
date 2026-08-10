@@ -77,6 +77,146 @@ namespace SignalTracker.Controllers
             return $"{prefix}{stamp}_{suffix}{extension}";
         }
 
+        private async Task<bool> UploadHistoryOriginalFileNameColumnExistsAsync(CancellationToken ct = default)
+        {
+            var conn = db.Database.GetDbConnection();
+            var shouldClose = conn.State != System.Data.ConnectionState.Open;
+            if (shouldClose)
+                await conn.OpenAsync(ct);
+
+            try
+            {
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = @"
+                    SELECT COUNT(*)
+                    FROM information_schema.columns
+                    WHERE table_schema = DATABASE()
+                      AND table_name = 'tbl_upload_history'
+                      AND column_name = 'original_file_name';";
+
+                var count = Convert.ToInt32(await cmd.ExecuteScalarAsync(ct));
+                return count > 0;
+            }
+            finally
+            {
+                if (shouldClose)
+                    await conn.CloseAsync();
+            }
+        }
+
+        private bool UploadHistoryOriginalFileNameColumnExists()
+        {
+            var conn = db.Database.GetDbConnection();
+            var shouldClose = conn.State != System.Data.ConnectionState.Open;
+            if (shouldClose)
+                conn.Open();
+
+            try
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = @"
+                    SELECT COUNT(*)
+                    FROM information_schema.columns
+                    WHERE table_schema = DATABASE()
+                      AND table_name = 'tbl_upload_history'
+                      AND column_name = 'original_file_name';";
+
+                var count = Convert.ToInt32(cmd.ExecuteScalar());
+                return count > 0;
+            }
+            finally
+            {
+                if (shouldClose)
+                    conn.Close();
+            }
+        }
+
+        private async Task SaveOriginalUploadFileNameAsync(int uploadHistoryId, string originalFileName, CancellationToken ct = default)
+        {
+            if (!await UploadHistoryOriginalFileNameColumnExistsAsync(ct))
+                return;
+
+            var conn = db.Database.GetDbConnection();
+            var shouldClose = conn.State != System.Data.ConnectionState.Open;
+            if (shouldClose)
+                await conn.OpenAsync(ct);
+
+            try
+            {
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = @"
+                    UPDATE tbl_upload_history
+                    SET original_file_name = @originalFileName
+                    WHERE id = @id;";
+
+                var originalFileNameParam = cmd.CreateParameter();
+                originalFileNameParam.ParameterName = "@originalFileName";
+                originalFileNameParam.Value = originalFileName;
+                cmd.Parameters.Add(originalFileNameParam);
+
+                var idParam = cmd.CreateParameter();
+                idParam.ParameterName = "@id";
+                idParam.Value = uploadHistoryId;
+                cmd.Parameters.Add(idParam);
+
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+            finally
+            {
+                if (shouldClose)
+                    await conn.CloseAsync();
+            }
+        }
+
+        private (string StoredFileName, string? OriginalFileName)? FindUploadHistoryFileNames(string fileName)
+        {
+            var conn = db.Database.GetDbConnection();
+            var shouldClose = conn.State != System.Data.ConnectionState.Open;
+            if (shouldClose)
+                conn.Open();
+
+            try
+            {
+                using var cmd = conn.CreateCommand();
+                if (UploadHistoryOriginalFileNameColumnExists())
+                {
+                    cmd.CommandText = @"
+                        SELECT file_name, original_file_name
+                        FROM tbl_upload_history
+                        WHERE file_name = @fileName OR original_file_name = @fileName
+                        ORDER BY id DESC
+                        LIMIT 1;";
+                }
+                else
+                {
+                    cmd.CommandText = @"
+                        SELECT file_name, NULL AS original_file_name
+                        FROM tbl_upload_history
+                        WHERE file_name = @fileName
+                        ORDER BY id DESC
+                        LIMIT 1;";
+                }
+
+                var fileNameParam = cmd.CreateParameter();
+                fileNameParam.ParameterName = "@fileName";
+                fileNameParam.Value = fileName;
+                cmd.Parameters.Add(fileNameParam);
+
+                using var reader = cmd.ExecuteReader();
+                if (!reader.Read())
+                    return null;
+
+                var storedFileName = reader.GetString(0);
+                var originalFileName = reader.IsDBNull(1) ? null : reader.GetString(1);
+                return (storedFileName, originalFileName);
+            }
+            finally
+            {
+                if (shouldClose)
+                    conn.Close();
+            }
+        }
+
         private async Task<(int UploadHistoryId, bool Success, string? ErrorMessage, bool ProcessingStarted)> ProcessSingleUploadAsync(
             IFormFile uploadFile,
             string remarks,
@@ -92,7 +232,10 @@ namespace SignalTracker.Controllers
             var uploadsDir = Path.Combine(root, "UploadedExcels");
             Directory.CreateDirectory(uploadsDir);
 
-            string savedMainName = BuildCompactUploadFileName("U_", nowIst, uploadFile.FileName);
+            string originalMainName = Path.GetFileName(uploadFile.FileName);
+            string savedMainName = string.IsNullOrWhiteSpace(originalMainName)
+                ? BuildCompactUploadFileName("U_", nowIst, uploadFile.FileName)
+                : originalMainName;
             string mainPath = Path.Combine(uploadsDir, savedMainName);
 
             using (var stream = System.IO.File.Create(mainPath))
@@ -104,6 +247,7 @@ namespace SignalTracker.Controllers
             {
                 remarks = remarks,
                 file_name = savedMainName,
+                original_file_name = savedMainName,
                 polygon_file = polygonFile,
                 file_type = uploadFileType,
                 status = 2,
@@ -113,13 +257,14 @@ namespace SignalTracker.Controllers
 
             db.tbl_upload_history.Add(excelDetails);
             await db.SaveChangesAsync();
+            await SaveOriginalUploadFileNameAsync(excelDetails.id, savedMainName);
 
             if (uploadFileType == 1)
             {
                 _ = Task.Run(() => ProcessNetworkLogUploadInBackgroundAsync(
                     excelDetails.id,
                     mainPath,
-                    uploadFile.FileName,
+                    savedMainName,
                     polygonPath,
                     uploadFileType,
                     projectId,
@@ -136,7 +281,7 @@ namespace SignalTracker.Controllers
             ok = csvProc.Process(
                 excelDetails.id,
                 mainPath,
-                uploadFile.FileName,
+                savedMainName,
                 polygonPath,
                 uploadFileType,
                 projectId,
@@ -356,13 +501,28 @@ namespace SignalTracker.Controllers
                     return Json(new { status = 0, message = "fileName is required for fileType=0" });
 
                 // Security: Prevent Directory Traversal
-                fileName = Path.GetFileName(fileName); 
+                fileName = Path.GetFileName(fileName);
 
                 var uploadsDir = Path.Combine(root, "UploadedExcels");
                 if (!Directory.Exists(uploadsDir)) Directory.CreateDirectory(uploadsDir);
 
                 filePath = Path.Combine(uploadsDir, fileName);
                 downloadName = fileName;
+
+                var uploadHistory = FindUploadHistoryFileNames(fileName);
+
+                if (uploadHistory != null)
+                {
+                    var storedFileName = Path.GetFileName(uploadHistory.Value.StoredFileName);
+                    var storedPath = Path.Combine(uploadsDir, storedFileName);
+                    if (System.IO.File.Exists(storedPath))
+                    {
+                        filePath = storedPath;
+                        downloadName = string.IsNullOrWhiteSpace(uploadHistory.Value.OriginalFileName)
+                            ? storedFileName
+                            : Path.GetFileName(uploadHistory.Value.OriginalFileName);
+                    }
+                }
             }
             else
             {
@@ -443,6 +603,7 @@ namespace SignalTracker.Controllers
         // ✅ Use s.id since session_id column is missing in your DB schema
         session_id = s != null ? s.id.ToString() : null,
         file_name = h.file_name,
+        stored_file_name = h.file_name,
         uploaded_on = h.uploaded_on,
         uploaded_by = u != null ? u.name : "Unknown",
         status = h.status == 1 ? "Success" : 
@@ -455,7 +616,69 @@ namespace SignalTracker.Controllers
                     .Take(20)
                     .ToListAsync(ct);
 
-                return Ok(new { Status = 1, Data = data });
+                var originalFileNames = new Dictionary<int, string>();
+                if (await UploadHistoryOriginalFileNameColumnExistsAsync(ct) && data.Count > 0)
+                {
+                    var ids = data.Select(x => x.id).ToList();
+                    var conn = db.Database.GetDbConnection();
+                    var shouldClose = conn.State != System.Data.ConnectionState.Open;
+                    if (shouldClose)
+                        await conn.OpenAsync(ct);
+
+                    try
+                    {
+                        await using var cmd = conn.CreateCommand();
+                        var idParameterNames = new List<string>();
+                        for (var i = 0; i < ids.Count; i++)
+                        {
+                            var paramName = $"@id{i}";
+                            idParameterNames.Add(paramName);
+                            var param = cmd.CreateParameter();
+                            param.ParameterName = paramName;
+                            param.Value = ids[i];
+                            cmd.Parameters.Add(param);
+                        }
+
+                        cmd.CommandText = $@"
+                            SELECT id, original_file_name
+                            FROM tbl_upload_history
+                            WHERE id IN ({string.Join(", ", idParameterNames)})
+                              AND original_file_name IS NOT NULL
+                              AND original_file_name <> '';";
+
+                        await using var reader = await cmd.ExecuteReaderAsync(ct);
+                        while (await reader.ReadAsync(ct))
+                        {
+                            originalFileNames[reader.GetInt32(0)] = reader.GetString(1);
+                        }
+                    }
+                    finally
+                    {
+                        if (shouldClose)
+                            await conn.CloseAsync();
+                    }
+                }
+
+                var displayData = data.Select(x => new
+                {
+                    x.id,
+                    x.file_type,
+                    x.session_id,
+                    file_name = originalFileNames.TryGetValue(x.id, out var originalFileName)
+                        ? originalFileName
+                        : x.file_name,
+                    original_file_name = originalFileNames.TryGetValue(x.id, out var originalName)
+                        ? originalName
+                        : null,
+                    x.stored_file_name,
+                    x.uploaded_on,
+                    x.uploaded_by,
+                    x.status,
+                    x.remarks,
+                    x.errors
+                }).ToList();
+
+                return Ok(new { Status = 1, Data = displayData });
             }
             catch (Exception)
             {
