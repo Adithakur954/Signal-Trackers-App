@@ -127,6 +127,48 @@ internal class Program
         }
     }
 
+    private static void EnsureUploadHistoryOriginalFileNameColumnExists(WebApplication app)
+    {
+        try
+        {
+            using var scope = app.Services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var conn = db.Database.GetDbConnection();
+            var shouldClose = conn.State != ConnectionState.Open;
+            if (shouldClose)
+                conn.Open();
+
+            try
+            {
+                using var exists = conn.CreateCommand();
+                exists.CommandText = @"
+                    SELECT COUNT(*)
+                    FROM information_schema.columns
+                    WHERE table_schema = DATABASE()
+                      AND table_name = 'tbl_upload_history'
+                      AND column_name = 'original_file_name';";
+
+                var count = Convert.ToInt32(exists.ExecuteScalar());
+                if (count > 0)
+                    return;
+
+                using var add = conn.CreateCommand();
+                add.CommandText = "ALTER TABLE tbl_upload_history ADD COLUMN original_file_name LONGTEXT NULL;";
+                add.ExecuteNonQuery();
+                Console.WriteLine("Added missing column tbl_upload_history.original_file_name.");
+            }
+            finally
+            {
+                if (shouldClose)
+                    conn.Close();
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Could not ensure column tbl_upload_history.original_file_name: {ex.Message}");
+        }
+    }
+
     private static void DropRemovedSitePredictionColumns(WebApplication app)
     {
         var removedColumns = new[]
@@ -424,6 +466,7 @@ internal class Program
         var app = builder.Build();
         DropProjectGridSizeColumn(app);
         EnsureSitePredictionColorColumnExists(app);
+        EnsureUploadHistoryOriginalFileNameColumnExists(app);
         DropRemovedSitePredictionColumns(app);
 
         // ----------------------------------------------------
