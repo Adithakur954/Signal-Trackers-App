@@ -4546,6 +4546,8 @@ public sealed class HandoverTargetObservationResult
     public DateTime? observed_at { get; set; }
     public DateTime? reverse_observed_at { get; set; }
     public double? rsrp { get; set; }
+    public double? forward_neighbour_rsrp { get; set; }
+    public double? reverse_neighbour_rsrp { get; set; }
     public double? rsrq { get; set; }
     public double? sinr { get; set; }
     public string pci { get; set; } = "";
@@ -6006,7 +6008,7 @@ public async Task<IActionResult> GetHandoverTargetObservations(
     var projectKey = request.project_id.HasValue && request.project_id.Value > 0
         ? request.project_id.Value.ToString(CultureInfo.InvariantCulture)
         : "no_project";
-    var cacheKey = $"handover_target_observations:v3:{GetProjectListCacheScope()}:project:{projectKey}:lookback:{lookbackSeconds}:lookahead:{lookaheadSeconds}:{requestHash}";
+    var cacheKey = $"handover_target_observations:v4:{GetProjectListCacheScope()}:project:{projectKey}:lookback:{lookbackSeconds}:lookahead:{lookaheadSeconds}:{requestHash}";
 
     if (_redis?.IsConnected == true)
     {
@@ -6281,6 +6283,8 @@ public async Task<IActionResult> GetHandoverTargetObservations(
             observed_at = forwardObserved?.timestamp,
             reverse_observed_at = reverseObserved?.timestamp,
             rsrp = forwardObserved?.rsrp,
+            forward_neighbour_rsrp = forwardObserved?.rsrp,
+            reverse_neighbour_rsrp = reverseObserved?.rsrp,
             rsrq = forwardObserved?.rsrq,
             sinr = forwardObserved?.sinr,
             pci = forwardObserved?.pci ?? transition.target_pci.Trim(),
@@ -13089,7 +13093,7 @@ public async Task<JsonResult> GetDominanceDetails([FromQuery] MapFilter1 filters
 
     try
     {
-        var cacheKey = BuildMapViewCacheKey("dominance-details", sessionIds, filters?.NetworkType ?? "all");
+        var cacheKey = BuildMapViewCacheKey("dominance-details-v2", sessionIds, filters?.NetworkType ?? "all");
         var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
         if (cached != null)
             return Json(cached);
@@ -13139,6 +13143,9 @@ public async Task<JsonResult> GetDominanceDetails([FromQuery] MapFilter1 filters
                 t1.id AS LogId,
                 t1.lat,
                 t1.lon,
+                t1.rsrp AS PrimaryRsrp,
+                t2.pci AS NeighbourPci,
+                t2.rsrp AS NeighbourRsrp,
                 (t1.rsrp - t2.rsrp) AS DominanceValue
             FROM tbl_network_log t1
             JOIN tbl_network_log_neighbour t2 
@@ -13165,7 +13172,10 @@ public async Task<JsonResult> GetDominanceDetails([FromQuery] MapFilter1 filters
             
             // Format as number or string depending on your preference. 
             // Using double here so it appears as number in JSON [ -12.5, 5.0 ]
-            double domVal = Math.Round(rd.GetDouble(4), 2); 
+            double primaryRsrp = Math.Round(Convert.ToDouble(rd.GetValue(4)), 2);
+            string? neighbourPci = rd.IsDBNull(5) ? null : rd.GetString(5);
+            double neighbourRsrp = Math.Round(Convert.ToDouble(rd.GetValue(6)), 2);
+            double domVal = Math.Round(Convert.ToDouble(rd.GetValue(7)), 2); 
 
             // If new LogId, create the row structure
             if (!groupedData.ContainsKey(logId))
@@ -13178,6 +13188,7 @@ public async Task<JsonResult> GetDominanceDetails([FromQuery] MapFilter1 filters
                 
                 // Initialize the simple list
                 row["dominance"] = new List<double>(); 
+                row["dominanceDetails"] = new List<Dictionary<string, object?>>(); 
 
                 groupedData[logId] = row;
             }
@@ -13185,6 +13196,15 @@ public async Task<JsonResult> GetDominanceDetails([FromQuery] MapFilter1 filters
             // Add value to the array
             var domList = groupedData[logId]["dominance"] as List<double>;
             domList.Add(domVal);
+
+            var detailList = groupedData[logId]["dominanceDetails"] as List<Dictionary<string, object?>>;
+            detailList.Add(new Dictionary<string, object?>
+            {
+                ["dominance"] = domVal,
+                ["primaryRsrp"] = primaryRsrp,
+                ["neighbourPci"] = neighbourPci,
+                ["neighbourRsrp"] = neighbourRsrp
+            });
         }
 
         var response = new 
