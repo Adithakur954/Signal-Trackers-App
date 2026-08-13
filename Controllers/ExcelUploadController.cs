@@ -345,6 +345,22 @@ namespace SignalTracker.Controllers
                     history.errors = NormalizeUploadError(errorMsg);
                     await scopedDb.SaveChangesAsync();
                 }
+
+                if (ok && string.Equals(Path.GetExtension(mainPath), ".zip", StringComparison.OrdinalIgnoreCase))
+                {
+                    var scopedUserScope = scope.ServiceProvider.GetRequiredService<UserScopeService>();
+                    var l3EventController = new L3EventController(
+                        scopedDb,
+                        httpContextAccessor,
+                        _env,
+                        redis,
+                        scopedUserScope);
+                    await l3EventController.RegisterCompletedUploadAsync(
+                        uploadHistoryId,
+                        originalFileName,
+                        userId,
+                        projectId > 0 ? projectId : null);
+                }
             }
             catch (Exception ex)
             {

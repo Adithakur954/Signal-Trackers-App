@@ -15,7 +15,9 @@
   <ItemGroup>
     <Compile Remove="Controllers\NewFolder\**" />
     <Compile Remove="NewFolder\**" />
+    <Compile Remove="CallAnalyzerRegression\**" />
     <Content Remove="Controllers\NewFolder\**" />
+    <Content Remove="CallAnalyzerRegression\**" />
     <Content Remove="NewFolder\**" />
     <EmbeddedResource Remove="Controllers\NewFolder\**" />
     <EmbeddedResource Remove="NewFolder\**" />

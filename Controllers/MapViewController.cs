@@ -2,6 +2,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;     // for Regex
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
@@ -33,6 +34,7 @@ namespace SignalTracker.Controllers
     [Authorize]
     public class MapViewController : BaseController
     {
+        private const int DiagnosticCallAnalysisVersion = 4;
         private readonly IWebHostEnvironment _env;
         private readonly ApplicationDbContext db;
         private readonly CommonFunction cf;
@@ -2301,12 +2303,13 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                 var analyzer = BuildDiagnosticAnalyzerSummary(timelineRows, calls, connected, dropped, notConnected);
                 var flowModels = BuildDiagnosticFlowModels();
                 var setupValues = calls
-                    .Where(x => x.SetupTimeSeconds.HasValue)
+                    .Where(x => x.SetupTimeSeconds.HasValue
+                        && string.Equals(x.Result, "Connected", StringComparison.OrdinalIgnoreCase))
                     .Select(x => x.SetupTimeSeconds!.Value)
                     .ToList();
                 var durationValues = calls
                     .Where(x => x.CallDurationSeconds.HasValue
-                        && !string.Equals(x.Result, "Not Connected", StringComparison.OrdinalIgnoreCase))
+                        && string.Equals(x.Result, "Connected", StringComparison.OrdinalIgnoreCase))
                     .Select(x => x.CallDurationSeconds!.Value)
                     .ToList();
 
@@ -2543,6 +2546,10 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                     return request.Error;
 
                 var conn = await OpenDiagnosticConnectionAsync();
+                var storedSummary = await LoadPersistedDiagnosticCallSummaryAsync(conn, request.SessionIds, request.UploadId);
+                if (storedSummary != null)
+                    return Json(new { status = 1, summary = storedSummary });
+
                 var events = await LoadDiagnosticEventRowsAsync(conn, request.SessionIds, request.UploadId, request.Take);
                 var l3Rows = await LoadDiagnosticL3RowsAsync(conn, request.SessionIds, request.UploadId, request.Take);
                 var calls = BuildDiagnosticCallRows(events, l3Rows);
@@ -2551,8 +2558,24 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                 var connected = calls.Count(x => string.Equals(x.Result, "Connected", StringComparison.OrdinalIgnoreCase));
                 var dropped = calls.Count(x => string.Equals(x.Result, "Dropped", StringComparison.OrdinalIgnoreCase));
                 var notConnected = calls.Count(x => string.Equals(x.Result, "Not Connected", StringComparison.OrdinalIgnoreCase));
-                var setupValues = calls.Where(x => x.SetupTimeSeconds.HasValue).Select(x => x.SetupTimeSeconds!.Value).ToList();
-                var durationValues = calls.Where(x => x.CallDurationSeconds.HasValue && !string.Equals(x.Result, "Not Connected", StringComparison.OrdinalIgnoreCase)).Select(x => x.CallDurationSeconds!.Value).ToList();
+                var setupValues = calls.Where(x => x.SetupTimeSeconds.HasValue
+                        && string.Equals(x.Result, "Connected", StringComparison.OrdinalIgnoreCase))
+                    .Select(x => x.SetupTimeSeconds!.Value).ToList();
+                var durationValues = calls.Where(x => x.CallDurationSeconds.HasValue
+                        && string.Equals(x.Result, "Connected", StringComparison.OrdinalIgnoreCase))
+                    .Select(x => x.CallDurationSeconds!.Value).ToList();
+
+                if (request.SessionIds.Count == 1)
+                {
+                    var targetHistoryId = await ResolveL3EventHistoryIdAsync(conn, request.SessionIds[0]);
+                    if (targetHistoryId.HasValue)
+                    {
+                        await PersistDiagnosticCallSummaryAsync(request.SessionIds[0], targetHistoryId.Value, request.UploadId, HttpContext.RequestAborted);
+                        var materializedSummary = await LoadPersistedDiagnosticCallSummaryAsync(conn, request.SessionIds, request.UploadId);
+                        if (materializedSummary != null)
+                            return Json(new { status = 1, summary = materializedSummary });
+                    }
+                }
 
                 return Json(new
                 {
@@ -2574,6 +2597,59 @@ public async Task<IActionResult> DeleteAvailablePolygon(
             catch (Exception ex)
             {
                 return StatusCode(500, new { status = 0, message = "An error occurred while fetching call summary.", details = SafeException.Get(ex) });
+            }
+        }
+
+        [NonAction]
+        public async Task PersistDiagnosticCallSummaryAsync(
+            int sessionId,
+            long l3EventHistoryId,
+            int? uploadId = null,
+            CancellationToken cancellationToken = default)
+        {
+            if (sessionId <= 0 || l3EventHistoryId <= 0)
+                return;
+
+            var conn = await OpenDiagnosticConnectionAsync();
+            var sessionIds = new List<int> { sessionId };
+            var transaction = db.Database.CurrentTransaction?.GetDbTransaction();
+            var events = await LoadDiagnosticEventRowsAsync(conn, sessionIds, uploadId, 50000, transaction);
+            var l3Rows = await LoadDiagnosticL3RowsAsync(conn, sessionIds, uploadId, 50000, transaction);
+            var calls = BuildDiagnosticCallRows(events, l3Rows);
+
+            await using (var deleteCmd = conn.CreateCommand())
+            {
+                deleteCmd.Transaction = transaction;
+                deleteCmd.CommandText = "DELETE FROM tbl_l3_event_call_summary WHERE tbl_l3_event_history_id = @historyId;";
+                AddParam(deleteCmd, "@historyId", l3EventHistoryId);
+                await deleteCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            foreach (var call in calls)
+            {
+                await using var insertCmd = conn.CreateCommand();
+                insertCmd.Transaction = transaction;
+                insertCmd.CommandText = @"
+                    INSERT INTO tbl_l3_event_call_summary
+                        (tbl_l3_event_history_id, session_id, call_id, start_time, alerting_time, connected_time,
+                         end_time, call_status, technology, setup_time, duration, reason, analysis_version)
+                    VALUES
+                        (@historyId, @sessionId, @callId, @startTime, @alertingTime, @connectedTime,
+                         @endTime, @callStatus, @technology, @setupTime, @duration, @reason, @analysisVersion);";
+                AddParam(insertCmd, "@historyId", l3EventHistoryId);
+                AddParam(insertCmd, "@sessionId", sessionId);
+                AddParam(insertCmd, "@callId", call.FrontendId);
+                AddParam(insertCmd, "@startTime", ToDiagnosticIsoTimestamp(call.StartSeconds));
+                AddParam(insertCmd, "@alertingTime", call.Alerting);
+                AddParam(insertCmd, "@connectedTime", ToDiagnosticIsoTimestamp(call.ConnectedSeconds));
+                AddParam(insertCmd, "@endTime", ToDiagnosticIsoTimestamp(call.EndSeconds));
+                AddParam(insertCmd, "@callStatus", call.Result);
+                AddParam(insertCmd, "@technology", call.Technology);
+                AddParam(insertCmd, "@setupTime", ToMilliseconds(call.SetupTimeSeconds) ?? 0);
+                AddParam(insertCmd, "@duration", ToMilliseconds(call.CallDurationSeconds) ?? 0);
+                AddParam(insertCmd, "@reason", FirstNonEmpty(call.Reason, call.StatusDetail));
+                AddParam(insertCmd, "@analysisVersion", DiagnosticCallAnalysisVersion);
+                await insertCmd.ExecuteNonQueryAsync(cancellationToken);
             }
         }
 
@@ -2762,6 +2838,44 @@ public class AvailablePolygonsResponse
             public IActionResult? Error { get; init; }
         }
 
+        private sealed class PersistedDiagnosticCallSummary
+        {
+            [JsonPropertyName("totalCalls")]
+            public int TotalCalls { get; init; }
+            [JsonPropertyName("connected")]
+            public int Connected { get; init; }
+            [JsonPropertyName("dropped")]
+            public int Dropped { get; init; }
+            [JsonPropertyName("notConnected")]
+            public int NotConnected { get; init; }
+            [JsonPropertyName("busy")]
+            public int Busy { get; init; }
+            [JsonPropertyName("rejected")]
+            public int Rejected { get; init; }
+            [JsonPropertyName("setupFailures")]
+            public int SetupFailures { get; init; }
+            [JsonPropertyName("ongoing")]
+            public int Ongoing { get; init; }
+            [JsonPropertyName("unknown")]
+            public int Unknown { get; init; }
+            [JsonPropertyName("averageSetupTime")]
+            public int AverageSetupTime { get; init; }
+            [JsonPropertyName("averageTalkTime")]
+            public int AverageTalkTime { get; init; }
+            [JsonPropertyName("totalDurationMs")]
+            public long TotalDurationMs { get; init; }
+            [JsonPropertyName("totalConnectedDurationMs")]
+            public long TotalConnectedDurationMs { get; init; }
+            [JsonPropertyName("totalAttemptDurationMs")]
+            public long TotalAttemptDurationMs { get; init; }
+            [JsonPropertyName("successRate")]
+            public decimal SuccessRate { get; init; }
+            [JsonPropertyName("reason")]
+            public string? Reason { get; init; }
+            [JsonPropertyName("calls")]
+            public JsonElement Calls { get; init; }
+        }
+
         private sealed class SubSessionPolygonScope
         {
             public List<int> ProjectIds { get; } = new();
@@ -2838,6 +2952,116 @@ public class AvailablePolygonsResponse
             return conn;
         }
 
+        private static async Task<PersistedDiagnosticCallSummary?> LoadPersistedDiagnosticCallSummaryAsync(
+            DbConnection conn,
+            IReadOnlyList<int> sessionIds,
+            int? uploadId)
+        {
+            if (!await DiagnosticTableExistsAsync(conn, "tbl_l3_event_call_summary"))
+                return null;
+            if (sessionIds.Count != 1)
+                return null;
+
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT call_id, start_time, alerting_time, connected_time, end_time, call_status,
+                       technology, setup_time, duration, reason
+                FROM tbl_l3_event_call_summary
+                WHERE session_id = @sessionId
+                  AND tbl_l3_event_history_id = (
+                      SELECT MAX(id) FROM tbl_l3_event_history WHERE session_id = @sessionId
+                  )
+                  AND analysis_version = @analysisVersion
+                ORDER BY id;";
+            AddParam(cmd, "@sessionId", sessionIds[0]);
+            AddParam(cmd, "@analysisVersion", DiagnosticCallAnalysisVersion);
+
+            await using var reader = await cmd.ExecuteReaderAsync();
+            var calls = new List<FrontendDiagnosticCall>();
+            var setupTimes = new List<long>();
+            var connectedDurations = new List<long>();
+            long totalDuration = 0;
+            var reasons = new List<string>();
+            while (await reader.ReadAsync())
+            {
+                var status = ReadString(reader, 5) ?? "Not Connected";
+                var setupTime = ReadInt64(reader, 7) ?? 0;
+                var duration = ReadInt64(reader, 8) ?? 0;
+                var reason = ReadString(reader, 9) ?? string.Empty;
+                if (string.Equals(status, "Connected", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (setupTime > 0) setupTimes.Add(setupTime);
+                    if (duration > 0) connectedDurations.Add(duration);
+                }
+                totalDuration += Math.Max(0, duration);
+                if (!string.IsNullOrWhiteSpace(reason)) reasons.Add(reason);
+
+                calls.Add(new FrontendDiagnosticCall
+                {
+                    Id = ReadString(reader, 0) ?? $"Cl{calls.Count + 1}",
+                    StartTime = ReadString(reader, 1),
+                    DialTime = ReadString(reader, 1),
+                    AlertingTime = ReadString(reader, 2),
+                    ConnectedTime = ReadString(reader, 3),
+                    EndTime = ReadString(reader, 4),
+                    TerminationTime = ReadString(reader, 4),
+                    CallSetupTimeMs = (int)Math.Min(int.MaxValue, setupTime),
+                    SetupTimeMs = (int)Math.Min(int.MaxValue, setupTime),
+                    ConnectedDurationMs = (int)Math.Min(int.MaxValue, duration),
+                    TalkTimeMs = (int)Math.Min(int.MaxValue, duration),
+                    DurationMs = (int)Math.Min(int.MaxValue, duration),
+                    TotalDurationMs = (int)Math.Min(int.MaxValue, duration),
+                    Status = status,
+                    DetailedStatus = reason,
+                    CallResult = status,
+                    Classification = status,
+                    TechnologyStart = ReadString(reader, 6) ?? "Unknown",
+                    TechnologyEnd = ReadString(reader, 6) ?? "Unknown",
+                    DisconnectReason = reason
+                });
+            }
+
+            if (calls.Count == 0)
+                return null;
+
+            var connected = calls.Count(call => string.Equals(call.Status, "Connected", StringComparison.OrdinalIgnoreCase));
+            var dropped = calls.Count(call => string.Equals(call.Status, "Dropped", StringComparison.OrdinalIgnoreCase));
+            var notConnected = calls.Count - connected - dropped;
+            var callsElement = System.Text.Json.JsonSerializer.SerializeToElement(calls, new JsonSerializerOptions
+            {
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+            });
+
+            return new PersistedDiagnosticCallSummary
+            {
+                TotalCalls = calls.Count,
+                Connected = connected,
+                Dropped = dropped,
+                NotConnected = notConnected,
+                AverageSetupTime = setupTimes.Count > 0 ? (int)Math.Min(int.MaxValue, Math.Round(setupTimes.Average())) : 0,
+                AverageTalkTime = connectedDurations.Count > 0 ? (int)Math.Min(int.MaxValue, Math.Round(connectedDurations.Average())) : 0,
+                TotalDurationMs = totalDuration,
+                TotalConnectedDurationMs = totalDuration,
+                SuccessRate = calls.Count > 0 ? Math.Round((decimal)connected / calls.Count, 5) : 0,
+                Reason = string.Join("; ", reasons.Distinct(StringComparer.OrdinalIgnoreCase)),
+                Calls = callsElement
+            };
+        }
+
+        private static async Task<long?> ResolveL3EventHistoryIdAsync(DbConnection conn, int sessionId)
+        {
+            if (!await DiagnosticTableExistsAsync(conn, "tbl_l3_event_history"))
+                return null;
+
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT MAX(id) FROM tbl_l3_event_history WHERE session_id = @sessionId;";
+            AddParam(cmd, "@sessionId", sessionId);
+            var value = await cmd.ExecuteScalarAsync();
+            return value == null || value == DBNull.Value
+                ? null
+                : Convert.ToInt64(value, CultureInfo.InvariantCulture);
+        }
+
         private sealed class DiagnosticEventRow
         {
             public long Id { get; init; }
@@ -2884,6 +3108,7 @@ public class AvailablePolygonsResponse
             public string FrontendId { get; init; } = string.Empty;
             public int? SessionId { get; init; }
             public string? Start { get; init; }
+            public string? Alerting { get; init; }
             public string? End { get; init; }
             public double? StartSeconds { get; init; }
             public double? ConnectedSeconds { get; init; }
@@ -2934,6 +3159,7 @@ public class AvailablePolygonsResponse
             public string Id { get; init; } = string.Empty;
             public string? StartTime { get; init; }
             public string? DialTime { get; init; }
+            public string? AlertingTime { get; init; }
             public string? ConnectedTime { get; init; }
             public string? EndTime { get; init; }
             public string? TerminationTime { get; init; }
@@ -2983,15 +3209,21 @@ public class AvailablePolygonsResponse
             public TimeSpan? EndTime { get; set; }
             public string? StartText { get; set; }
             public string? EndText { get; set; }
+            public TimeSpan? AlertingTime { get; set; }
+            public string? AlertingText { get; set; }
             public string Technology { get; set; } = "Unknown";
             public string Result { get; set; } = "Not Connected";
             public string StatusDetail { get; set; } = string.Empty;
             public string Reason { get; set; } = string.Empty;
+            public string EvidenceText { get; set; } = string.Empty;
+            public List<TimeSpan?> ActiveHints { get; } = new();
+            public List<string> Evidence { get; } = new();
         }
 
-        private static async Task<bool> DiagnosticTableExistsAsync(DbConnection conn, string tableName)
+        private static async Task<bool> DiagnosticTableExistsAsync(DbConnection conn, string tableName, DbTransaction? transaction = null)
         {
             await using var cmd = conn.CreateCommand();
+            cmd.Transaction = transaction;
             cmd.CommandText = @"
                 SELECT 1
                 FROM INFORMATION_SCHEMA.TABLES
@@ -3046,19 +3278,53 @@ public class AvailablePolygonsResponse
             DbConnection conn,
             IReadOnlyList<int> sessionIds,
             int? uploadId,
-            int take)
+            int take,
+            DbTransaction? transaction = null)
         {
             var rows = new List<DiagnosticEventRow>();
-            if (!await DiagnosticTableExistsAsync(conn, "tbl_event_log"))
+            if (!await DiagnosticTableExistsAsync(conn, "tbl_event_log", transaction))
                 return rows;
 
             await using var cmd = conn.CreateCommand();
+            cmd.Transaction = transaction;
             var whereSql = BuildDiagnosticFilterSql(cmd, sessionIds, uploadId);
             AddParam(cmd, "@diagTake", take);
             cmd.CommandTimeout = 180;
             cmd.CommandText = @"
-                SELECT id, tbl_upload_id, session_id, source_file_name, row_no, timestamp_text,
-                       latitude, longitude, category, event_name, detail, source, severity
+                SELECT id, tbl_upload_id, session_id, source_file_name, row_no,
+                       COALESCE(NULLIF(timestamp_text, ''), CASE WHEN JSON_VALID(raw_json) THEN COALESCE(
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.timestamp')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.time_stamp')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.datetime')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.date_time')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.time'))
+                       ) END) AS timestamp_text,
+                       latitude, longitude,
+                       COALESCE(NULLIF(category, ''), CASE WHEN JSON_VALID(raw_json) THEN COALESCE(
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.category')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.event_category')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.class')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.group'))
+                       ) END) AS category,
+                       COALESCE(NULLIF(event_name, ''), CASE WHEN JSON_VALID(raw_json) THEN COALESCE(
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.event_name')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.eventname')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.event_type')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.eventtype')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.event')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.name')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.type'))
+                       ) END) AS event_name,
+                       COALESCE(NULLIF(detail, ''), CASE WHEN JSON_VALID(raw_json) THEN COALESCE(
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.value')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.detail')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.details')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.description')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.info')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.message')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.data'))
+                       ) END) AS detail,
+                       source, severity
                 FROM tbl_event_log" + whereSql + @"
                 ORDER BY session_id, id
                 LIMIT @diagTake;";
@@ -3091,19 +3357,57 @@ public class AvailablePolygonsResponse
             DbConnection conn,
             IReadOnlyList<int> sessionIds,
             int? uploadId,
-            int take)
+            int take,
+            DbTransaction? transaction = null)
         {
             var rows = new List<DiagnosticL3Row>();
-            if (!await DiagnosticTableExistsAsync(conn, "tbl_l3_log"))
+            if (!await DiagnosticTableExistsAsync(conn, "tbl_l3_log", transaction))
                 return rows;
 
             await using var cmd = conn.CreateCommand();
+            cmd.Transaction = transaction;
             var whereSql = BuildDiagnosticFilterSql(cmd, sessionIds, uploadId);
             AddParam(cmd, "@diagTake", take);
             cmd.CommandTimeout = 180;
             cmd.CommandText = @"
-                SELECT id, tbl_upload_id, session_id, source_file_name, source_file_type, row_no, timestamp_text,
-                       latitude, longitude, category, message, detail, source, severity, raw_text
+                SELECT id, tbl_upload_id, session_id, source_file_name, source_file_type, row_no,
+                       COALESCE(NULLIF(timestamp_text, ''), CASE WHEN JSON_VALID(raw_json) THEN COALESCE(
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.timestamp')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.time_stamp')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.datetime')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.date_time')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.time'))
+                       ) END) AS timestamp_text,
+                       latitude, longitude,
+                       COALESCE(NULLIF(category, ''), CASE WHEN JSON_VALID(raw_json) THEN COALESCE(
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.category')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.layer')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.protocol')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.stack')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.channel'))
+                       ) END) AS category,
+                       COALESCE(NULLIF(message, ''), CASE WHEN JSON_VALID(raw_json) THEN COALESCE(
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.message_name')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.messagename')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.msg_name')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.message_type')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.messagetype')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.message')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.msg')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.name'))
+                       ) END) AS message,
+                       COALESCE(NULLIF(detail, ''), CASE WHEN JSON_VALID(raw_json) THEN COALESCE(
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.decode')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.decoded')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.decoded_text')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.detail')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.details')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.text')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.content')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.info')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.description'))
+                       ) END) AS detail,
+                       source, severity, raw_text
                 FROM tbl_l3_log" + whereSql + @"
                 ORDER BY session_id, id
                 LIMIT @diagTake;";
@@ -3142,6 +3446,7 @@ public class AvailablePolygonsResponse
             var activeBySession = new Dictionary<int, DiagnosticCallBuilder>();
             var orderedEvents = events
                 .Where(IsDiagnosticCallRelated)
+                .Where(row => !IsStaleDiagnosticEvent(row))
                 .OrderBy(x => x.SessionId ?? 0)
                 .ThenBy(x => x.EventTime ?? TimeSpan.Zero)
                 .ThenBy(x => x.Id)
@@ -3151,13 +3456,39 @@ public class AvailablePolygonsResponse
             {
                 var sessionKey = ev.SessionId ?? 0;
                 var text = ev.Text;
-                var upper = text.ToUpperInvariant();
                 var eventTime = ev.EventTime;
                 activeBySession.TryGetValue(sessionKey, out var active);
 
-                var startsCall = HasAny(upper, "DIAL", "DIALING", "ORIGINATING", "OUTGOING", "RINGING", "ALERTING", "OFFHOOK");
-                var connectedCall = HasAny(upper, "CONNECTED", "ACTIVE", "OFFHOOK", "ACCEPTED", "ANSWERED");
-                var endsCall = HasAny(upper, "IDLE", "ENDED", "END", "DISCONNECT", "DISCONNECTED", "RELEASE", "BUSY", "FAIL", "FAILED", "DROP", "DROPPED", "RADIO FAILURE", "REJECT", "NO ANSWER");
+                var startsCall = IsDiagnosticCallStart(ev);
+                var connectedCall = IsDiagnosticCallConnected(ev);
+                var endsCall = IsDiagnosticCallEnd(ev);
+
+                if (active != null && IsDiagnosticCallAlerting(ev))
+                {
+                    active.AlertingTime ??= eventTime;
+                    active.AlertingText ??= ev.TimestampText;
+                    active.Evidence.Add($"ALERTING|{ev.TimestampText}|{ev.EventName}|{ev.Detail}");
+                }
+
+                if (active != null && string.Equals(ev.EventName?.Trim(), "CALL_ACTIVE", StringComparison.OrdinalIgnoreCase))
+                {
+                    active.ActiveHints.Add(eventTime);
+                    active.Evidence.Add($"ACTIVE_HINT|{ev.TimestampText}|{ev.Detail}");
+                }
+
+                var explicitNewAttempt = string.Equals(ev.EventName?.Trim(), "CALL_DIAL_INITIATED", StringComparison.OrdinalIgnoreCase);
+                if (startsCall && active != null && explicitNewAttempt)
+                {
+                    active.EndTime ??= eventTime;
+                    active.EndText ??= ev.TimestampText;
+                    active.Result = active.ConnectedTime.HasValue ? "Connected" : "Not Connected";
+                    active.StatusDetail = active.ConnectedTime.HasValue ? "Completed" : "Call Setup Failure";
+                    active.Reason = "Call attempt was closed when the next dial attempt started.";
+                    FinalizeDiagnosticCall(active, events, l3Rows);
+                    calls.Add(ToDiagnosticCallRow(active, calls.Count + 1));
+                    activeBySession.Remove(sessionKey);
+                    active = null;
+                }
 
                 if (startsCall && active == null)
                 {
@@ -3170,29 +3501,12 @@ public class AvailablePolygonsResponse
                     };
                     activeBySession[sessionKey] = active;
                 }
-                else if (startsCall && active != null && active.EndTime.HasValue)
-                {
-                    calls.Add(ToDiagnosticCallRow(active, calls.Count + 1));
-                    active = new DiagnosticCallBuilder
-                    {
-                        SessionId = ev.SessionId,
-                        StartTime = eventTime,
-                        StartText = ev.TimestampText,
-                        Technology = ResolveDiagnosticTechnology(text, l3Rows, ev.SessionId, eventTime)
-                    };
-                    activeBySession[sessionKey] = active;
-                }
 
-                if (connectedCall)
-                {
-                    active ??= new DiagnosticCallBuilder
-                    {
-                        SessionId = ev.SessionId,
-                        StartTime = eventTime,
-                        StartText = ev.TimestampText,
-                        Technology = ResolveDiagnosticTechnology(text, l3Rows, ev.SessionId, eventTime)
-                    };
+                if (active != null)
+                    active.EvidenceText = string.Join(" ", new[] { active.EvidenceText, text }.Where(value => !string.IsNullOrWhiteSpace(value)));
 
+                if (connectedCall && active != null)
+                {
                     active.ConnectedTime ??= eventTime;
                     active.StatusDetail = "Completed";
                     if (active.Technology == "Unknown")
@@ -3207,19 +3521,14 @@ public class AvailablePolygonsResponse
                     continue;
                 }
 
-                active ??= new DiagnosticCallBuilder
-                {
-                    SessionId = ev.SessionId,
-                    StartTime = eventTime,
-                    StartText = ev.TimestampText,
-                    Technology = ResolveDiagnosticTechnology(text, l3Rows, ev.SessionId, eventTime)
-                };
+                if (active == null)
+                    continue;
 
                 active.EndTime = eventTime;
                 active.EndText = ev.TimestampText;
-                active.Reason = ResolveDiagnosticReason(text);
-                active.Result = ResolveDiagnosticResult(text, active.ConnectedTime.HasValue);
-                active.StatusDetail = ResolveDiagnosticStatusDetail(text, active.Result);
+                var evidenceText = string.Join(" ", new[] { active.EvidenceText, text }.Where(value => !string.IsNullOrWhiteSpace(value)));
+                active.Reason = ResolveDiagnosticReason(evidenceText);
+                FinalizeDiagnosticCall(active, events, l3Rows);
                 if (active.Technology == "Unknown")
                 {
                     active.Technology = ResolveDiagnosticTechnology(text, l3Rows, ev.SessionId, eventTime);
@@ -3231,37 +3540,53 @@ public class AvailablePolygonsResponse
 
             foreach (var active in activeBySession.Values.Where(x => x.StartTime.HasValue))
             {
-                active.Result = active.ConnectedTime.HasValue ? "Connected" : "Not Connected";
-                active.StatusDetail = active.ConnectedTime.HasValue ? "In Progress" : "No End Event";
-                active.Reason = active.ConnectedTime.HasValue ? "No call end event found." : "No connected event found.";
+                FinalizeDiagnosticCall(active, events, l3Rows);
+                if (!active.EndTime.HasValue)
+                    active.StatusDetail = active.ConnectedTime.HasValue ? "In Progress" : "No End Event";
                 calls.Add(ToDiagnosticCallRow(active, calls.Count + 1));
             }
 
-            if (calls.Count == 0 && orderedEvents.Count > 0)
-            {
-                foreach (var ev in orderedEvents)
-                {
-                    var text = ev.Text;
-                    var connected = HasAny(text.ToUpperInvariant(), "CONNECTED", "ACTIVE", "OFFHOOK");
-                    var result = ResolveDiagnosticResult(text, connected);
-                    calls.Add(new DiagnosticCallRow
-                    {
-                        Call = $"C{calls.Count + 1}",
-                        FrontendId = $"Cl{calls.Count + 1}",
-                        SessionId = ev.SessionId,
-                        Start = FormatDiagnosticTime(ev.EventTime, ev.TimestampText),
-                        End = FormatDiagnosticTime(ev.EventTime, ev.TimestampText),
-                        StartSeconds = ev.EventTime?.TotalSeconds,
-                        EndSeconds = ev.EventTime?.TotalSeconds,
-                        Technology = ResolveDiagnosticTechnology(text, l3Rows, ev.SessionId, ev.EventTime),
-                        Result = result,
-                        StatusDetail = ResolveDiagnosticStatusDetail(text, result),
-                        Reason = ResolveDiagnosticReason(text)
-                    });
-                }
-            }
-
             return calls;
+        }
+
+        [NonAction]
+        public static DiagnosticCallRegressionResult AnalyzeDiagnosticRowsForRegression(
+            IEnumerable<DiagnosticAnalyzerInput> eventRows,
+            IEnumerable<DiagnosticAnalyzerInput> l3Rows)
+        {
+            var events = eventRows.Select((row, index) => new DiagnosticEventRow
+            {
+                Id = index + 1,
+                SessionId = row.SessionId,
+                TimestampText = row.Timestamp,
+                Category = row.Category,
+                EventName = row.Name,
+                Detail = row.Detail,
+                Source = row.Source
+            }).ToList();
+            var l3 = l3Rows.Select((row, index) => new DiagnosticL3Row
+            {
+                Id = index + 1,
+                SessionId = row.SessionId,
+                TimestampText = row.Timestamp,
+                Category = row.Category,
+                Message = row.Name,
+                Detail = row.Detail,
+                Source = row.Source
+            }).ToList();
+            var calls = BuildDiagnosticCallRows(events, l3);
+            return new DiagnosticCallRegressionResult
+            {
+                Calls = calls.Select(call => new DiagnosticCallRegressionRow
+                {
+                    Id = call.FrontendId,
+                    Start = call.Start,
+                    Alerting = call.Alerting,
+                    End = call.End,
+                    Result = call.Result,
+                    Reason = call.Reason
+                }).ToList()
+            };
         }
 
         private static DiagnosticCallRow ToDiagnosticCallRow(DiagnosticCallBuilder call, int index)
@@ -3279,6 +3604,7 @@ public class AvailablePolygonsResponse
                 FrontendId = $"Cl{index}",
                 SessionId = call.SessionId,
                 Start = FormatDiagnosticTime(call.StartTime, call.StartText),
+                Alerting = FormatDiagnosticTime(call.AlertingTime, call.AlertingText),
                 End = FormatDiagnosticTime(call.EndTime, call.EndText),
                 StartSeconds = call.StartTime?.TotalSeconds,
                 ConnectedSeconds = call.ConnectedTime?.TotalSeconds,
@@ -3408,6 +3734,7 @@ public class AvailablePolygonsResponse
                     Id = call.FrontendId,
                     StartTime = ToDiagnosticIsoTimestamp(call.StartSeconds),
                     DialTime = ToDiagnosticIsoTimestamp(call.StartSeconds),
+                    AlertingTime = call.Alerting,
                     ConnectedTime = ToDiagnosticIsoTimestamp(call.ConnectedSeconds),
                     EndTime = ToDiagnosticIsoTimestamp(call.EndSeconds),
                     TerminationTime = ToDiagnosticIsoTimestamp(call.EndSeconds),
@@ -4069,8 +4396,12 @@ public class AvailablePolygonsResponse
             var busy = calls.Count(x => string.Equals(x.StatusDetail, "Busy", StringComparison.OrdinalIgnoreCase));
             var rejected = calls.Count(x => string.Equals(x.StatusDetail, "Rejected", StringComparison.OrdinalIgnoreCase));
             var setupFailures = calls.Count(x => string.Equals(x.Result, "Not Connected", StringComparison.OrdinalIgnoreCase) || string.Equals(x.Result, "Dropped", StringComparison.OrdinalIgnoreCase));
-            var setupValues = calls.Where(x => x.SetupTimeSeconds.HasValue).Select(x => x.SetupTimeSeconds!.Value).ToList();
-            var connectedDuration = calls.Where(x => x.CallDurationSeconds.HasValue && !string.Equals(x.Result, "Not Connected", StringComparison.OrdinalIgnoreCase)).Sum(x => x.CallDurationSeconds!.Value);
+            var setupValues = calls.Where(x => x.SetupTimeSeconds.HasValue
+                    && string.Equals(x.Result, "Connected", StringComparison.OrdinalIgnoreCase))
+                .Select(x => x.SetupTimeSeconds!.Value).ToList();
+            var connectedDuration = calls.Where(x => x.CallDurationSeconds.HasValue
+                    && string.Equals(x.Result, "Connected", StringComparison.OrdinalIgnoreCase))
+                .Sum(x => x.CallDurationSeconds!.Value);
 
             new[]
             {
@@ -4572,23 +4903,166 @@ public class AvailablePolygonsResponse
 
         private static bool IsDiagnosticCallRelated(DiagnosticEventRow row)
         {
-            var text = row.Text.ToUpperInvariant();
-            return HasAny(text, "CALL", "IMS", "DIAL", "OFFHOOK", "IDLE", "BUSY", "RADIO FAILURE", "DROP", "DISCONNECT", "RING", "RELEASE", "REJECT", "NO ANSWER");
+            var eventKey = (row.EventName ?? string.Empty).Trim();
+            var text = row.Text;
+            return Regex.IsMatch(eventKey, @"^(CALL_DIAL_INITIATED|CALL_DIALING|CALL_ALERTING|CALL_ACTIVE|CALL_DISCONNECT_NONZERO_CAUSE|CALL_DISCONNECTED|CALL_END|IMS_DIAL_INTERNAL|IMS_CALL_DIAL|MO_CALL|CallState|mPreciseCallState)$", RegexOptions.IgnoreCase)
+                || Regex.IsMatch(text, @"\b(SIP(?:/2\.0)?\s+(?:INVITE|100|180|183|200|ACK|BYE|CANCEL)|CM SERVICE REQUEST|CC SETUP|CC CONNECT|CC DISCONNECT|RELEASE COMPLETE|RADIO LINK FAILURE|RLF|HANDOVER FAILURE|IMS REGISTRATION LOST|BEARER FAILURE)\b", RegexOptions.IgnoreCase);
+        }
+
+        private static bool IsStaleDiagnosticEvent(DiagnosticEventRow row)
+        {
+            if (!row.EventTime.HasValue || string.IsNullOrWhiteSpace(row.Detail))
+                return false;
+
+            var match = Regex.Match(row.Detail, @"(?:\d{2}-\d{2}\s+)?(?<time>\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?)");
+            if (!match.Success || !TimeSpan.TryParse(match.Groups["time"].Value, CultureInfo.InvariantCulture, out var embedded))
+                return false;
+
+            var difference = row.EventTime.Value.TotalSeconds - embedded.TotalSeconds;
+            if (difference < -43200) difference += 86400;
+            if (difference > 43200) difference -= 86400;
+            return difference > 10;
+        }
+
+        private static bool IsDiagnosticCallAlerting(DiagnosticEventRow row)
+        {
+            var text = $"{row.EventName} {row.Detail}";
+            return Regex.IsMatch(text, @"\b(CALL[ _-]?ALERTING|ALERTING|RINGING|SIP\s+180|SIP\s+183)\b", RegexOptions.IgnoreCase);
+        }
+
+        private static void FinalizeDiagnosticCall(
+            DiagnosticCallBuilder call,
+            IReadOnlyList<DiagnosticEventRow> eventRows,
+            IReadOnlyList<DiagnosticL3Row> l3Rows)
+        {
+            var relatedEvents = eventRows.Where(row => row.SessionId == call.SessionId
+                    && !IsStaleDiagnosticEvent(row)
+                    && row.EventTime.HasValue
+                    && (!call.StartTime.HasValue || row.EventTime.Value >= call.StartTime.Value - TimeSpan.FromSeconds(1))
+                    && (!call.EndTime.HasValue || row.EventTime.Value <= call.EndTime.Value + TimeSpan.FromSeconds(2)))
+                .ToList();
+            var window = l3Rows.Where(row => row.SessionId == call.SessionId
+                    && row.EventTime.HasValue
+                    && (!call.StartTime.HasValue || row.EventTime.Value >= call.StartTime.Value - TimeSpan.FromSeconds(2))
+                    && (!call.EndTime.HasValue || row.EventTime.Value <= call.EndTime.Value + TimeSpan.FromSeconds(2)))
+                .OrderBy(row => row.EventTime)
+                .ToList();
+            var l3Text = string.Join(" ", window.Select(row => row.Text));
+            var eventText = string.Join(" ", relatedEvents.Select(row => row.Text));
+            var allText = $"{eventText} {l3Text}";
+
+            var strongConnect = Regex.IsMatch(allText,
+                @"\b(SIP\s*[/ ]?2\.0\s+200|200\s+OK|CONNECT(?:\s+ACK(?:NOWLEDGE)?)?|CC\s+CONNECT|CALL_CONNECTED|PRECISE_CALL_STATE_ACTIVE|ESTABLISHED DIALOG)\b",
+                RegexOptions.IgnoreCase);
+            var attemptSeconds = call.StartTime.HasValue && call.EndTime.HasValue
+                ? SecondsBetween(call.StartTime.Value, call.EndTime.Value)
+                : 0;
+            var cause = Regex.Match(allText, @"\bcause\s*[:=]\s*(?<cause>\d+)\b", RegexOptions.IgnoreCase);
+            var rawCause = cause.Success ? cause.Groups["cause"].Value : null;
+
+            // Some vendor logs expose answer only as a sustained media/call session.
+            // Require several independent hints; duration alone never establishes a call.
+            var corroboratedMediaSession = call.AlertingTime.HasValue
+                && call.ActiveHints.Count > 0
+                && attemptSeconds >= 45
+                && !string.Equals(rawCause, "4", StringComparison.Ordinal);
+            var sustainedSignaling = window.Count(row => Regex.IsMatch(row.Text, @"MEASUREMENT REPORT|RRC CONNECTION RECONFIGURATION|DEDICATED", RegexOptions.IgnoreCase)) >= 3;
+            var sustainedNormalSession = call.AlertingTime.HasValue
+                && attemptSeconds >= 60
+                && sustainedSignaling
+                && string.Equals(rawCause, "3", StringComparison.Ordinal);
+            var connected = strongConnect
+                || (!string.Equals(rawCause, "4", StringComparison.Ordinal)
+                    && (call.ConnectedTime.HasValue || corroboratedMediaSession || sustainedNormalSession));
+            if (connected && !call.ConnectedTime.HasValue)
+            {
+                call.ConnectedTime = call.ActiveHints.FirstOrDefault(time => time.HasValue && (!call.AlertingTime.HasValue || time.Value > call.AlertingTime.Value))
+                    ?? call.AlertingTime;
+            }
+
+            var radioFailure = Regex.IsMatch(allText, @"\b(RADIO LINK FAILURE|RLF|T310|REESTABLISHMENT (?:FAILURE|REJECT)|RACH FAILURE|OUT OF SERVICE|BEARER FAILURE|CONNECTION LOST|HANDOVER FAILURE)\b", RegexOptions.IgnoreCase);
+            var recovery = Regex.IsMatch(allText, @"\b(REESTABLISHMENT COMPLETE|RECONFIGURATION COMPLETE|HANDOVER COMPLETE|SERVICE RESTORED|RECOVERED)\b", RegexOptions.IgnoreCase);
+            var userOrNormalEnd = Regex.IsMatch(allText, @"\b(LOCAL_HANGUP|USER_TERMINATED|NORMAL_CLEARING|NORMAL CALL CLEARING|RELEASE COMPLETE|SIP BYE)\b", RegexOptions.IgnoreCase);
+            var abnormalLoss = radioFailure && !recovery && !userOrNormalEnd;
+
+            call.Result = !connected ? (call.EndTime.HasValue ? "Not Connected" : "Unknown")
+                : abnormalLoss || (string.Equals(rawCause, "2", StringComparison.Ordinal) && !userOrNormalEnd) ? "Dropped"
+                : "Connected";
+            call.StatusDetail = ResolveDiagnosticStatusDetail(allText, call.Result);
+            call.Reason = call.Result switch
+            {
+                "Dropped" => "Abnormal failure.",
+                "Not Connected" => "Not connected.",
+                "Connected" when radioFailure && recovery => "Normal disconnection; radio issue recovered.",
+                "Connected" => "Normal disconnection.",
+                _ => "Unknown call state."
+            };
+            call.Evidence.AddRange(window.Take(100).Select(row => $"L3|{row.TimestampText}|{row.Category}|{row.Message}"));
+        }
+
+        private static bool IsDiagnosticCallStart(DiagnosticEventRow row)
+        {
+            var eventKey = (row.EventName ?? string.Empty).Trim();
+            if (eventKey.Equals("CALL_DIAL_INITIATED", StringComparison.OrdinalIgnoreCase)
+                || eventKey.Equals("CALL_DIALING", StringComparison.OrdinalIgnoreCase)
+                || eventKey.Equals("IMS_DIAL_INTERNAL", StringComparison.OrdinalIgnoreCase)
+                || eventKey.Equals("IMS_CALL_DIAL", StringComparison.OrdinalIgnoreCase)
+                || eventKey.Equals("MO_CALL", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            var text = row.Text;
+            if (Regex.IsMatch(text, @"\b(SIP(?:/2\.0)?\s+INVITE|CM SERVICE REQUEST|CC SETUP)\b", RegexOptions.IgnoreCase))
+                return true;
+
+            if (!eventKey.Equals("CallState", StringComparison.OrdinalIgnoreCase)
+                && !eventKey.Equals("mPreciseCallState", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            var detail = row.Detail ?? string.Empty;
+            return Regex.IsMatch(detail, @"\b(dial(?:ing)?|calling|trying)\b", RegexOptions.IgnoreCase)
+                || (Regex.IsMatch(detail, @"\b(ring(?:ing)?|alert(?:ing)?)\b", RegexOptions.IgnoreCase)
+                    && Regex.IsMatch(detail, @"\b(incoming|mt call|mobile terminated)\b", RegexOptions.IgnoreCase));
+        }
+
+        private static bool IsDiagnosticCallConnected(DiagnosticEventRow row)
+        {
+            var eventKey = (row.EventName ?? string.Empty).Trim();
+            if (eventKey.Equals("CALL_ACTIVE", StringComparison.OrdinalIgnoreCase))
+            {
+                var activeDetail = row.Detail ?? string.Empty;
+                return !Regex.IsMatch(activeDetail, @"apply(?:Local|Remote)CallCapabilities|CALL_CAPS_(?:LOCAL|REMOTE)|localProfile|remoteProfile", RegexOptions.IgnoreCase)
+                    && Regex.IsMatch(activeDetail, @"\b(active|connected|answered|established)\b", RegexOptions.IgnoreCase);
+            }
+
+            var detail = row.Detail ?? string.Empty;
+            return (eventKey.Equals("CallState", StringComparison.OrdinalIgnoreCase)
+                    || eventKey.Equals("mPreciseCallState", StringComparison.OrdinalIgnoreCase))
+                && Regex.IsMatch(detail, @"\b(connected|established|answered|in[- ]?call)\b", RegexOptions.IgnoreCase);
+        }
+
+        private static bool IsDiagnosticCallEnd(DiagnosticEventRow row)
+        {
+            var eventKey = (row.EventName ?? string.Empty).Trim();
+            if (eventKey.Equals("CALL_DISCONNECTED", StringComparison.OrdinalIgnoreCase)
+                || eventKey.Equals("CALL_DISCONNECT_NONZERO_CAUSE", StringComparison.OrdinalIgnoreCase)
+                || eventKey.Equals("CALL_END", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            if (Regex.IsMatch(row.Text, @"\b(SIP(?:/2\.0)?\s+(?:BYE|CANCEL)|CC DISCONNECT|RELEASE COMPLETE)\b", RegexOptions.IgnoreCase))
+                return true;
+
+            return (eventKey.Equals("CallState", StringComparison.OrdinalIgnoreCase)
+                    || eventKey.Equals("mPreciseCallState", StringComparison.OrdinalIgnoreCase))
+                && Regex.IsMatch(row.Detail ?? string.Empty, @"\b(idle|disconnected|disconnecting|ended)\b", RegexOptions.IgnoreCase);
         }
 
         private static string ResolveDiagnosticResult(string text, bool connected)
         {
             var upper = text.ToUpperInvariant();
-            if (HasAny(upper, "DROP", "DROPPED", "RADIO FAILURE", "RLF", "CONNECTION LOST"))
+            if (connected && HasAny(upper, "DROP", "DROPPED", "CALL_DISCONNECT_NONZERO_CAUSE", "RADIO FAILURE", "RADIO LINK FAILURE", "RLF", "CONNECTION LOST", "HANDOVER FAILURE", "IMS REGISTRATION LOST", "BEARER FAILURE"))
             {
-                return connected ? "Dropped" : "Not Connected";
+                return "Dropped";
             }
-
-            if (HasAny(upper, "BUSY", "REJECT", "NO ANSWER", "NOT CONNECTED", "FAILED", "FAILURE"))
-            {
-                return "Not Connected";
-            }
-
             return connected ? "Connected" : "Not Connected";
         }
 
@@ -4597,15 +5071,23 @@ public class AvailablePolygonsResponse
             var upper = text.ToUpperInvariant();
             if (HasAny(upper, "BUSY"))
                 return "Busy";
+            if (!string.Equals(result, "Connected", StringComparison.OrdinalIgnoreCase)
+                && Regex.IsMatch(text, @"\bcause\s*[:=]\s*4\b", RegexOptions.IgnoreCase))
+                return "Busy";
             if (HasAny(upper, "RADIO FAILURE"))
                 return "Radio Failure";
             if (HasAny(upper, "REJECT"))
+                return "Rejected";
+            if (!string.Equals(result, "Connected", StringComparison.OrdinalIgnoreCase)
+                && Regex.IsMatch(text, @"\bcause\s*[:=]\s*16\b", RegexOptions.IgnoreCase))
                 return "Rejected";
             if (HasAny(upper, "NO ANSWER"))
                 return "No Answer";
             if (string.Equals(result, "Connected", StringComparison.OrdinalIgnoreCase))
                 return "Completed";
-            return result;
+            if (string.Equals(result, "Dropped", StringComparison.OrdinalIgnoreCase))
+                return "Dropped";
+            return "Call Setup Failure";
         }
 
         private static string ResolveDiagnosticReason(string text)
