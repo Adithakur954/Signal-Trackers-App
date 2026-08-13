@@ -349,12 +349,14 @@ namespace SignalTracker.Controllers
                 if (ok && string.Equals(Path.GetExtension(mainPath), ".zip", StringComparison.OrdinalIgnoreCase))
                 {
                     var scopedUserScope = scope.ServiceProvider.GetRequiredService<UserScopeService>();
+                    var scopedConnectionProvider = scope.ServiceProvider.GetRequiredService<IDbConnectionProvider>();
                     var l3EventController = new L3EventController(
                         scopedDb,
                         httpContextAccessor,
                         _env,
                         redis,
-                        scopedUserScope);
+                        scopedUserScope,
+                        scopedConnectionProvider);
                     await l3EventController.RegisterCompletedUploadAsync(
                         uploadHistoryId,
                         originalFileName,

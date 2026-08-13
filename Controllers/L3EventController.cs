@@ -26,19 +26,22 @@ namespace SignalTracker.Controllers
         private readonly IWebHostEnvironment _env;
         private readonly RedisService _redis;
         private readonly UserScopeService _userScope;
+        private readonly IDbConnectionProvider _connectionProvider;
 
         public L3EventController(
             ApplicationDbContext context,
             IHttpContextAccessor httpContextAccessor,
             IWebHostEnvironment env,
             RedisService redis,
-            UserScopeService userScope)
+            UserScopeService userScope,
+            IDbConnectionProvider connectionProvider)
         {
             _context = context;
             _httpContextAccessor = httpContextAccessor;
             _env = env;
             _redis = redis;
             _userScope = userScope;
+            _connectionProvider = connectionProvider;
         }
 
         [HttpGet("GetDiagnosticCallSummary")]
@@ -509,7 +512,7 @@ namespace SignalTracker.Controllers
 
         private MapViewController CreateMapViewController()
         {
-            return new MapViewController(_context, _httpContextAccessor, _env, _redis, _userScope)
+            return new MapViewController(_context, _httpContextAccessor, _env, _redis, _userScope, _connectionProvider)
             {
                 ControllerContext = ControllerContext,
                 Url = Url

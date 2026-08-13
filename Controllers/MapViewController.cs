@@ -40,6 +40,7 @@ namespace SignalTracker.Controllers
         private readonly CommonFunction cf;
         private readonly RedisService _redis;
         private readonly UserScopeService _userScope;
+        private readonly IDbConnectionProvider _connectionProvider;
         private const int MapViewCacheTtlSeconds = 300;
         private static volatile bool NetworkLogUpdatedAtColumnEnsured;
         private static volatile bool ObsoleteNetworkLogCachesInvalidated;
@@ -60,13 +61,14 @@ namespace SignalTracker.Controllers
             "daterangelog:*"
         };
 
-        public MapViewController(ApplicationDbContext context, IHttpContextAccessor httpContextAccessor, IWebHostEnvironment env, RedisService redis,UserScopeService userScope)
+        public MapViewController(ApplicationDbContext context, IHttpContextAccessor httpContextAccessor, IWebHostEnvironment env, RedisService redis,UserScopeService userScope, IDbConnectionProvider connectionProvider)
         {
             db = context;
             _env = env;
             cf = new CommonFunction(context, httpContextAccessor);
             _redis = redis;
             _userScope = userScope;
+            _connectionProvider = connectionProvider;
         }
 
         private string BuildMapViewCacheKey(string endpoint, params object?[] parts)
@@ -9852,10 +9854,29 @@ public async Task<IActionResult> GetTotalSessionDistance(
     if (cached != null)
         return Ok(cached);
 
-    var totalDistance = await db.tbl_session
-        .AsNoTracking()  
-        .Where(x => ids.Contains((int)x.id) && x.distance != null)
-        .SumAsync(x => (double?)x.distance) ?? 0;
+    double totalDistance = 0;
+    await using (var conn = new MySqlConnection(_connectionProvider.GetConnectionString()))
+    {
+        await conn.OpenAsync(HttpContext.RequestAborted);
+        await using var cmd = conn.CreateCommand();
+        var idParams = ids.Select((_, index) => $"@id{index}").ToArray();
+        cmd.CommandText = $@"
+            SELECT COALESCE(SUM(distance), 0)
+            FROM tbl_session
+            WHERE id IN ({string.Join(", ", idParams)})
+              AND distance IS NOT NULL;";
+
+        for (var i = 0; i < ids.Count; i++)
+        {
+            Add(cmd, idParams[i], ids[i]);
+        }
+
+        var totalDistanceObj = await cmd.ExecuteScalarAsync(HttpContext.RequestAborted);
+        if (totalDistanceObj != null && totalDistanceObj != DBNull.Value)
+        {
+            totalDistance = Convert.ToDouble(totalDistanceObj, CultureInfo.InvariantCulture);
+        }
+    }
 
     var response = new
     {
@@ -12684,11 +12705,13 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             Add(cmd, "@pid", projectId);
 
             var used = new HashSet<int>();
-            await using var reader = await cmd.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
+            await using (var reader = await cmd.ExecuteReaderAsync())
             {
-                if (!reader.IsDBNull(0))
-                    used.Add(Convert.ToInt32(reader.GetValue(0)));
+                while (await reader.ReadAsync())
+                {
+                    if (!reader.IsDBNull(0))
+                        used.Add(Convert.ToInt32(reader.GetValue(0)));
+                }
             }
 
             for (var scenario = 1; scenario <= 6; scenario++)
@@ -12697,7 +12720,23 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                     return scenario;
             }
 
-            throw new InvalidOperationException("please delete one scenario because u can make only 6 scenarios");
+            await using var latestCmd = conn.CreateCommand();
+            latestCmd.Transaction = tx;
+            latestCmd.CommandText = @"
+                SELECT scenario
+                FROM site_prediction_optimized
+                WHERE tbl_project_id = @pid
+                  AND scenario BETWEEN 1 AND 6
+                GROUP BY scenario
+                ORDER BY MAX(COALESCE(updated_at, created_at)) DESC, scenario DESC
+                LIMIT 1;";
+            Add(latestCmd, "@pid", projectId);
+
+            var latestScenario = await latestCmd.ExecuteScalarAsync();
+            if (latestScenario != null && latestScenario != DBNull.Value)
+                return Convert.ToInt32(latestScenario);
+
+            throw new InvalidOperationException("No available scenario slot. Please delete an old scenario or send scenario/scenario_id between 1 and 6.");
         }
 
         private static bool TryGetLongToken(Newtonsoft.Json.Linq.JObject item, string key, out long value)
@@ -12718,7 +12757,22 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
         {
             foreach (var item in items)
             {
-                foreach (var key in new[] { "save_target", "saveTarget", "target_table", "targetTable" })
+                foreach (var key in new[]
+                {
+                    "save_target",
+                    "saveTarget",
+                    "target_table",
+                    "targetTable",
+                    "version",
+                    "data_version",
+                    "dataVersion",
+                    "selected_version",
+                    "selectedVersion",
+                    "prediction_version",
+                    "predictionVersion",
+                    "mode",
+                    "viewMode"
+                })
                 {
                     if (!item.TryGetValue(key, StringComparison.OrdinalIgnoreCase, out var token))
                         continue;
@@ -12729,6 +12783,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
 
                     if (value.Equals("baseline", StringComparison.OrdinalIgnoreCase) ||
                         value.Equals("base", StringComparison.OrdinalIgnoreCase) ||
+                        value.Equals("original", StringComparison.OrdinalIgnoreCase) ||
                         value.Equals("site_prediction", StringComparison.OrdinalIgnoreCase))
                     {
                         return true;
@@ -12935,8 +12990,16 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 return BadRequest(new { Status = 0, Message = "projectId is required" });
 
             var effectiveProviderFilter = string.IsNullOrWhiteSpace(provider) ? cluster : provider;
-            var requestedVersion = (version ?? "combined").Trim().ToLowerInvariant();
+            var requestedVersion = (version ?? "original").Trim().ToLowerInvariant();
             if (requestedVersion == "updated")
+            {
+                requestedVersion = "combined";
+            }
+            if (requestedVersion == "baseline")
+            {
+                requestedVersion = "original";
+            }
+            if (requestedVersion == "optimized" || requestedVersion == "optimised" || requestedVersion == "delta")
             {
                 requestedVersion = "combined";
             }
@@ -12975,7 +13038,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 return BadRequest(new
                 {
                     Status = 0,
-                    Message = "you have to delete one scenario because there is a limit you only 6 scenarios"
+                    Message = "Scenario must be between 1 and 6. Please delete an old scenario before creating another one."
                 });
             }
 
@@ -13510,10 +13573,13 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             [FromQuery] int? band = null,
             [FromQuery] int? pci = null,
             [FromQuery] int limit = 50000,
-            [FromQuery] int offset = 0)
+            [FromQuery] int offset = 0,
+            [FromQuery] int? scenario = null)
         {
             if (projectId <= 0)
                 return BadRequest(new { Status = 0, Message = "projectId is required" });
+            if (scenario.HasValue && (scenario.Value <= 0 || scenario.Value > 6))
+                return BadRequest(new { Status = 0, Message = "scenario must be between 1 and 6" });
 
             var conn = db.Database.GetDbConnection();
             if (conn.State != System.Data.ConnectionState.Open)
@@ -13522,6 +13588,9 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             await EnsureSitePredictionOptimizedTableAsync(conn);
             var sourceColumns = await GetTableColumnSetAsync(conn, "site_prediction");
             var optimizedColumns = await GetTableColumnSetAsync(conn, "site_prediction_optimized");
+            var compareScenarioClause = scenario.HasValue && optimizedColumns.Contains("scenario")
+                ? "AND spo.scenario = @scenario"
+                : string.Empty;
             var optimizedOnlyColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             {
                 "site_prediction_id",
@@ -13593,6 +13662,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                             ) AS rn
                         FROM site_prediction_optimized spo
                         WHERE spo.tbl_project_id = @pid
+                        {compareScenarioClause}
                     ) ranked
                     WHERE rn = 1
                 )
@@ -13624,6 +13694,10 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 ORDER BY COALESCE(sp.id, spo.site_prediction_id, spo.id) DESC;";
 
             Add(cmd, "@pid", projectId);
+            if (scenario.HasValue && optimizedColumns.Contains("scenario"))
+            {
+                Add(cmd, "@scenario", scenario.Value);
+            }
             AddSitePredictionFilterParameters(cmd, site, cell_id, cluster, technology, band, pci);
 
             var allRows = new List<CompareSitePredictionCacheRow>();
@@ -13704,9 +13778,8 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 if (items.Count == 0)
                     return Ok(new { Status = 1, Message = "No items to update" });
 
-                var conn = db.Database.GetDbConnection();
-                if (conn.State != System.Data.ConnectionState.Open)
-                    await conn.OpenAsync();
+                await using var conn = new MySqlConnection(_connectionProvider.GetConnectionString());
+                await conn.OpenAsync(HttpContext.RequestAborted);
 
                 await EnsureSitePredictionNameColumnsAsync(conn);
                 await EnsureSitePredictionOptimizedTableAsync(conn);
