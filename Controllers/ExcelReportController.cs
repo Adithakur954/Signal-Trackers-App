@@ -2077,7 +2077,7 @@ namespace SignalTracker.Controllers
                     {
                         int colStart = b * 9;
                         var plot = plots[p];
-                        titleRow.Cells[colStart] = XlsxCell.Text($"{bandDataList[b].DisplayTitle} - {plot.Header} Plot", 4);
+                        titleRow.Cells[colStart] = XlsxCell.Text($"{bandDataList[b].BandName} - {plot.Header} Plot", 4);
 
                         double heightPts = plot.Size.HeightEmu / 12700.0;
                         if (heightPts > maxRowHeight) maxRowHeight = heightPts;
@@ -2157,7 +2157,6 @@ namespace SignalTracker.Controllers
 
             sheet.Rows.Add(XlsxRow.Title($"Walk Test Excel Report - {projectName}", 22));
             sheet.Rows.Add(XlsxRow.FromText("Generated On", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)));
-            sheet.Rows.Add(XlsxRow.FromText("Total Log Samples", rows.Count.ToString("N0", CultureInfo.InvariantCulture)));
             sheet.Rows.Add(XlsxRow.FromText("Band Sheets", string.Join(", ", rows.Select(x => x.BandSheetName).Distinct().OrderBy(x => x))));
             sheet.Rows.Add(XlsxRow.Blank());
 
