@@ -43,59 +43,64 @@ namespace SignalTracker.Controllers
 
         [HttpGet("GetDiagnosticCallSummary")]
         [HttpGet("GetEventL3CallSummary")]
-        public Task<IActionResult> GetDiagnosticCallSummary(
+        public async Task<IActionResult> GetDiagnosticCallSummary(
             [FromQuery] int? sessionId = null,
             [FromQuery] string? sessionIds = null,
             [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
             [FromQuery] int? uploadId = null,
             [FromQuery] int take = 20000)
         {
-            return CreateMapViewController().GetDiagnosticCallSummary(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
+            var denied = await ValidateDiagnosticAccessAsync(sessionId, sessionIds, sessionIdsAlt, uploadId, HttpContext.RequestAborted);
+            return denied ?? await CreateMapViewController().GetDiagnosticCallSummary(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
         }
 
         [HttpGet("GetDiagnosticTabCounts")]
-        public Task<IActionResult> GetDiagnosticTabCounts(
+        public async Task<IActionResult> GetDiagnosticTabCounts(
             [FromQuery] int? sessionId = null,
             [FromQuery] string? sessionIds = null,
             [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
             [FromQuery] int? uploadId = null,
             [FromQuery] int take = 50000)
         {
-            return CreateMapViewController().GetDiagnosticTabCounts(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
+            var denied = await ValidateDiagnosticAccessAsync(sessionId, sessionIds, sessionIdsAlt, uploadId, HttpContext.RequestAborted);
+            return denied ?? await CreateMapViewController().GetDiagnosticTabCounts(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
         }
 
         [HttpGet("GetDiagnosticExcelRows")]
         [HttpGet("GetDiagnosticMapRows")]
-        public Task<IActionResult> GetDiagnosticExcelRows(
+        public async Task<IActionResult> GetDiagnosticExcelRows(
             [FromQuery] int? sessionId = null,
             [FromQuery] string? sessionIds = null,
             [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
             [FromQuery] int? uploadId = null,
             [FromQuery] int take = 20000)
         {
-            return CreateMapViewController().GetDiagnosticExcelRows(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
+            var denied = await ValidateDiagnosticAccessAsync(sessionId, sessionIds, sessionIdsAlt, uploadId, HttpContext.RequestAborted);
+            return denied ?? await CreateMapViewController().GetDiagnosticExcelRows(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
         }
 
         [HttpGet("GetDiagnosticCallSummaryOnly")]
-        public Task<IActionResult> GetDiagnosticCallSummaryOnly(
+        public async Task<IActionResult> GetDiagnosticCallSummaryOnly(
             [FromQuery] int? sessionId = null,
             [FromQuery] string? sessionIds = null,
             [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
             [FromQuery] int? uploadId = null,
             [FromQuery] int take = 50000)
         {
-            return CreateMapViewController().GetDiagnosticCallSummaryOnly(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
+            var denied = await ValidateDiagnosticAccessAsync(sessionId, sessionIds, sessionIdsAlt, uploadId, HttpContext.RequestAborted);
+            return denied ?? await CreateMapViewController().GetDiagnosticCallSummaryOnly(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
         }
 
         [HttpGet("GetDiagnosticAnalyzerSummary")]
-        public Task<IActionResult> GetDiagnosticAnalyzerSummary(
+        public async Task<IActionResult> GetDiagnosticAnalyzerSummary(
             [FromQuery] int? sessionId = null,
             [FromQuery] string? sessionIds = null,
             [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
             [FromQuery] int? uploadId = null,
             [FromQuery] int take = 50000)
         {
-            return CreateMapViewController().GetDiagnosticAnalyzerSummary(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
+            var denied = await ValidateDiagnosticAccessAsync(sessionId, sessionIds, sessionIdsAlt, uploadId, HttpContext.RequestAborted);
+            return denied ?? await CreateMapViewController().GetDiagnosticAnalyzerSummary(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
         }
 
         [HttpGet("GetDiagnosticFlowModels")]
@@ -105,29 +110,31 @@ namespace SignalTracker.Controllers
         }
 
         [HttpGet("GetDiagnosticL3Messages")]
-        public Task<IActionResult> GetDiagnosticL3Messages(
+        public async Task<IActionResult> GetDiagnosticL3Messages(
             [FromQuery] int? sessionId = null,
             [FromQuery] string? sessionIds = null,
             [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
             [FromQuery] int? uploadId = null,
             [FromQuery] int take = 20000)
         {
-            return CreateMapViewController().GetDiagnosticL3Messages(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
+            var denied = await ValidateDiagnosticAccessAsync(sessionId, sessionIds, sessionIdsAlt, uploadId, HttpContext.RequestAborted);
+            return denied ?? await CreateMapViewController().GetDiagnosticL3Messages(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
         }
 
         [HttpGet("GetDiagnosticEvents")]
-        public Task<IActionResult> GetDiagnosticEvents(
+        public async Task<IActionResult> GetDiagnosticEvents(
             [FromQuery] int? sessionId = null,
             [FromQuery] string? sessionIds = null,
             [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
             [FromQuery] int? uploadId = null,
             [FromQuery] int take = 20000)
         {
-            return CreateMapViewController().GetDiagnosticEvents(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
+            var denied = await ValidateDiagnosticAccessAsync(sessionId, sessionIds, sessionIdsAlt, uploadId, HttpContext.RequestAborted);
+            return denied ?? await CreateMapViewController().GetDiagnosticEvents(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
         }
 
         [HttpGet("GenerateDiagnosticEventAnalyzerPdf")]
-        public Task<IActionResult> GenerateDiagnosticEventAnalyzerPdf(
+        public async Task<IActionResult> GenerateDiagnosticEventAnalyzerPdf(
             [FromQuery] int? sessionId = null,
             [FromQuery] string? sessionIds = null,
             [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
@@ -136,11 +143,12 @@ namespace SignalTracker.Controllers
             [FromQuery] int reportRows = 600,
             [FromQuery] string? sourceFileName = null)
         {
-            return CreateMapViewController().GenerateDiagnosticEventAnalyzerPdf(sessionId, sessionIds, sessionIdsAlt, uploadId, take, reportRows, sourceFileName);
+            var denied = await ValidateDiagnosticAccessAsync(sessionId, sessionIds, sessionIdsAlt, uploadId, HttpContext.RequestAborted);
+            return denied ?? await CreateMapViewController().GenerateDiagnosticEventAnalyzerPdf(sessionId, sessionIds, sessionIdsAlt, uploadId, take, reportRows, sourceFileName);
         }
 
         [HttpGet("GenerateDiagnosticL3SummaryPdf")]
-        public Task<IActionResult> GenerateDiagnosticL3SummaryPdf(
+        public async Task<IActionResult> GenerateDiagnosticL3SummaryPdf(
             [FromQuery] int? sessionId = null,
             [FromQuery] string? sessionIds = null,
             [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
@@ -149,7 +157,8 @@ namespace SignalTracker.Controllers
             [FromQuery] int reportRows = 1000,
             [FromQuery] string? sourceFileName = null)
         {
-            return CreateMapViewController().GenerateDiagnosticL3SummaryPdf(sessionId, sessionIds, sessionIdsAlt, uploadId, take, reportRows, sourceFileName);
+            var denied = await ValidateDiagnosticAccessAsync(sessionId, sessionIds, sessionIdsAlt, uploadId, HttpContext.RequestAborted);
+            return denied ?? await CreateMapViewController().GenerateDiagnosticL3SummaryPdf(sessionId, sessionIds, sessionIdsAlt, uploadId, take, reportRows, sourceFileName);
         }
 
         [HttpPost("AddSessionUpload")]
@@ -371,6 +380,69 @@ namespace SignalTracker.Controllers
                 ?? 0;
         }
 
+        private async Task<IActionResult?> ValidateDiagnosticAccessAsync(
+            int? sessionId,
+            string? sessionIds,
+            string? sessionIdsAlt,
+            int? uploadId,
+            CancellationToken cancellationToken)
+        {
+            if (_userScope.IsSuperAdmin(User))
+                return null;
+
+            var currentUserId = GetCurrentUserId();
+            if (currentUserId <= 0)
+                return Unauthorized(new { status = 0, message = "Unable to resolve logged-in user." });
+
+            var companyId = await _context.tbl_user
+                .AsNoTracking()
+                .Where(user => user.id == currentUserId)
+                .Select(user => user.company_id)
+                .FirstOrDefaultAsync(cancellationToken);
+
+            var requestedSessionIds = ParseSessionIds(sessionIds);
+            requestedSessionIds.UnionWith(ParseSessionIds(sessionIdsAlt));
+            if (sessionId.GetValueOrDefault() > 0)
+                requestedSessionIds.Add(sessionId!.Value);
+
+            if (requestedSessionIds.Count > 0)
+            {
+                var requested = requestedSessionIds.ToList();
+                var authorizedCount = await (
+                    from session in _context.tbl_session.AsNoTracking()
+                    join owner in _context.tbl_user.AsNoTracking() on session.user_id equals owner.id
+                    where session.id.HasValue
+                        && requested.Contains(session.id.Value)
+                        && (companyId.GetValueOrDefault() > 0
+                            ? owner.company_id == companyId
+                            : session.user_id == currentUserId)
+                    select session.id.Value)
+                    .Distinct()
+                    .CountAsync(cancellationToken);
+
+                if (authorizedCount != requested.Count)
+                    return StatusCode(StatusCodes.Status403Forbidden, new { status = 0, message = "One or more requested sessions are not available for this user." });
+            }
+
+            if (uploadId.GetValueOrDefault() > 0)
+            {
+                var authorizedUpload = await (
+                    from upload in _context.Set<tbl_upload_history>().AsNoTracking()
+                    join owner in _context.tbl_user.AsNoTracking() on upload.uploaded_by equals owner.id
+                    where upload.id == uploadId!.Value
+                        && (companyId.GetValueOrDefault() > 0
+                            ? owner.company_id == companyId
+                            : upload.uploaded_by == currentUserId)
+                    select upload.id)
+                    .AnyAsync(cancellationToken);
+
+                if (!authorizedUpload)
+                    return StatusCode(StatusCodes.Status403Forbidden, new { status = 0, message = "The requested upload is not available for this user." });
+            }
+
+            return null;
+        }
+
         private static int? TryParseInt(string? value)
         {
             return int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ? parsed : null;
@@ -566,14 +638,14 @@ namespace SignalTracker.Controllers
             AddParam(cmd, "@sessionId", sessionId);
             AddParam(cmd, "@fileName", Path.GetFileName(fileName));
             AddParam(cmd, "@rowNo", rowNo);
-            AddParam(cmd, "@timestampText", GetDiagnosticValue(row, "timestamp", "time"));
-            AddParam(cmd, "@latitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "latitude", "lat")));
-            AddParam(cmd, "@longitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "longitude", "lon", "lng")));
-            AddParam(cmd, "@category", GetDiagnosticValue(row, "category"));
-            AddParam(cmd, "@eventName", GetDiagnosticValue(row, "event", "event_name", "message"));
-            AddParam(cmd, "@detail", GetDiagnosticValue(row, "detail", "description"));
-            AddParam(cmd, "@source", GetDiagnosticValue(row, "source"));
-            AddParam(cmd, "@severity", GetDiagnosticValue(row, "severity", "level"));
+            AddParam(cmd, "@timestampText", GetDiagnosticValue(row, "timestamp", "time_stamp", "datetime", "date_time", "time", "date"));
+            AddParam(cmd, "@latitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "latitude", "lat", "y")));
+            AddParam(cmd, "@longitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "longitude", "long", "lon", "lng", "x")));
+            AddParam(cmd, "@category", GetDiagnosticValue(row, "category", "event_category", "class", "group"));
+            AddParam(cmd, "@eventName", GetDiagnosticValue(row, "event_name", "eventname", "event_type", "eventtype", "event", "name", "type", "message"));
+            AddParam(cmd, "@detail", GetDiagnosticValue(row, "value", "detail", "details", "description", "info", "message", "data"));
+            AddParam(cmd, "@source", GetDiagnosticValue(row, "source", "origin", "producer"));
+            AddParam(cmd, "@severity", GetDiagnosticValue(row, "severity", "level", "priority"));
             AddParam(cmd, "@rawJson", JsonSerializer.Serialize(row));
             await cmd.ExecuteNonQueryAsync(cancellationToken);
         }
@@ -603,14 +675,14 @@ namespace SignalTracker.Controllers
             AddParam(cmd, "@fileName", Path.GetFileName(fileName));
             AddParam(cmd, "@sourceFileType", sourceFileType);
             AddParam(cmd, "@rowNo", rowNo);
-            AddParam(cmd, "@timestampText", GetDiagnosticValue(row, "timestamp", "time"));
-            AddParam(cmd, "@latitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "latitude", "lat")));
-            AddParam(cmd, "@longitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "longitude", "lon", "lng")));
-            AddParam(cmd, "@category", GetDiagnosticValue(row, "category"));
-            AddParam(cmd, "@message", GetDiagnosticValue(row, "message", "event", "message_name"));
-            AddParam(cmd, "@detail", GetDiagnosticValue(row, "detail", "description"));
-            AddParam(cmd, "@source", GetDiagnosticValue(row, "source"));
-            AddParam(cmd, "@severity", GetDiagnosticValue(row, "severity", "level"));
+            AddParam(cmd, "@timestampText", GetDiagnosticValue(row, "timestamp", "time_stamp", "datetime", "date_time", "time", "date"));
+            AddParam(cmd, "@latitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "latitude", "lat", "y")));
+            AddParam(cmd, "@longitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "longitude", "long", "lon", "lng", "x")));
+            AddParam(cmd, "@category", GetDiagnosticValue(row, "category", "layer", "protocol", "stack", "channel"));
+            AddParam(cmd, "@message", GetDiagnosticValue(row, "message_name", "messagename", "msg_name", "message_type", "messagetype", "message", "msg", "name", "event"));
+            AddParam(cmd, "@detail", GetDiagnosticValue(row, "decode", "decoded", "decoded_text", "detail", "details", "text", "content", "info", "description"));
+            AddParam(cmd, "@source", GetDiagnosticValue(row, "source", "origin", "producer"));
+            AddParam(cmd, "@severity", GetDiagnosticValue(row, "severity", "level", "priority"));
             AddParam(cmd, "@rawText", rawText);
             AddParam(cmd, "@rawJson", JsonSerializer.Serialize(row));
             await cmd.ExecuteNonQueryAsync(cancellationToken);
