@@ -226,22 +226,30 @@ namespace SignalTracker.Controllers
 
                 var insertedL3Rows = 0;
                 var insertedEventRows = 0;
-                long? l3HistoryId = null;
-                long? eventHistoryId = null;
 
                 if (hasL3 && l3File != null)
                 {
                     var savedPath = await SaveUploadTempFileAsync(l3File, tempFiles, cancellationToken);
                     insertedL3Rows = await ImportL3FileAsync(sessionId, history.id, savedPath, l3File.FileName, cancellationToken);
-                    l3HistoryId = await InsertL3HistoryAsync(projectId, sessionId, history.id, l3File, insertedL3Rows, cancellationToken);
                 }
 
                 if (hasEvent && eventFile != null)
                 {
                     var savedPath = await SaveUploadTempFileAsync(eventFile, tempFiles, cancellationToken);
                     insertedEventRows = await ImportEventFileAsync(sessionId, history.id, savedPath, eventFile.FileName, cancellationToken);
-                    eventHistoryId = await InsertEventHistoryAsync(projectId, sessionId, history.id, eventFile, insertedEventRows, cancellationToken);
                 }
+
+                var l3EventHistoryId = await InsertL3EventHistoryAsync(
+                    projectId,
+                    sessionId,
+                    history.id,
+                    hasL3,
+                    hasEvent,
+                    l3File,
+                    eventFile,
+                    insertedL3Rows,
+                    insertedEventRows,
+                    cancellationToken);
 
                 await UpdateSessionL3EventFlagsAsync(sessionId, hasL3, hasEvent, cancellationToken);
                 await UpdateProjectForL3EventSessionAsync(projectId, sessionId, hasL3, hasEvent, cancellationToken);
@@ -260,8 +268,7 @@ namespace SignalTracker.Controllers
                     history = new
                     {
                         uploadHistoryId = history.id,
-                        l3HistoryId,
-                        eventHistoryId
+                        l3EventHistoryId
                     },
                     rows = new
                     {
@@ -289,29 +296,17 @@ namespace SignalTracker.Controllers
             }
         }
 
-        [HttpGet("GetL3History")]
-        public async Task<IActionResult> GetL3History(
+        [HttpGet("GetL3EventHistory")]
+        public async Task<IActionResult> GetL3EventHistory(
             [FromQuery] int? projectId = null,
             [FromQuery] int? sessionId = null,
             [FromQuery] string? sessionIds = null,
+            [FromQuery] string? dataType = null,
             [FromQuery] int take = 100,
             CancellationToken cancellationToken = default)
         {
             await EnsureL3EventSchemaAsync(cancellationToken);
-            var rows = await GetDiagnosticUploadHistoryAsync("tbl_l3_history", projectId, sessionId, sessionIds, Math.Clamp(take, 1, 500), cancellationToken);
-            return Ok(new { status = 1, data = rows });
-        }
-
-        [HttpGet("GetEventHistory")]
-        public async Task<IActionResult> GetEventHistory(
-            [FromQuery] int? projectId = null,
-            [FromQuery] int? sessionId = null,
-            [FromQuery] string? sessionIds = null,
-            [FromQuery] int take = 100,
-            CancellationToken cancellationToken = default)
-        {
-            await EnsureL3EventSchemaAsync(cancellationToken);
-            var rows = await GetDiagnosticUploadHistoryAsync("tbl_event_history", projectId, sessionId, sessionIds, Math.Clamp(take, 1, 500), cancellationToken);
+            var rows = await GetL3EventUploadHistoryAsync(projectId, sessionId, sessionIds, dataType, Math.Clamp(take, 1, 500), cancellationToken);
             return Ok(new { status = 1, data = rows });
         }
 
@@ -565,65 +560,62 @@ namespace SignalTracker.Controllers
                 ("@uploadId", uploadId));
         }
 
-        private Task<long> InsertL3HistoryAsync(int projectId, int sessionId, int uploadId, IFormFile file, int rowsImported, CancellationToken cancellationToken)
-        {
-            return InsertDiagnosticHistoryAsync("tbl_l3_history", projectId, sessionId, uploadId, file, "L3", rowsImported, cancellationToken);
-        }
-
-        private Task<long> InsertEventHistoryAsync(int projectId, int sessionId, int uploadId, IFormFile file, int rowsImported, CancellationToken cancellationToken)
-        {
-            return InsertDiagnosticHistoryAsync("tbl_event_history", projectId, sessionId, uploadId, file, "Event", rowsImported, cancellationToken);
-        }
-
-        private async Task<long> InsertDiagnosticHistoryAsync(
-            string tableName,
+        private async Task<long> InsertL3EventHistoryAsync(
             int projectId,
             int sessionId,
             int uploadId,
-            IFormFile file,
-            string fileType,
-            int rowsImported,
+            bool hasL3,
+            bool hasEvent,
+            IFormFile? l3File,
+            IFormFile? eventFile,
+            int l3RowsImported,
+            int eventRowsImported,
             CancellationToken cancellationToken)
         {
-            var safeFileName = Path.GetFileName(file.FileName);
-            var insertedId = await ExecuteScalarAsync($@"
-                INSERT INTO `{tableName}`
-                    (project_id, session_id, tbl_upload_id, original_file_name, file_name, file_type,
-                     file_size, rows_imported, uploaded_by, uploaded_on, status, remarks)
+            var l3FileName = l3File == null ? null : Path.GetFileName(l3File.FileName);
+            var eventFileName = eventFile == null ? null : Path.GetFileName(eventFile.FileName);
+            var dataType = hasL3 && hasEvent ? "L3Event" : hasL3 ? "L3" : "Event";
+            var totalFileSize = (l3File?.Length ?? 0) + (eventFile?.Length ?? 0);
+            var originalFileName = string.Join(", ", new[] { l3FileName, eventFileName }.Where(x => !string.IsNullOrWhiteSpace(x)));
+
+            var insertedId = await ExecuteScalarAsync(@"
+                INSERT INTO tbl_l3_event_history
+                    (project_id, session_id, tbl_upload_id, data_type, has_l3, has_event,
+                     original_file_name, l3_file_name, event_file_name, total_file_size,
+                     l3_rows_imported, event_rows_imported, uploaded_by, uploaded_on, status, remarks)
                 VALUES
-                    (@projectId, @sessionId, @uploadId, @originalFileName, @fileName, @fileType,
-                     @fileSize, @rowsImported, @uploadedBy, @uploadedOn, 1, @remarks);
+                    (@projectId, @sessionId, @uploadId, @dataType, @hasL3, @hasEvent,
+                     @originalFileName, @l3FileName, @eventFileName, @totalFileSize,
+                     @l3RowsImported, @eventRowsImported, @uploadedBy, @uploadedOn, 1, @remarks);
                 SELECT LAST_INSERT_ID();",
                 cancellationToken,
                 ("@projectId", projectId),
                 ("@sessionId", sessionId),
                 ("@uploadId", uploadId),
-                ("@originalFileName", safeFileName),
-                ("@fileName", safeFileName),
-                ("@fileType", fileType),
-                ("@fileSize", file.Length),
-                ("@rowsImported", rowsImported),
+                ("@dataType", dataType),
+                ("@hasL3", hasL3),
+                ("@hasEvent", hasEvent),
+                ("@originalFileName", originalFileName),
+                ("@l3FileName", l3FileName),
+                ("@eventFileName", eventFileName),
+                ("@totalFileSize", totalFileSize),
+                ("@l3RowsImported", l3RowsImported),
+                ("@eventRowsImported", eventRowsImported),
                 ("@uploadedBy", GetCurrentUserId()),
                 ("@uploadedOn", DateTime.Now),
-                ("@remarks", $"{fileType} Add Session upload"));
+                ("@remarks", $"{dataType} Add Session upload"));
 
             return Convert.ToInt64(insertedId, CultureInfo.InvariantCulture);
         }
 
-        private async Task<List<object>> GetDiagnosticUploadHistoryAsync(
-            string tableName,
+        private async Task<List<object>> GetL3EventUploadHistoryAsync(
             int? projectId,
             int? sessionId,
             string? sessionIds,
+            string? dataType,
             int take,
             CancellationToken cancellationToken)
         {
-            if (!string.Equals(tableName, "tbl_l3_history", StringComparison.OrdinalIgnoreCase) &&
-                !string.Equals(tableName, "tbl_event_history", StringComparison.OrdinalIgnoreCase))
-            {
-                throw new ArgumentException("Invalid history table.", nameof(tableName));
-            }
-
             var parsedSessionIds = ParseSessionIds(sessionIds);
             if (sessionId.HasValue && sessionId.Value > 0)
                 parsedSessionIds.Add(sessionId.Value);
@@ -641,6 +633,17 @@ namespace SignalTracker.Controllers
                 AddParam(cmd, "@projectId", projectId.Value);
             }
 
+            var normalizedDataType = Regex.Replace(dataType ?? string.Empty, @"[\s_+\-/]+", string.Empty).ToLowerInvariant();
+            if (normalizedDataType is "l3" or "event" or "events" or "l3event" or "eventl3" or "both")
+            {
+                if (normalizedDataType == "l3")
+                    where.Add("h.has_l3 = TRUE AND h.has_event = FALSE");
+                else if (normalizedDataType is "event" or "events")
+                    where.Add("h.has_l3 = FALSE AND h.has_event = TRUE");
+                else
+                    where.Add("h.has_l3 = TRUE AND h.has_event = TRUE");
+            }
+
             if (parsedSessionIds.Count > 0)
             {
                 var names = new List<string>();
@@ -656,10 +659,11 @@ namespace SignalTracker.Controllers
 
             AddParam(cmd, "@take", take);
             cmd.CommandText = $@"
-                SELECT h.id, h.project_id, h.session_id, h.tbl_upload_id, h.original_file_name,
-                       h.file_name, h.file_type, h.file_size, h.rows_imported, h.uploaded_by,
-                       h.uploaded_on, h.status, h.remarks, u.name AS uploaded_by_name
-                FROM `{tableName}` h
+                SELECT h.id, h.project_id, h.session_id, h.tbl_upload_id, h.data_type, h.has_l3, h.has_event,
+                       h.original_file_name, h.l3_file_name, h.event_file_name, h.total_file_size,
+                       h.l3_rows_imported, h.event_rows_imported, h.uploaded_by, h.uploaded_on,
+                       h.status, h.remarks, u.name AS uploaded_by_name
+                FROM tbl_l3_event_history h
                 LEFT JOIN tbl_user u ON u.id = h.uploaded_by
                 {(where.Count > 0 ? "WHERE " + string.Join(" AND ", where) : string.Empty)}
                 ORDER BY h.id DESC
@@ -675,11 +679,15 @@ namespace SignalTracker.Controllers
                     projectId = ReadDb<int>(reader, "project_id"),
                     sessionId = ReadDb<int>(reader, "session_id"),
                     uploadHistoryId = ReadDb<int>(reader, "tbl_upload_id"),
+                    dataType = ReadDb<string>(reader, "data_type"),
+                    l3 = ReadDb<bool>(reader, "has_l3"),
+                    @event = ReadDb<bool>(reader, "has_event"),
                     originalFileName = ReadDb<string>(reader, "original_file_name"),
-                    fileName = ReadDb<string>(reader, "file_name"),
-                    fileType = ReadDb<string>(reader, "file_type"),
-                    fileSize = ReadDb<long>(reader, "file_size"),
-                    rowsImported = ReadDb<int>(reader, "rows_imported"),
+                    l3FileName = ReadDb<string>(reader, "l3_file_name"),
+                    eventFileName = ReadDb<string>(reader, "event_file_name"),
+                    totalFileSize = ReadDb<long>(reader, "total_file_size"),
+                    l3RowsImported = ReadDb<int>(reader, "l3_rows_imported"),
+                    eventRowsImported = ReadDb<int>(reader, "event_rows_imported"),
                     uploadedBy = ReadDb<int>(reader, "uploaded_by"),
                     uploadedByName = ReadDb<string>(reader, "uploaded_by_name"),
                     uploadedOn = ReadDb<DateTime>(reader, "uploaded_on"),
@@ -752,43 +760,28 @@ namespace SignalTracker.Controllers
         private async Task EnsureDiagnosticHistoryTablesAsync(CancellationToken cancellationToken)
         {
             await ExecuteNonQueryAsync(@"
-                CREATE TABLE IF NOT EXISTS tbl_l3_history (
+                CREATE TABLE IF NOT EXISTS tbl_l3_event_history (
                     id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
                     project_id INT NOT NULL,
                     session_id INT NOT NULL,
                     tbl_upload_id INT NOT NULL,
+                    data_type VARCHAR(32) NOT NULL,
+                    has_l3 BOOLEAN NOT NULL DEFAULT FALSE,
+                    has_event BOOLEAN NOT NULL DEFAULT FALSE,
                     original_file_name VARCHAR(500) NOT NULL,
-                    file_name VARCHAR(500) NOT NULL,
-                    file_type VARCHAR(32) NOT NULL DEFAULT 'L3',
-                    file_size BIGINT NOT NULL DEFAULT 0,
-                    rows_imported INT NOT NULL DEFAULT 0,
+                    l3_file_name VARCHAR(500) NULL,
+                    event_file_name VARCHAR(500) NULL,
+                    total_file_size BIGINT NOT NULL DEFAULT 0,
+                    l3_rows_imported INT NOT NULL DEFAULT 0,
+                    event_rows_imported INT NOT NULL DEFAULT 0,
                     uploaded_by INT NOT NULL,
                     uploaded_on DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     status SMALLINT NOT NULL DEFAULT 1,
                     remarks VARCHAR(500) NULL,
-                    INDEX ix_tbl_l3_history_project (project_id),
-                    INDEX ix_tbl_l3_history_session (session_id),
-                    INDEX ix_tbl_l3_history_upload (tbl_upload_id)
-                );", cancellationToken);
-
-            await ExecuteNonQueryAsync(@"
-                CREATE TABLE IF NOT EXISTS tbl_event_history (
-                    id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-                    project_id INT NOT NULL,
-                    session_id INT NOT NULL,
-                    tbl_upload_id INT NOT NULL,
-                    original_file_name VARCHAR(500) NOT NULL,
-                    file_name VARCHAR(500) NOT NULL,
-                    file_type VARCHAR(32) NOT NULL DEFAULT 'Event',
-                    file_size BIGINT NOT NULL DEFAULT 0,
-                    rows_imported INT NOT NULL DEFAULT 0,
-                    uploaded_by INT NOT NULL,
-                    uploaded_on DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    status SMALLINT NOT NULL DEFAULT 1,
-                    remarks VARCHAR(500) NULL,
-                    INDEX ix_tbl_event_history_project (project_id),
-                    INDEX ix_tbl_event_history_session (session_id),
-                    INDEX ix_tbl_event_history_upload (tbl_upload_id)
+                    INDEX ix_tbl_l3_event_history_project (project_id),
+                    INDEX ix_tbl_l3_event_history_session (session_id),
+                    INDEX ix_tbl_l3_event_history_upload (tbl_upload_id),
+                    INDEX ix_tbl_l3_event_history_type (data_type)
                 );", cancellationToken);
         }
 
