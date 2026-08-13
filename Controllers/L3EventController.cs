@@ -1,0 +1,732 @@
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
+using MySqlConnector;
+using CsvHelper;
+using CsvHelper.Configuration;
+using SignalTracker.Helper;
+using SignalTracker.Models;
+using SignalTracker.Services;
+using System.Data;
+using System.Globalization;
+using System.Text.Json;
+using System.Text.RegularExpressions;
+
+namespace SignalTracker.Controllers
+{
+    [Route("api/[controller]")]
+    [ApiController]
+    [Authorize]
+    public class L3EventController : BaseController
+    {
+        private readonly ApplicationDbContext _context;
+        private readonly IHttpContextAccessor _httpContextAccessor;
+        private readonly IWebHostEnvironment _env;
+        private readonly RedisService _redis;
+        private readonly UserScopeService _userScope;
+
+        public L3EventController(
+            ApplicationDbContext context,
+            IHttpContextAccessor httpContextAccessor,
+            IWebHostEnvironment env,
+            RedisService redis,
+            UserScopeService userScope)
+        {
+            _context = context;
+            _httpContextAccessor = httpContextAccessor;
+            _env = env;
+            _redis = redis;
+            _userScope = userScope;
+        }
+
+        [HttpGet("GetDiagnosticCallSummary")]
+        [HttpGet("GetEventL3CallSummary")]
+        public Task<IActionResult> GetDiagnosticCallSummary(
+            [FromQuery] int? sessionId = null,
+            [FromQuery] string? sessionIds = null,
+            [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
+            [FromQuery] int? uploadId = null,
+            [FromQuery] int take = 20000)
+        {
+            return CreateMapViewController().GetDiagnosticCallSummary(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
+        }
+
+        [HttpGet("GetDiagnosticTabCounts")]
+        public Task<IActionResult> GetDiagnosticTabCounts(
+            [FromQuery] int? sessionId = null,
+            [FromQuery] string? sessionIds = null,
+            [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
+            [FromQuery] int? uploadId = null,
+            [FromQuery] int take = 50000)
+        {
+            return CreateMapViewController().GetDiagnosticTabCounts(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
+        }
+
+        [HttpGet("GetDiagnosticExcelRows")]
+        [HttpGet("GetDiagnosticMapRows")]
+        public Task<IActionResult> GetDiagnosticExcelRows(
+            [FromQuery] int? sessionId = null,
+            [FromQuery] string? sessionIds = null,
+            [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
+            [FromQuery] int? uploadId = null,
+            [FromQuery] int take = 20000)
+        {
+            return CreateMapViewController().GetDiagnosticExcelRows(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
+        }
+
+        [HttpGet("GetDiagnosticCallSummaryOnly")]
+        public Task<IActionResult> GetDiagnosticCallSummaryOnly(
+            [FromQuery] int? sessionId = null,
+            [FromQuery] string? sessionIds = null,
+            [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
+            [FromQuery] int? uploadId = null,
+            [FromQuery] int take = 50000)
+        {
+            return CreateMapViewController().GetDiagnosticCallSummaryOnly(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
+        }
+
+        [HttpGet("GetDiagnosticAnalyzerSummary")]
+        public Task<IActionResult> GetDiagnosticAnalyzerSummary(
+            [FromQuery] int? sessionId = null,
+            [FromQuery] string? sessionIds = null,
+            [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
+            [FromQuery] int? uploadId = null,
+            [FromQuery] int take = 50000)
+        {
+            return CreateMapViewController().GetDiagnosticAnalyzerSummary(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
+        }
+
+        [HttpGet("GetDiagnosticFlowModels")]
+        public IActionResult GetDiagnosticFlowModels()
+        {
+            return CreateMapViewController().GetDiagnosticFlowModels();
+        }
+
+        [HttpGet("GetDiagnosticL3Messages")]
+        public Task<IActionResult> GetDiagnosticL3Messages(
+            [FromQuery] int? sessionId = null,
+            [FromQuery] string? sessionIds = null,
+            [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
+            [FromQuery] int? uploadId = null,
+            [FromQuery] int take = 20000)
+        {
+            return CreateMapViewController().GetDiagnosticL3Messages(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
+        }
+
+        [HttpGet("GetDiagnosticEvents")]
+        public Task<IActionResult> GetDiagnosticEvents(
+            [FromQuery] int? sessionId = null,
+            [FromQuery] string? sessionIds = null,
+            [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
+            [FromQuery] int? uploadId = null,
+            [FromQuery] int take = 20000)
+        {
+            return CreateMapViewController().GetDiagnosticEvents(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
+        }
+
+        [HttpGet("GenerateDiagnosticEventAnalyzerPdf")]
+        public Task<IActionResult> GenerateDiagnosticEventAnalyzerPdf(
+            [FromQuery] int? sessionId = null,
+            [FromQuery] string? sessionIds = null,
+            [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
+            [FromQuery] int? uploadId = null,
+            [FromQuery] int take = 50000,
+            [FromQuery] int reportRows = 600,
+            [FromQuery] string? sourceFileName = null)
+        {
+            return CreateMapViewController().GenerateDiagnosticEventAnalyzerPdf(sessionId, sessionIds, sessionIdsAlt, uploadId, take, reportRows, sourceFileName);
+        }
+
+        [HttpGet("GenerateDiagnosticL3SummaryPdf")]
+        public Task<IActionResult> GenerateDiagnosticL3SummaryPdf(
+            [FromQuery] int? sessionId = null,
+            [FromQuery] string? sessionIds = null,
+            [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
+            [FromQuery] int? uploadId = null,
+            [FromQuery] int take = 50000,
+            [FromQuery] int reportRows = 1000,
+            [FromQuery] string? sourceFileName = null)
+        {
+            return CreateMapViewController().GenerateDiagnosticL3SummaryPdf(sessionId, sessionIds, sessionIdsAlt, uploadId, take, reportRows, sourceFileName);
+        }
+
+        [HttpPost("AddSessionUpload")]
+        [RequestSizeLimit(512L * 1024 * 1024)]
+        [RequestFormLimits(MultipartBodyLengthLimit = 512L * 1024 * 1024)]
+        public async Task<IActionResult> AddSessionUpload(
+            [FromForm] int projectId,
+            [FromForm] string dataType,
+            [FromForm] IFormFile? l3File = null,
+            [FromForm] IFormFile? eventFile = null,
+            CancellationToken cancellationToken = default)
+        {
+            if (projectId <= 0)
+                return BadRequest(new { status = 0, message = "projectId is required." });
+
+            var normalizedType = NormalizeUploadDataType(dataType);
+            if (normalizedType == null)
+                return BadRequest(new { status = 0, message = "dataType must be L3, Event, or L3Event." });
+
+            var hasL3 = normalizedType.Value.HasL3;
+            var hasEvent = normalizedType.Value.HasEvent;
+            if (hasL3 && (l3File == null || l3File.Length == 0))
+                return BadRequest(new { status = 0, message = "L3 file is required for this upload type." });
+            if (hasEvent && (eventFile == null || eventFile.Length == 0))
+                return BadRequest(new { status = 0, message = "Event file is required for this upload type." });
+
+            var userId = GetCurrentUserId();
+            if (userId <= 0)
+                return Unauthorized(new { status = 0, message = "Unable to resolve logged-in user." });
+
+            await EnsureL3EventSchemaAsync(cancellationToken);
+
+            var projectInfo = await GetAuthorizedProjectInfoAsync(projectId, userId, cancellationToken);
+            if (projectInfo == null)
+                return NotFound(new { status = 0, message = "Project was not found or is not available for this user." });
+
+            var tempFiles = new List<string>();
+            await using var tx = await _context.Database.BeginTransactionAsync(cancellationToken);
+            try
+            {
+                var fileNames = new[]
+                {
+                    hasL3 ? l3File?.FileName : null,
+                    hasEvent ? eventFile?.FileName : null
+                }.Where(x => !string.IsNullOrWhiteSpace(x)).ToList();
+
+                var history = new tbl_upload_history
+                {
+                    uploaded_on = DateTime.Now,
+                    file_type = 1,
+                    file_name = string.Join(", ", fileNames),
+                    uploaded_by = userId,
+                    remarks = $"L3/Event Add Session upload for project {projectId}",
+                    status = 1,
+                    polygon_file = string.Empty
+                };
+                _context.Set<tbl_upload_history>().Add(history);
+                await _context.SaveChangesAsync(cancellationToken);
+
+                var session = new tbl_session
+                {
+                    user_id = userId,
+                    type = "l3_event",
+                    notes = $"Add Sessions: {(hasL3 && hasEvent ? "L3 + Event" : hasL3 ? "L3" : "Event")}",
+                    uploaded_on = DateTime.Now,
+                    tbl_upload_id = history.id.ToString(CultureInfo.InvariantCulture)
+                };
+                _context.tbl_session.Add(session);
+                await _context.SaveChangesAsync(cancellationToken);
+
+                var sessionId = session.id ?? 0;
+                if (sessionId <= 0)
+                    throw new InvalidOperationException("Session creation failed.");
+
+                var insertedL3Rows = 0;
+                var insertedEventRows = 0;
+
+                if (hasL3 && l3File != null)
+                {
+                    var savedPath = await SaveUploadTempFileAsync(l3File, tempFiles, cancellationToken);
+                    insertedL3Rows = await ImportL3FileAsync(sessionId, history.id, savedPath, l3File.FileName, cancellationToken);
+                }
+
+                if (hasEvent && eventFile != null)
+                {
+                    var savedPath = await SaveUploadTempFileAsync(eventFile, tempFiles, cancellationToken);
+                    insertedEventRows = await ImportEventFileAsync(sessionId, history.id, savedPath, eventFile.FileName, cancellationToken);
+                }
+
+                await UpdateSessionL3EventFlagsAsync(sessionId, hasL3, hasEvent, cancellationToken);
+                await UpdateProjectForL3EventSessionAsync(projectId, sessionId, hasL3, hasEvent, cancellationToken);
+
+                await tx.CommitAsync(cancellationToken);
+
+                return Ok(new
+                {
+                    status = 1,
+                    message = "L3/Event session created successfully.",
+                    projectId,
+                    sessionId,
+                    uploadId = history.id,
+                    l3 = hasL3,
+                    @event = hasEvent,
+                    rows = new
+                    {
+                        l3 = insertedL3Rows,
+                        events = insertedEventRows
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                await tx.RollbackAsync(cancellationToken);
+                return StatusCode(500, new
+                {
+                    status = 0,
+                    message = "An error occurred while creating the L3/Event session.",
+                    details = SafeException.Get(ex)
+                });
+            }
+            finally
+            {
+                foreach (var tempFile in tempFiles)
+                {
+                    TryDeleteFile(tempFile);
+                }
+            }
+        }
+
+        private MapViewController CreateMapViewController()
+        {
+            return new MapViewController(_context, _httpContextAccessor, _env, _redis, _userScope)
+            {
+                ControllerContext = ControllerContext,
+                Url = Url
+            };
+        }
+
+        private int GetCurrentUserId()
+        {
+            return TryParseInt(User?.FindFirst("UserId")?.Value)
+                ?? TryParseInt(User?.FindFirst("user_id")?.Value)
+                ?? HttpContext.Session.GetInt32("UserID")
+                ?? TryParseInt(HttpContext.Session.GetString("UserID"))
+                ?? 0;
+        }
+
+        private static int? TryParseInt(string? value)
+        {
+            return int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ? parsed : null;
+        }
+
+        private static (bool HasL3, bool HasEvent)? NormalizeUploadDataType(string? dataType)
+        {
+            var value = Regex.Replace(dataType ?? string.Empty, @"[\s_+\-/]+", string.Empty).ToLowerInvariant();
+            return value switch
+            {
+                "l3" => (true, false),
+                "event" or "events" => (false, true),
+                "l3event" or "eventl3" or "both" => (true, true),
+                _ => null
+            };
+        }
+
+        private async Task<ProjectInfo?> GetAuthorizedProjectInfoAsync(int projectId, int userId, CancellationToken cancellationToken)
+        {
+            var isSuperAdmin = _userScope.IsSuperAdmin(User);
+            var userCompanyId = await _context.tbl_user
+                .AsNoTracking()
+                .Where(x => x.id == userId)
+                .Select(x => x.company_id)
+                .FirstOrDefaultAsync(cancellationToken);
+
+            var project = await _context.tbl_project
+                .AsNoTracking()
+                .Where(x => x.id == projectId)
+                .Select(x => new ProjectInfo(x.id, x.company_id, x.ref_session_id))
+                .FirstOrDefaultAsync(cancellationToken);
+
+            if (project == null)
+                return null;
+
+            if (isSuperAdmin || userCompanyId == 0 || project.CompanyId == userCompanyId)
+                return project;
+
+            return null;
+        }
+
+        private async Task<string> SaveUploadTempFileAsync(IFormFile file, List<string> tempFiles, CancellationToken cancellationToken)
+        {
+            var extension = Path.GetExtension(file.FileName);
+            if (string.IsNullOrWhiteSpace(extension) || !AllowedL3EventExtensions.Contains(extension))
+                throw new InvalidOperationException($"Unsupported file extension '{extension}'. Allowed: .csv, .txt.");
+
+            var root = Path.Combine(Path.GetTempPath(), "signaltracker_l3_event_upload");
+            Directory.CreateDirectory(root);
+            var path = Path.Combine(root, $"{Guid.NewGuid():N}{extension}");
+            await using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1024 * 128, useAsync: true);
+            await file.CopyToAsync(stream, cancellationToken);
+            tempFiles.Add(path);
+            return path;
+        }
+
+        private async Task<int> ImportEventFileAsync(int sessionId, int uploadId, string filePath, string originalFileName, CancellationToken cancellationToken)
+        {
+            var inserted = 0;
+            using var reader = new StreamReader(filePath);
+            using var csv = new CsvReader(reader, new CsvConfiguration(CultureInfo.InvariantCulture)
+            {
+                BadDataFound = null,
+                MissingFieldFound = null,
+                HeaderValidated = null,
+                DetectColumnCountChanges = false
+            });
+
+            var rowNo = 0;
+            await foreach (var record in csv.GetRecordsAsync<dynamic>(cancellationToken))
+            {
+                rowNo++;
+                var row = NormalizeDiagnosticRow((IDictionary<string, object?>)record);
+                await InsertEventDiagnosticRowAsync(sessionId, uploadId, originalFileName, rowNo, row, cancellationToken);
+                inserted++;
+            }
+
+            return inserted;
+        }
+
+        private async Task<int> ImportL3FileAsync(int sessionId, int uploadId, string filePath, string originalFileName, CancellationToken cancellationToken)
+        {
+            var inserted = 0;
+            if (string.Equals(Path.GetExtension(filePath), ".txt", StringComparison.OrdinalIgnoreCase))
+            {
+                foreach (var row in ReadL3MessageTextRecords(filePath))
+                {
+                    await InsertL3DiagnosticRowAsync(sessionId, uploadId, originalFileName, row.RowNo, "txt", row.Values, row.RawText, cancellationToken);
+                    inserted++;
+                }
+
+                return inserted;
+            }
+
+            using var reader = new StreamReader(filePath);
+            using var csv = new CsvReader(reader, new CsvConfiguration(CultureInfo.InvariantCulture)
+            {
+                BadDataFound = null,
+                MissingFieldFound = null,
+                HeaderValidated = null,
+                DetectColumnCountChanges = false
+            });
+
+            var rowNo = 0;
+            await foreach (var record in csv.GetRecordsAsync<dynamic>(cancellationToken))
+            {
+                rowNo++;
+                var row = NormalizeDiagnosticRow((IDictionary<string, object?>)record);
+                await InsertL3DiagnosticRowAsync(sessionId, uploadId, originalFileName, rowNo, "csv", row, null, cancellationToken);
+                inserted++;
+            }
+
+            return inserted;
+        }
+
+        private async Task InsertEventDiagnosticRowAsync(
+            int sessionId,
+            int uploadId,
+            string fileName,
+            int rowNo,
+            Dictionary<string, object?> row,
+            CancellationToken cancellationToken)
+        {
+            var conn = _context.Database.GetDbConnection();
+            await using var cmd = conn.CreateCommand();
+            cmd.Transaction = _context.Database.CurrentTransaction?.GetDbTransaction();
+            cmd.CommandText = @"
+                INSERT INTO tbl_event_log
+                    (tbl_upload_id, session_id, source_file_name, row_no, timestamp_text, latitude, longitude,
+                     category, event_name, detail, source, severity, raw_json)
+                VALUES
+                    (@uploadId, @sessionId, @fileName, @rowNo, @timestampText, @latitude, @longitude,
+                     @category, @eventName, @detail, @source, @severity, @rawJson);";
+            AddParam(cmd, "@uploadId", uploadId);
+            AddParam(cmd, "@sessionId", sessionId);
+            AddParam(cmd, "@fileName", Path.GetFileName(fileName));
+            AddParam(cmd, "@rowNo", rowNo);
+            AddParam(cmd, "@timestampText", GetDiagnosticValue(row, "timestamp", "time"));
+            AddParam(cmd, "@latitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "latitude", "lat")));
+            AddParam(cmd, "@longitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "longitude", "lon", "lng")));
+            AddParam(cmd, "@category", GetDiagnosticValue(row, "category"));
+            AddParam(cmd, "@eventName", GetDiagnosticValue(row, "event", "event_name", "message"));
+            AddParam(cmd, "@detail", GetDiagnosticValue(row, "detail", "description"));
+            AddParam(cmd, "@source", GetDiagnosticValue(row, "source"));
+            AddParam(cmd, "@severity", GetDiagnosticValue(row, "severity", "level"));
+            AddParam(cmd, "@rawJson", JsonSerializer.Serialize(row));
+            await cmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        private async Task InsertL3DiagnosticRowAsync(
+            int sessionId,
+            int uploadId,
+            string fileName,
+            int rowNo,
+            string sourceFileType,
+            Dictionary<string, object?> row,
+            string? rawText,
+            CancellationToken cancellationToken)
+        {
+            var conn = _context.Database.GetDbConnection();
+            await using var cmd = conn.CreateCommand();
+            cmd.Transaction = _context.Database.CurrentTransaction?.GetDbTransaction();
+            cmd.CommandText = @"
+                INSERT INTO tbl_l3_log
+                    (tbl_upload_id, session_id, source_file_name, source_file_type, row_no, timestamp_text, latitude, longitude,
+                     category, message, detail, source, severity, raw_text, raw_json)
+                VALUES
+                    (@uploadId, @sessionId, @fileName, @sourceFileType, @rowNo, @timestampText, @latitude, @longitude,
+                     @category, @message, @detail, @source, @severity, @rawText, @rawJson);";
+            AddParam(cmd, "@uploadId", uploadId);
+            AddParam(cmd, "@sessionId", sessionId);
+            AddParam(cmd, "@fileName", Path.GetFileName(fileName));
+            AddParam(cmd, "@sourceFileType", sourceFileType);
+            AddParam(cmd, "@rowNo", rowNo);
+            AddParam(cmd, "@timestampText", GetDiagnosticValue(row, "timestamp", "time"));
+            AddParam(cmd, "@latitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "latitude", "lat")));
+            AddParam(cmd, "@longitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "longitude", "lon", "lng")));
+            AddParam(cmd, "@category", GetDiagnosticValue(row, "category"));
+            AddParam(cmd, "@message", GetDiagnosticValue(row, "message", "event", "message_name"));
+            AddParam(cmd, "@detail", GetDiagnosticValue(row, "detail", "description"));
+            AddParam(cmd, "@source", GetDiagnosticValue(row, "source"));
+            AddParam(cmd, "@severity", GetDiagnosticValue(row, "severity", "level"));
+            AddParam(cmd, "@rawText", rawText);
+            AddParam(cmd, "@rawJson", JsonSerializer.Serialize(row));
+            await cmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        private async Task UpdateSessionL3EventFlagsAsync(int sessionId, bool hasL3, bool hasEvent, CancellationToken cancellationToken)
+        {
+            await ExecuteNonQueryAsync(
+                "UPDATE tbl_session SET `l3` = @l3, `event` = @event WHERE id = @sessionId;",
+                cancellationToken,
+                ("@l3", hasL3),
+                ("@event", hasEvent),
+                ("@sessionId", sessionId));
+        }
+
+        private async Task UpdateProjectForL3EventSessionAsync(int projectId, int sessionId, bool hasL3, bool hasEvent, CancellationToken cancellationToken)
+        {
+            var project = await _context.tbl_project.FirstAsync(x => x.id == projectId, cancellationToken);
+            var sessionIds = (project.ref_session_id ?? string.Empty)
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Where(x => int.TryParse(x, NumberStyles.Integer, CultureInfo.InvariantCulture, out _))
+                .Select(x => int.Parse(x, CultureInfo.InvariantCulture))
+                .Append(sessionId)
+                .Distinct()
+                .OrderBy(x => x)
+                .ToList();
+            project.ref_session_id = string.Join(",", sessionIds);
+            await _context.SaveChangesAsync(cancellationToken);
+
+            var setParts = new List<string>();
+            if (hasL3) setParts.Add("`l3` = TRUE");
+            if (hasEvent) setParts.Add("`event` = TRUE");
+            if (setParts.Count > 0)
+            {
+                await ExecuteNonQueryAsync(
+                    $"UPDATE tbl_project SET {string.Join(", ", setParts)} WHERE id = @projectId;",
+                    cancellationToken,
+                    ("@projectId", projectId));
+            }
+        }
+
+        private async Task EnsureL3EventSchemaAsync(CancellationToken cancellationToken)
+        {
+            await EnsureColumnAsync("tbl_session", "l3", "BOOLEAN NOT NULL DEFAULT FALSE", cancellationToken);
+            await EnsureColumnAsync("tbl_session", "event", "BOOLEAN NOT NULL DEFAULT FALSE", cancellationToken);
+            await EnsureColumnAsync("tbl_project", "l3", "BOOLEAN NOT NULL DEFAULT FALSE", cancellationToken);
+            await EnsureColumnAsync("tbl_project", "event", "BOOLEAN NOT NULL DEFAULT FALSE", cancellationToken);
+            await EnsureDiagnosticTablesAsync(cancellationToken);
+        }
+
+        private async Task EnsureDiagnosticTablesAsync(CancellationToken cancellationToken)
+        {
+            await ExecuteNonQueryAsync(@"
+                CREATE TABLE IF NOT EXISTS tbl_l3_log (
+                    id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                    tbl_upload_id INT NULL,
+                    session_id INT NULL,
+                    source_file_name VARCHAR(255) NULL,
+                    source_file_type VARCHAR(32) NULL,
+                    row_no INT NULL,
+                    timestamp_text VARCHAR(64) NULL,
+                    latitude DOUBLE NULL,
+                    longitude DOUBLE NULL,
+                    category VARCHAR(128) NULL,
+                    message VARCHAR(512) NULL,
+                    detail LONGTEXT NULL,
+                    source VARCHAR(128) NULL,
+                    severity VARCHAR(64) NULL,
+                    raw_text LONGTEXT NULL,
+                    raw_json LONGTEXT NULL,
+                    uploaded_on DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    INDEX ix_tbl_l3_log_session (session_id),
+                    INDEX ix_tbl_l3_log_upload (tbl_upload_id)
+                );", cancellationToken);
+
+            await ExecuteNonQueryAsync(@"
+                CREATE TABLE IF NOT EXISTS tbl_event_log (
+                    id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                    tbl_upload_id INT NULL,
+                    session_id INT NULL,
+                    source_file_name VARCHAR(255) NULL,
+                    row_no INT NULL,
+                    timestamp_text VARCHAR(64) NULL,
+                    latitude DOUBLE NULL,
+                    longitude DOUBLE NULL,
+                    category VARCHAR(128) NULL,
+                    event_name VARCHAR(512) NULL,
+                    detail LONGTEXT NULL,
+                    source VARCHAR(128) NULL,
+                    severity VARCHAR(64) NULL,
+                    raw_json LONGTEXT NULL,
+                    uploaded_on DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    INDEX ix_tbl_event_log_session (session_id),
+                    INDEX ix_tbl_event_log_upload (tbl_upload_id)
+                );", cancellationToken);
+        }
+
+        private async Task EnsureColumnAsync(string tableName, string columnName, string definition, CancellationToken cancellationToken)
+        {
+            if (await ColumnExistsAsync(tableName, columnName, cancellationToken))
+                return;
+
+            await ExecuteNonQueryAsync($"ALTER TABLE `{tableName}` ADD COLUMN `{columnName}` {definition};", cancellationToken);
+        }
+
+        private async Task<bool> ColumnExistsAsync(string tableName, string columnName, CancellationToken cancellationToken)
+        {
+            var conn = _context.Database.GetDbConnection();
+            if (conn.State != ConnectionState.Open)
+                await conn.OpenAsync(cancellationToken);
+
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT COUNT(*)
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = @tableName
+                  AND COLUMN_NAME = @columnName;";
+            AddParam(cmd, "@tableName", tableName);
+            AddParam(cmd, "@columnName", columnName);
+            var result = await cmd.ExecuteScalarAsync(cancellationToken);
+            return Convert.ToInt32(result, CultureInfo.InvariantCulture) > 0;
+        }
+
+        private async Task ExecuteNonQueryAsync(string sql, CancellationToken cancellationToken, params (string Name, object? Value)[] parameters)
+        {
+            var conn = _context.Database.GetDbConnection();
+            if (conn.State != ConnectionState.Open)
+                await conn.OpenAsync(cancellationToken);
+
+            await using var cmd = conn.CreateCommand();
+            cmd.Transaction = _context.Database.CurrentTransaction?.GetDbTransaction();
+            cmd.CommandText = sql;
+            foreach (var (name, value) in parameters)
+                AddParam(cmd, name, value);
+            await cmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        private static Dictionary<string, object?> NormalizeDiagnosticRow(IDictionary<string, object?> source)
+        {
+            var normalized = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+            foreach (var kvp in source)
+            {
+                var key = Regex.Replace(kvp.Key ?? string.Empty, @"[^\w]+", "_").Trim('_').ToLowerInvariant();
+                if (!string.IsNullOrWhiteSpace(key))
+                    normalized[key] = kvp.Value;
+            }
+            return normalized;
+        }
+
+        private static string? GetDiagnosticValue(Dictionary<string, object?> row, params string[] keys)
+        {
+            foreach (var key in keys)
+            {
+                if (row.TryGetValue(key, out var value) && value != null)
+                {
+                    var text = Convert.ToString(value, CultureInfo.InvariantCulture);
+                    if (!string.IsNullOrWhiteSpace(text))
+                        return text.Trim();
+                }
+            }
+            return null;
+        }
+
+        private static double? ParseDiagnosticDouble(string? value)
+        {
+            return double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed) ? parsed : null;
+        }
+
+        private static List<(int RowNo, Dictionary<string, object?> Values, string RawText)> ReadL3MessageTextRecords(string filePath)
+        {
+            var records = new List<(int RowNo, Dictionary<string, object?> Values, string RawText)>();
+            var current = new List<string>();
+
+            void Flush()
+            {
+                if (current.Count == 0)
+                    return;
+
+                var first = current[0].Trim();
+                if (!Regex.IsMatch(first, @"^\d{6}\s+"))
+                {
+                    current.Clear();
+                    return;
+                }
+
+                var raw = string.Join(Environment.NewLine, current);
+                var values = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["timestamp"] = Regex.Match(first, @"^\d{6}\s+(\S+)").Groups[1].Value,
+                    ["category"] = Regex.Match(first, @"^\d{6}\s+\S+\s+\S+\s+(\S+)").Groups[1].Value,
+                    ["message"] = first
+                };
+
+                var latLon = Regex.Match(raw, @"Latitude:\s*([-+]?\d+(?:\.\d+)?),\s*Longitude:\s*([-+]?\d+(?:\.\d+)?)", RegexOptions.IgnoreCase);
+                if (latLon.Success)
+                {
+                    values["latitude"] = latLon.Groups[1].Value;
+                    values["longitude"] = latLon.Groups[2].Value;
+                }
+
+                var messageName = Regex.Match(raw, "Message Name:\\s*\"([^\"]+)\"", RegexOptions.IgnoreCase);
+                if (messageName.Success)
+                    values["message"] = messageName.Groups[1].Value;
+
+                records.Add((records.Count + 1, values, raw));
+                current.Clear();
+            }
+
+            foreach (var line in System.IO.File.ReadLines(filePath))
+            {
+                if (Regex.IsMatch(line, @"^\d{6}\s+") && current.Count > 0)
+                    Flush();
+
+                if (current.Count > 0 || Regex.IsMatch(line, @"^\d{6}\s+"))
+                    current.Add(line);
+            }
+
+            Flush();
+            return records;
+        }
+
+        private static void AddParam(System.Data.Common.DbCommand cmd, string name, object? value)
+        {
+            var param = cmd.CreateParameter();
+            param.ParameterName = name;
+            param.Value = value ?? DBNull.Value;
+            cmd.Parameters.Add(param);
+        }
+
+        private static void TryDeleteFile(string path)
+        {
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(path) && System.IO.File.Exists(path))
+                    System.IO.File.Delete(path);
+            }
+            catch
+            {
+                // Temporary upload cleanup is best effort.
+            }
+        }
+
+        private static readonly HashSet<string> AllowedL3EventExtensions = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ".csv",
+            ".txt"
+        };
+
+        private sealed record ProjectInfo(int Id, int? CompanyId, string? RefSessionId);
+    }
+}

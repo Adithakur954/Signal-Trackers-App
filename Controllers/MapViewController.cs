@@ -2673,6 +2673,79 @@ public async Task<IActionResult> DeleteAvailablePolygon(
             }
         }
 
+        [HttpGet("GenerateDiagnosticEventAnalyzerPdf")]
+        public async Task<IActionResult> GenerateDiagnosticEventAnalyzerPdf(
+            [FromQuery] int? sessionId = null,
+            [FromQuery] string? sessionIds = null,
+            [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
+            [FromQuery] int? uploadId = null,
+            [FromQuery] int take = 50000,
+            [FromQuery] int reportRows = 600,
+            [FromQuery] string? sourceFileName = null)
+        {
+            try
+            {
+                var request = ParseDiagnosticQuery(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
+                if (request.Error != null)
+                    return request.Error;
+
+                reportRows = Math.Clamp(reportRows, 50, 3000);
+                var conn = await OpenDiagnosticConnectionAsync();
+                var events = await LoadDiagnosticEventRowsAsync(conn, request.SessionIds, request.UploadId, request.Take);
+                var l3Rows = await LoadDiagnosticL3RowsAsync(conn, request.SessionIds, request.UploadId, request.Take);
+                var calls = BuildDiagnosticCallRows(events, l3Rows);
+                var rows = BuildDiagnosticTimelineRows(events, l3Rows, calls);
+                var connected = calls.Count(x => string.Equals(x.Result, "Connected", StringComparison.OrdinalIgnoreCase));
+                var dropped = calls.Count(x => string.Equals(x.Result, "Dropped", StringComparison.OrdinalIgnoreCase));
+                var notConnected = calls.Count(x => string.Equals(x.Result, "Not Connected", StringComparison.OrdinalIgnoreCase));
+                var analyzer = BuildDiagnosticAnalyzerMetrics(rows, calls, connected, dropped, notConnected);
+                var fileStem = SanitizeDiagnosticFileStem(sourceFileName ?? $"diagnostic-{request.UploadId?.ToString(CultureInfo.InvariantCulture) ?? string.Join("-", request.SessionIds)}");
+
+                var pdf = BuildDiagnosticAnalyzerPdf(sourceFileName, rows.Take(reportRows).ToList(), rows.Count, calls, analyzer);
+                return File(pdf, "application/pdf", $"l3-event-analyzer-report-{fileStem}.pdf");
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { status = 0, message = "An error occurred while generating the analyzer PDF.", details = SafeException.Get(ex) });
+            }
+        }
+
+        [HttpGet("GenerateDiagnosticL3SummaryPdf")]
+        public async Task<IActionResult> GenerateDiagnosticL3SummaryPdf(
+            [FromQuery] int? sessionId = null,
+            [FromQuery] string? sessionIds = null,
+            [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
+            [FromQuery] int? uploadId = null,
+            [FromQuery] int take = 50000,
+            [FromQuery] int reportRows = 1000,
+            [FromQuery] string? sourceFileName = null)
+        {
+            try
+            {
+                var request = ParseDiagnosticQuery(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
+                if (request.Error != null)
+                    return request.Error;
+
+                reportRows = Math.Clamp(reportRows, 50, 5000);
+                var conn = await OpenDiagnosticConnectionAsync();
+                var events = await LoadDiagnosticEventRowsAsync(conn, request.SessionIds, request.UploadId, request.Take);
+                var l3Rows = await LoadDiagnosticL3RowsAsync(conn, request.SessionIds, request.UploadId, request.Take);
+                var calls = BuildDiagnosticCallRows(events, l3Rows);
+                var rows = BuildDiagnosticTimelineRows(events, l3Rows, calls);
+                var connected = calls.Count(x => string.Equals(x.Result, "Connected", StringComparison.OrdinalIgnoreCase));
+                var dropped = calls.Count(x => string.Equals(x.Result, "Dropped", StringComparison.OrdinalIgnoreCase));
+                var notConnected = calls.Count(x => string.Equals(x.Result, "Not Connected", StringComparison.OrdinalIgnoreCase));
+                var fileStem = SanitizeDiagnosticFileStem(sourceFileName ?? $"diagnostic-{request.UploadId?.ToString(CultureInfo.InvariantCulture) ?? string.Join("-", request.SessionIds)}");
+
+                var pdf = BuildDiagnosticL3SummaryPdf(sourceFileName, calls, rows.Take(reportRows).ToList(), rows.Count, l3Rows.Count, events.Count);
+                return File(pdf, "application/pdf", $"l3-call-summary-messages-{fileStem}.pdf");
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { status = 0, message = "An error occurred while generating the L3 summary PDF.", details = SafeException.Get(ex) });
+            }
+        }
+
 // ========================================
 //  RESPONSE DTO FOR CACHING
 // ========================================
@@ -3377,6 +3450,59 @@ public class AvailablePolygonsResponse
             int dropped,
             int notConnected)
         {
+            var metrics = BuildDiagnosticAnalyzerMetrics(rows, calls, connected, dropped, notConnected);
+            return new
+            {
+                procedures = new List<object>(),
+                calls,
+                states = new
+                {
+                    rrc = metrics.RrcState,
+                    nas = metrics.NasState,
+                    ims = metrics.ImsState
+                },
+                stats = new
+                {
+                    totalRows = metrics.TotalRows,
+                    analyzedRows = metrics.AnalyzedRows,
+                    totalProcedures = metrics.TotalProcedures,
+                    callProcedures = metrics.CallProcedures,
+                    totalCalls = metrics.TotalCalls,
+                    completedCalls = metrics.CompletedCalls,
+                    droppedCalls = metrics.DroppedCalls,
+                    notConnectedCalls = metrics.NotConnectedCalls,
+                    failures = metrics.Failures,
+                    rsrpProcedures = metrics.RsrpProcedures,
+                    technologies = metrics.Technologies
+                }
+            };
+        }
+
+        private sealed class DiagnosticAnalyzerMetrics
+        {
+            public int TotalRows { get; init; }
+            public int AnalyzedRows { get; init; }
+            public int TotalProcedures { get; init; }
+            public int CallProcedures { get; init; }
+            public int TotalCalls { get; init; }
+            public int CompletedCalls { get; init; }
+            public int DroppedCalls { get; init; }
+            public int NotConnectedCalls { get; init; }
+            public int Failures { get; init; }
+            public int RsrpProcedures { get; init; }
+            public List<string> Technologies { get; init; } = new();
+            public string RrcState { get; init; } = "RRC_IDLE";
+            public string NasState { get; init; } = "NAS Deregistered";
+            public string ImsState { get; init; } = "IMS Unregistered";
+        }
+
+        private static DiagnosticAnalyzerMetrics BuildDiagnosticAnalyzerMetrics(
+            IReadOnlyList<DiagnosticTimelineRow> rows,
+            IReadOnlyList<DiagnosticCallRow> calls,
+            int connected,
+            int dropped,
+            int notConnected)
+        {
             var ordered = rows
                 .Where(x => !string.IsNullOrWhiteSpace(x.Procedure) || !string.IsNullOrWhiteSpace(x.Message))
                 .OrderBy(x => x.SessionId ?? 0)
@@ -3415,30 +3541,22 @@ public class AvailablePolygonsResponse
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
-            return new
+            return new DiagnosticAnalyzerMetrics
             {
-                procedures = new List<object>(),
-                calls,
-                states = new
-                {
-                    rrc = InferAnalyzerRrcState(ordered),
-                    nas = InferAnalyzerNasState(ordered),
-                    ims = InferAnalyzerImsState(ordered)
-                },
-                stats = new
-                {
-                    totalRows = rows.Count,
-                    analyzedRows = ordered.Count,
-                    totalProcedures = procedureCount,
-                    callProcedures = ordered.Select(x => x.CallId).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct().Count(),
-                    totalCalls = calls.Count,
-                    completedCalls = connected,
-                    droppedCalls = dropped,
-                    notConnectedCalls = notConnected,
-                    failures,
-                    rsrpProcedures = rsrpMatched,
-                    technologies
-                }
+                TotalRows = rows.Count,
+                AnalyzedRows = ordered.Count,
+                TotalProcedures = procedureCount,
+                CallProcedures = ordered.Select(x => x.CallId).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct().Count(),
+                TotalCalls = calls.Count,
+                CompletedCalls = connected,
+                DroppedCalls = dropped,
+                NotConnectedCalls = notConnected,
+                Failures = failures,
+                RsrpProcedures = rsrpMatched,
+                Technologies = technologies,
+                RrcState = InferAnalyzerRrcState(ordered),
+                NasState = InferAnalyzerNasState(ordered),
+                ImsState = InferAnalyzerImsState(ordered)
             };
         }
 
@@ -3808,6 +3926,648 @@ public class AvailablePolygonsResponse
                 16 => "Rejected",
                 _ => $"Cause {causeCode}"
             };
+        }
+
+        private static string SanitizeDiagnosticFileStem(string value)
+        {
+            var sanitized = Regex.Replace(value.ToLowerInvariant(), @"[^a-z0-9]+", "-").Trim('-');
+            return string.IsNullOrWhiteSpace(sanitized) ? "diagnostic-report" : sanitized;
+        }
+
+        private static byte[] BuildDiagnosticL3SummaryPdf(
+            string? sourceFileName,
+            IReadOnlyList<DiagnosticCallRow> calls,
+            IReadOnlyList<DiagnosticTimelineRow> visibleRows,
+            int totalRows,
+            int totalL3Rows,
+            int totalEventRows)
+        {
+            var layout = new DiagnosticPdfLayout();
+            var l3Count = visibleRows.Count(x => string.Equals(x.Type, "l3", StringComparison.OrdinalIgnoreCase));
+            var eventCount = visibleRows.Count(x => string.Equals(x.Type, "event", StringComparison.OrdinalIgnoreCase));
+
+            layout.AddLine("L3 / Event Call Summary Report", "F2", 18, 0, 6);
+            layout.AddWrapped("Call summary with every L3 and Event row listed in timestamp sequence.", "F1", 10, 0, 4);
+            layout.AddSpacer(8);
+            layout.AddWrapped($"Source File: {sourceFileName ?? "N/A"}", "F1", 10, 0, 3);
+            layout.AddWrapped($"Generated At: {FormatDiagnosticPdfTimestamp(DateTimeOffset.UtcNow)}", "F1", 10, 0, 3);
+            layout.AddWrapped($"Sequence Rows: {totalRows} ({totalL3Rows} L3, {totalEventRows} Event)", "F1", 10, 0, 3);
+            if (visibleRows.Count != totalRows)
+                layout.AddWrapped($"Exported Rows: first {visibleRows.Count} rows included in this PDF.", "F1", 10, 0, 3);
+
+            layout.AddSpacer(10);
+            AddDiagnosticCallSummarySection(layout, calls);
+
+            layout.AddSpacer(12);
+            AddDiagnosticL3EventSequenceSection(layout, visibleRows, l3Count, eventCount);
+
+            return BuildFrontendStylePdf(layout);
+        }
+
+        private static byte[] BuildDiagnosticAnalyzerPdf(
+            string? sourceFileName,
+            IReadOnlyList<DiagnosticTimelineRow> visibleRows,
+            int totalRows,
+            IReadOnlyList<DiagnosticCallRow> calls,
+            DiagnosticAnalyzerMetrics analyzer)
+        {
+            var layout = new DiagnosticPdfLayout();
+            var technologies = analyzer.Technologies.Count > 0 ? string.Join(", ", analyzer.Technologies) : "N/A";
+
+            layout.AddLine("L3 Event Analyzer Report", "F2", 18, 0, 6);
+            layout.AddWrapped("Professional decoded report built from the currently available L3 and Event evidence. Sections are included only when the uploaded files provide enough data.", "F1", 10, 0, 4);
+            layout.AddSpacer(8);
+            layout.AddWrapped($"Source File: {sourceFileName ?? "N/A"}", "F1", 10, 0, 3);
+            layout.AddWrapped("Report Scope: ", "F1", 10, 0, 3);
+            layout.AddWrapped($"Generated At: {FormatDiagnosticPdfTimestamp(DateTimeOffset.UtcNow)}", "F1", 10, 0, 3);
+            layout.AddWrapped($"Technology Mix: {technologies}", "F1", 10, 0, 3);
+
+            layout.AddSpacer(10);
+            layout.AddLine("Dashboard", "F2", 13, 0, 5);
+            var durationMs = CalculateDiagnosticDurationMs(visibleRows);
+            var protocols = visibleRows.Select(x => x.Protocol).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+            var registrationCount = visibleRows.Count(x => Regex.IsMatch($"{x.Procedure} {x.Message}", "registration|attach", RegexOptions.IgnoreCase));
+            var cellChanges = visibleRows.Count(x => Regex.IsMatch($"{x.Procedure} {x.Message}", "handover|cell\\W*change|mobility", RegexOptions.IgnoreCase));
+            var attachCount = visibleRows.Count(x => Regex.IsMatch($"{x.Procedure} {x.Message}", "attach", RegexOptions.IgnoreCase));
+            var tauCount = visibleRows.Count(x => Regex.IsMatch($"{x.Procedure} {x.Message}", "tracking\\W*area\\W*update|tau", RegexOptions.IgnoreCase));
+            var rrcConnections = visibleRows.Count(x => Regex.IsMatch($"{x.Procedure} {x.Message}", "rrc\\W*(connection|resume|setup|reconfiguration)", RegexOptions.IgnoreCase));
+
+            new[]
+            {
+                $"Test Duration: {FormatDiagnosticDurationMs(durationMs)}",
+                $"Total Messages: {totalRows}",
+                $"Total Protocols: {protocols}",
+                $"Technologies Detected: {technologies}",
+                $"Registration Count: {registrationCount}",
+                $"Cell Changes: {cellChanges}",
+                $"Calls: {calls.Count}",
+                $"Attach Count: {attachCount}",
+                $"TAU Count: {tauCount}",
+                $"RRC Connections: {rrcConnections}",
+                $"Errors: {analyzer.Failures}",
+            }.ToList().ForEach(line => layout.AddWrapped($"- {line}", "F1", 10, 8, 3));
+
+            layout.AddSpacer(10);
+            layout.AddLine("Executive Summary", "F2", 13, 0, 5);
+            CreateDiagnosticExecutiveSummaryLines(totalRows, protocols, technologies, calls, analyzer, durationMs)
+                .ForEach(line => layout.AddWrapped($"- {line}", "F1", 10, 8, 3));
+
+            if (calls.Count > 0)
+            {
+                layout.AddSpacer(10);
+                layout.AddLine("Call Inventory", "F2", 13, 0, 5);
+                layout.AddTable(
+                    new[] { "Call ID", "Start", "End", "Status", "Setup Time", "Duration" },
+                    calls.Select(call => (IReadOnlyList<string>)new[]
+                    {
+                        call.FrontendId,
+                        call.Start ?? "--:--:--",
+                        call.End ?? "--:--:--",
+                        call.Result,
+                        FormatDiagnosticDuration(call.SetupTimeSeconds) ?? "0s",
+                        FormatDiagnosticDuration(call.CallDurationSeconds) ?? "0s",
+                    }).ToList(),
+                    new[] { 12, 9, 9, 12, 10, 10 });
+            }
+
+            var technologyRows = CreateDiagnosticTechnologyTimelineRows(visibleRows);
+            if (technologyRows.Count > 0)
+            {
+                layout.AddSpacer(10);
+                layout.AddLine("Technology Timeline", "F2", 13, 0, 5);
+                layout.AddWrapped($"Technology Timeline: {technologyRows.Count} transition{(technologyRows.Count > 1 ? "s" : "")} found in the selected scope.", "F1", 10, 0, 3);
+                layout.AddTable(new[] { "Time", "Technology", "Observed In" }, technologyRows, new[] { 10, 14, 28 });
+            }
+
+            layout.AddSpacer(10);
+            layout.AddLine("Procedure Overview", "F2", 13, 0, 5);
+            layout.AddTable(
+                new[] { "ID", "Name", "Result", "Tech", "Duration", "RSRP", "Rows" },
+                CreateDiagnosticProcedureOverviewRows(visibleRows),
+                new[] { 6, 20, 9, 10, 9, 18, 6 });
+
+            layout.AddSpacer(10);
+            layout.AddLine("L3 / Event Message Sequence", "F2", 13, 0, 5);
+            layout.AddWrapped($"Analyzed timeline rows listed below in timestamp order. Showing {visibleRows.Count} of {totalRows}.", "F1", 10, 0, 3);
+            layout.AddWrappedMessageTable(CreateDiagnosticMessageRows(visibleRows));
+
+            return BuildFrontendStylePdf(layout);
+        }
+
+        private static void AddDiagnosticCallSummarySection(DiagnosticPdfLayout layout, IReadOnlyList<DiagnosticCallRow> calls)
+        {
+            layout.AddLine("Call Summary", "F2", 13, 0, 5);
+            if (calls.Count == 0)
+            {
+                layout.AddWrapped("No call sessions were detected in the available Event evidence.", "F1", 10, 0, 3);
+                return;
+            }
+
+            var connected = calls.Count(x => string.Equals(x.Result, "Connected", StringComparison.OrdinalIgnoreCase));
+            var dropped = calls.Count(x => string.Equals(x.Result, "Dropped", StringComparison.OrdinalIgnoreCase));
+            var notConnected = calls.Count(x => string.Equals(x.Result, "Not Connected", StringComparison.OrdinalIgnoreCase));
+            var busy = calls.Count(x => string.Equals(x.StatusDetail, "Busy", StringComparison.OrdinalIgnoreCase));
+            var rejected = calls.Count(x => string.Equals(x.StatusDetail, "Rejected", StringComparison.OrdinalIgnoreCase));
+            var setupFailures = calls.Count(x => string.Equals(x.Result, "Not Connected", StringComparison.OrdinalIgnoreCase) || string.Equals(x.Result, "Dropped", StringComparison.OrdinalIgnoreCase));
+            var setupValues = calls.Where(x => x.SetupTimeSeconds.HasValue).Select(x => x.SetupTimeSeconds!.Value).ToList();
+            var connectedDuration = calls.Where(x => x.CallDurationSeconds.HasValue && !string.Equals(x.Result, "Not Connected", StringComparison.OrdinalIgnoreCase)).Sum(x => x.CallDurationSeconds!.Value);
+
+            new[]
+            {
+                $"Calls Made: {calls.Count}",
+                $"Connected: {connected}",
+                $"Dropped: {dropped}",
+                $"Not Connected: {notConnected}",
+                $"Busy: {busy}",
+                $"Rejected: {rejected}",
+                $"Setup Failures: {setupFailures}",
+                $"Average Setup Time: {FormatDiagnosticDuration(setupValues.Count > 0 ? setupValues.Average() : 0) ?? "0s"}",
+                $"Total Connected Duration: {FormatDiagnosticDuration(connectedDuration) ?? "0s"}",
+            }.ToList().ForEach(line => layout.AddWrapped($"- {line}", "F1", 10, 8, 3));
+
+            layout.AddSpacer(6);
+            layout.AddLine("Call Inventory", "F2", 10, 0, 3);
+            layout.AddTable(
+                new[] { "Call ID", "Start", "End", "Status", "Setup", "Duration", "Reason" },
+                calls.Select(call => (IReadOnlyList<string>)new[]
+                {
+                    call.FrontendId,
+                    call.Start ?? "--:--:--",
+                    call.End ?? "--:--:--",
+                    FirstNonEmpty(call.StatusDetail, call.Result, "N/A"),
+                    FormatDiagnosticDuration(call.SetupTimeSeconds) ?? "0s",
+                    FormatDiagnosticDuration(call.CallDurationSeconds) ?? "0s",
+                    FirstNonEmpty(call.Reason, "N/A"),
+                }).ToList(),
+                new[] { 10, 8, 8, 14, 8, 8, 14 });
+        }
+
+        private static void AddDiagnosticL3EventSequenceSection(
+            DiagnosticPdfLayout layout,
+            IReadOnlyList<DiagnosticTimelineRow> rows,
+            int l3Count,
+            int eventCount)
+        {
+            layout.AddLine("L3 / Event Message Sequence", "F2", 13, 0, 5);
+            layout.AddWrapped($"All {rows.Count} L3/Event row{(rows.Count == 1 ? "" : "s")} are listed below in timestamp order.", "F1", 10, 0, 3);
+            if (rows.Count == 0)
+            {
+                layout.AddWrapped("No L3 or Event messages were found in the selected scope.", "F1", 10, 0, 3);
+                return;
+            }
+
+            layout.AddSpacer(6);
+            layout.AddLine("Sequence Breakdown", "F2", 10, 0, 3);
+            layout.AddTable(new[] { "Type", "Count" }, new List<IReadOnlyList<string>>
+            {
+                new[] { "L3", l3Count.ToString(CultureInfo.InvariantCulture) },
+                new[] { "EVENT", eventCount.ToString(CultureInfo.InvariantCulture) },
+            }, new[] { 28, 8 });
+
+            var categoryRows = CreateDiagnosticBreakdownRows(rows, x => FirstNonEmpty(x.SourceCategory, x.Category, "Unknown"));
+            if (categoryRows.Count > 0)
+            {
+                layout.AddSpacer(4);
+                layout.AddTable(new[] { "Category", "Count" }, categoryRows, new[] { 28, 8 });
+            }
+
+            var sourceRows = CreateDiagnosticBreakdownRows(rows, x => FirstNonEmpty(x.SourceFile, x.OriginSource, "Unknown"));
+            if (sourceRows.Count > 0)
+            {
+                layout.AddSpacer(4);
+                layout.AddTable(new[] { "Source", "Count" }, sourceRows, new[] { 44, 8 });
+            }
+
+            layout.AddSpacer(8);
+            layout.AddWrappedMessageTable(CreateDiagnosticMessageRows(rows));
+        }
+
+        private static List<IReadOnlyList<string>> CreateDiagnosticBreakdownRows(
+            IReadOnlyList<DiagnosticTimelineRow> rows,
+            Func<DiagnosticTimelineRow, string> selector,
+            int maxRows = 20)
+        {
+            return rows
+                .GroupBy(row => FirstNonEmpty(selector(row), "Unknown"), StringComparer.OrdinalIgnoreCase)
+                .Select(group => (IReadOnlyList<string>)new[] { group.Key, group.Count().ToString(CultureInfo.InvariantCulture) })
+                .OrderByDescending(row => int.TryParse(row[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var count) ? count : 0)
+                .ThenBy(row => row[0], StringComparer.OrdinalIgnoreCase)
+                .Take(maxRows)
+                .ToList();
+        }
+
+        private static IReadOnlyList<IReadOnlyList<string>> CreateDiagnosticMessageRows(IReadOnlyList<DiagnosticTimelineRow> rows)
+        {
+            return rows.Select(row => (IReadOnlyList<string>)new[]
+            {
+                FirstNonEmpty(row.Type?.ToUpperInvariant(), "-"),
+                FirstNonEmpty(row.TimestampLabel, "--:--:--"),
+                FirstNonEmpty(row.SourceCategory, row.Category, "Unknown"),
+                FirstNonEmpty(row.RawMessage, row.Summary, row.Title, "-"),
+            }).ToList();
+        }
+
+        private static List<IReadOnlyList<string>> CreateDiagnosticTechnologyTimelineRows(IReadOnlyList<DiagnosticTimelineRow> rows)
+        {
+            var result = new List<IReadOnlyList<string>>();
+            string? previous = null;
+
+            foreach (var row in rows.OrderBy(x => x.TimeOfDaySeconds ?? double.MaxValue).ThenBy(x => x.SourceId))
+            {
+                var technology = FirstNonEmpty(row.Technology, string.Empty);
+                if (IsUnknownDiagnosticCategory(technology))
+                    continue;
+                if (string.Equals(previous, technology, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                previous = technology;
+                result.Add(new[]
+                {
+                    FirstNonEmpty(row.TimestampLabel, "--:--:--"),
+                    technology,
+                    FirstNonEmpty(row.Procedure, row.Message, row.Title, "Observed Row"),
+                });
+            }
+
+            return result;
+        }
+
+        private static List<IReadOnlyList<string>> CreateDiagnosticProcedureOverviewRows(IReadOnlyList<DiagnosticTimelineRow> rows)
+        {
+            var grouped = rows
+                .Where(row => !string.IsNullOrWhiteSpace(row.Procedure) || !string.IsNullOrWhiteSpace(row.Message))
+                .GroupBy(row => FirstNonEmpty(row.CallId, "no-call") + "|" + FirstNonEmpty(row.Procedure, row.Message, row.Category, "Unknown"))
+                .Take(300)
+                .Select((group, index) =>
+                {
+                    var first = group.OrderBy(x => x.TimeOfDaySeconds ?? double.MaxValue).First();
+                    var last = group.OrderBy(x => x.TimeOfDaySeconds ?? double.MaxValue).Last();
+                    var duration = first.TimeOfDaySeconds.HasValue && last.TimeOfDaySeconds.HasValue
+                        ? Math.Max(0, last.TimeOfDaySeconds.Value - first.TimeOfDaySeconds.Value)
+                        : 0;
+                    var text = string.Join(" ", group.Select(x => $"{x.Message} {x.Summary} {x.RawMessage}"));
+                    var result = Regex.IsMatch(text, @"\b(fail|reject|error|timeout|drop|rlf)\b", RegexOptions.IgnoreCase)
+                        ? "Failure"
+                        : "Observed";
+
+                    return (IReadOnlyList<string>)new[]
+                    {
+                        $"P-{index + 1:000}",
+                        FirstNonEmpty(first.Procedure, first.Message, first.Category, "Row Analysis"),
+                        result,
+                        IsUnknownDiagnosticCategory(first.Technology) ? "N/A" : first.Technology,
+                        FormatDiagnosticDuration(duration) ?? "0s",
+                        ExtractDiagnosticRsrp(text),
+                        group.Count().ToString(CultureInfo.InvariantCulture),
+                    };
+                })
+                .ToList();
+
+            if (grouped.Count == 0)
+            {
+                grouped.Add(new[] { "P-001", "Row Analysis", "Observed", "N/A", "0s", "N/A", rows.Count.ToString(CultureInfo.InvariantCulture) });
+            }
+
+            return grouped;
+        }
+
+        private static List<string> CreateDiagnosticExecutiveSummaryLines(
+            int totalRows,
+            int protocols,
+            string technologies,
+            IReadOnlyList<DiagnosticCallRow> calls,
+            DiagnosticAnalyzerMetrics analyzer,
+            double durationMs)
+        {
+            var connected = calls.Count(x => string.Equals(x.Result, "Connected", StringComparison.OrdinalIgnoreCase));
+            var lines = new List<string>
+            {
+                $"The log covers {FormatDiagnosticDurationMs(durationMs)} with {totalRows} decoded rows across {protocols} protocol groups."
+            };
+
+            if (!string.Equals(technologies, "N/A", StringComparison.OrdinalIgnoreCase))
+                lines.Add($"Detected radio technologies: {technologies}.");
+
+            if (calls.Count > 0)
+                lines.Add($"{calls.Count} call session{(calls.Count > 1 ? "s were" : " was")} detected, with {connected} connected and {calls.Count - connected} not fully connected or dropped.");
+
+            if (analyzer.Failures > 0)
+                lines.Add($"{analyzer.Failures} failure-like indication{(analyzer.Failures > 1 ? "s were" : " was")} found in the analyzed scope.");
+            else
+                lines.Add("No strong failure signature was detected in the analyzed scope.");
+
+            return lines;
+        }
+
+        private static string FormatDiagnosticPdfTimestamp(DateTimeOffset value)
+        {
+            return value.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss.fff 'UTC'", CultureInfo.InvariantCulture);
+        }
+
+        private static double CalculateDiagnosticDurationMs(IReadOnlyList<DiagnosticTimelineRow> rows)
+        {
+            var times = rows.Where(x => x.TimeOfDaySeconds.HasValue).Select(x => x.TimeOfDaySeconds!.Value).ToList();
+            return times.Count == 0 ? 0 : Math.Max(0, times.Max() - times.Min()) * 1000;
+        }
+
+        private static string FormatDiagnosticDurationMs(double ms)
+        {
+            if (ms <= 0)
+                return "0s";
+            if (ms < 1000)
+                return $"{Math.Round(ms).ToString(CultureInfo.InvariantCulture)} ms";
+
+            var totalSeconds = (int)Math.Round(ms / 1000);
+            var minutes = totalSeconds / 60;
+            var seconds = totalSeconds % 60;
+            if (minutes >= 60)
+            {
+                var hours = minutes / 60;
+                var remainingMinutes = minutes % 60;
+                return $"{hours}h {remainingMinutes}m {seconds}s";
+            }
+
+            return minutes > 0 ? $"{minutes}m {seconds}s" : $"{seconds}s";
+        }
+
+        private static bool IsUnknownDiagnosticCategory(string? value)
+        {
+            var normalized = (value ?? string.Empty).Trim().ToLowerInvariant();
+            return normalized is "" or "-" or "--" or "n/a" or "na" or "null" or "undefined" or "unknown" or "unknown/no service" or "unknown / no service" or "no service";
+        }
+
+        private static string ExtractDiagnosticRsrp(string text)
+        {
+            var match = Regex.Match(text, @"RSRP\s*[:=]?\s*(-?\d+(?:\.\d+)?)\s*dBm", RegexOptions.IgnoreCase);
+            return match.Success ? $"{match.Groups[1].Value} dBm" : "N/A";
+        }
+
+        private sealed record DiagnosticPdfEntry(string Text, double X, double Y, string Font, int Size);
+
+        private sealed class DiagnosticPdfLayout
+        {
+            private const double PageWidth = 612;
+            private const double PageHeight = 792;
+            private const double MarginX = 48;
+            private const double MarginTop = 48;
+            private const double MarginBottom = 48;
+
+            private readonly List<List<DiagnosticPdfEntry>> _pages = new() { new List<DiagnosticPdfEntry>() };
+            private double _y = PageHeight - MarginTop;
+
+            public IReadOnlyList<IReadOnlyList<DiagnosticPdfEntry>> Pages => _pages;
+
+            public void AddLine(string? text, string font = "F1", int size = 10, int indent = 0, int spacing = 4)
+            {
+                var lineHeight = size + spacing;
+                EnsureSpace(lineHeight);
+                _pages[^1].Add(new DiagnosticPdfEntry(ToPdfSafeText(text), MarginX + indent, _y, font, size));
+                _y -= lineHeight;
+            }
+
+            public void AddWrapped(string? text, string font = "F1", int size = 10, int indent = 0, int spacing = 4)
+            {
+                var width = PageWidth - (MarginX * 2) - indent;
+                var maxChars = Math.Max(16, (int)Math.Floor(width / (size * 0.56)));
+                foreach (var line in WrapPdfText(text, maxChars))
+                    AddLine(line, font, size, indent, spacing);
+            }
+
+            public void AddSpacer(int height = 8)
+            {
+                EnsureSpace(height);
+                _y -= height;
+            }
+
+            public void AddTable(IReadOnlyList<string> headers, IReadOnlyList<IReadOnlyList<string>> rows, IReadOnlyList<int> widths)
+            {
+                string FormatRow(IReadOnlyList<string> values)
+                {
+                    return string.Join("  ", values.Select((value, index) => TruncatePdfText(value, widths[index]).PadRight(widths[index])));
+                }
+
+                AddLine(FormatRow(headers), "F3", 9, 0, 3);
+                AddLine(string.Join("  ", widths.Select(width => new string('-', width))), "F3", 9, 0, 3);
+                foreach (var row in rows)
+                    AddLine(FormatRow(row), "F3", 9, 0, 3);
+            }
+
+            public void AddWrappedMessageTable(IReadOnlyList<IReadOnlyList<string>> rows)
+            {
+                var headers = new[] { "Type", "Timestamp", "Category", "Detail" };
+                var widths = new[] { 6, 14, 16, 46 };
+
+                string FormatRow(IReadOnlyList<string> values)
+                {
+                    return string.Join("  ", values.Select((value, index) => TruncatePdfText(value, widths[index]).PadRight(widths[index])));
+                }
+
+                AddLine(FormatRow(headers), "F3", 8, 0, 2);
+                AddLine(string.Join("  ", widths.Select(width => new string('-', width))), "F3", 8, 0, 2);
+
+                foreach (var row in rows)
+                {
+                    var wrappedCells = row.Select((value, index) => WrapPdfText(value, widths[index]).ToList()).ToList();
+                    var lineCount = wrappedCells.Count == 0 ? 0 : wrappedCells.Max(cell => cell.Count);
+                    for (var lineIndex = 0; lineIndex < lineCount; lineIndex++)
+                    {
+                        AddLine(
+                            FormatRow(wrappedCells.Select(cell => lineIndex < cell.Count ? cell[lineIndex] : string.Empty).ToList()),
+                            "F3",
+                            8,
+                            0,
+                            2);
+                    }
+                    AddLine(string.Join("  ", widths.Select(width => new string('-', width))), "F3", 8, 0, 2);
+                }
+            }
+
+            private void EnsureSpace(double heightNeeded)
+            {
+                if (_y - heightNeeded >= MarginBottom)
+                    return;
+
+                _pages.Add(new List<DiagnosticPdfEntry>());
+                _y = PageHeight - MarginTop;
+            }
+        }
+
+        private static byte[] BuildFrontendStylePdf(DiagnosticPdfLayout layout)
+        {
+            var objects = new List<string>();
+            var pageIds = new List<int>();
+            var contentIds = new List<int>();
+
+            int ReserveObject()
+            {
+                objects.Add(string.Empty);
+                return objects.Count;
+            }
+
+            void SetObject(int id, string body)
+            {
+                objects[id - 1] = body;
+            }
+
+            var catalogId = ReserveObject();
+            var pagesId = ReserveObject();
+            var fontRegularId = ReserveObject();
+            var fontBoldId = ReserveObject();
+            var fontMonoId = ReserveObject();
+
+            foreach (var _ in layout.Pages)
+            {
+                pageIds.Add(ReserveObject());
+                contentIds.Add(ReserveObject());
+            }
+
+            SetObject(catalogId, $"<< /Type /Catalog /Pages {pagesId} 0 R >>");
+            SetObject(pagesId, $"<< /Type /Pages /Kids [{string.Join(" ", pageIds.Select(id => $"{id} 0 R"))}] /Count {pageIds.Count} >>");
+            SetObject(fontRegularId, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+            SetObject(fontBoldId, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>");
+            SetObject(fontMonoId, "<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>");
+
+            for (var index = 0; index < layout.Pages.Count; index++)
+            {
+                var contentStream = string.Join("\n", layout.Pages[index].Select(entry =>
+                    $"BT /{entry.Font} {entry.Size} Tf 1 0 0 1 {entry.X.ToString("0.###", CultureInfo.InvariantCulture)} {entry.Y.ToString("0.###", CultureInfo.InvariantCulture)} Tm ({PdfEscape(entry.Text)}) Tj ET"));
+                var contentLength = Encoding.ASCII.GetByteCount(contentStream);
+
+                SetObject(contentIds[index], $"<< /Length {contentLength} >>\nstream\n{contentStream}\nendstream");
+                SetObject(
+                    pageIds[index],
+                    $"<< /Type /Page /Parent {pagesId} 0 R /MediaBox [0 0 612 792] "
+                    + $"/Resources << /Font << /F1 {fontRegularId} 0 R /F2 {fontBoldId} 0 R /F3 {fontMonoId} 0 R >> >> "
+                    + $"/Contents {contentIds[index]} 0 R >>");
+            }
+
+            var pdf = new StringBuilder("%PDF-1.4\n");
+            var offsets = new List<int> { 0 };
+
+            for (var index = 0; index < objects.Count; index++)
+            {
+                offsets.Add(Encoding.ASCII.GetByteCount(pdf.ToString()));
+                pdf.Append(index + 1).Append(" 0 obj\n").Append(objects[index]).Append("\nendobj\n");
+            }
+
+            var xrefOffset = Encoding.ASCII.GetByteCount(pdf.ToString());
+            pdf.Append("xref\n0 ").Append(objects.Count + 1).Append('\n');
+            pdf.Append("0000000000 65535 f \n");
+            for (var index = 1; index < offsets.Count; index++)
+                pdf.Append(offsets[index].ToString("0000000000", CultureInfo.InvariantCulture)).Append(" 00000 n \n");
+            pdf.Append("trailer\n<< /Size ").Append(objects.Count + 1).Append(" /Root ").Append(catalogId).Append(" 0 R >>\nstartxref\n");
+            pdf.Append(xrefOffset.ToString(CultureInfo.InvariantCulture)).Append("\n%%EOF");
+
+            return Encoding.ASCII.GetBytes(pdf.ToString());
+        }
+
+        private static byte[] BuildSimpleDiagnosticPdf(string title, IReadOnlyList<string> lines)
+        {
+            var layout = new DiagnosticPdfLayout();
+            layout.AddLine(title, "F2", 18, 0, 6);
+            foreach (var line in lines)
+            {
+                if (string.IsNullOrWhiteSpace(line))
+                {
+                    layout.AddSpacer(8);
+                    continue;
+                }
+
+                var normalized = NormalizePdfDisplayLine(line);
+                var isSection = !normalized.StartsWith("-", StringComparison.Ordinal)
+                    && !normalized.Contains(":", StringComparison.Ordinal)
+                    && !normalized.Contains("|", StringComparison.Ordinal)
+                    && normalized.Length <= 80;
+
+                if (isSection)
+                    layout.AddLine(normalized, "F2", 13, 0, 5);
+                else if (normalized.Contains("|", StringComparison.Ordinal))
+                    layout.AddWrapped(normalized, "F3", 9, line.StartsWith(" ", StringComparison.Ordinal) ? 8 : 0, 2);
+                else
+                    layout.AddWrapped(normalized, "F1", 10, line.StartsWith(" ", StringComparison.Ordinal) || normalized.StartsWith("-", StringComparison.Ordinal) ? 8 : 0, 3);
+            }
+
+            return BuildFrontendStylePdf(layout);
+        }
+
+        private static IEnumerable<string> WrapPdfText(string? text, int maxChars)
+        {
+            var normalized = NormalizePdfDisplayLine(text);
+            if (string.IsNullOrWhiteSpace(normalized))
+            {
+                yield return string.Empty;
+                yield break;
+            }
+
+            if (normalized.Length <= maxChars)
+            {
+                yield return normalized;
+                yield break;
+            }
+
+            var words = normalized.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            var current = string.Empty;
+            foreach (var word in words)
+            {
+                if (string.IsNullOrEmpty(current))
+                {
+                    current = word;
+                    continue;
+                }
+
+                var candidate = $"{current} {word}";
+                if (candidate.Length <= maxChars)
+                {
+                    current = candidate;
+                    continue;
+                }
+
+                yield return current;
+                current = word;
+            }
+
+            if (!string.IsNullOrWhiteSpace(current))
+                yield return current;
+        }
+
+        private static string TruncatePdfText(string? value, int length)
+        {
+            var text = ToPdfSafeText(value);
+            if (text.Length <= length)
+                return text;
+            if (length <= 1)
+                return text[..length];
+            return $"{text[..(length - 1)]}~";
+        }
+
+        private static string NormalizePdfDisplayLine(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return string.Empty;
+
+            return Regex.Replace(value.Replace("\r", " ").Replace("\n", " "), @"\s+", " ").Trim();
+        }
+
+        private static string ToPdfSafeText(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return string.Empty;
+
+            var builder = new StringBuilder(value.Length);
+            foreach (var ch in value)
+            {
+                builder.Append(ch >= 32 && ch <= 126 ? ch : ' ');
+            }
+
+            return Regex.Replace(builder.ToString(), @"\s+", " ").Trim();
+        }
+
+        private static string PdfEscape(string value)
+        {
+            return value
+                .Replace("\\", "\\\\", StringComparison.Ordinal)
+                .Replace("(", "\\(", StringComparison.Ordinal)
+                .Replace(")", "\\)", StringComparison.Ordinal);
         }
 
         private static bool IsDiagnosticCallRelated(DiagnosticEventRow row)
@@ -14624,6 +15384,12 @@ private async Task<List<object>> GetProjectsFromRawSqlAsync(
     var siteSizeSelect = projectColumns.Contains("sitesize")
         ? "p.sitesize"
         : "1.00 AS sitesize";
+    var l3Select = projectColumns.Contains("l3")
+        ? "COALESCE(p.l3, FALSE) AS l3"
+        : "FALSE AS l3";
+    var eventSelect = projectColumns.Contains("event")
+        ? "COALESCE(p.`event`, FALSE) AS event"
+        : "FALSE AS event";
     var createdByUserFilter = projectColumns.Contains("created_by_user_id")
         ? "OR (@uid > 0 AND p.created_by_user_id = @uid)"
         : string.Empty;
@@ -14644,6 +15410,8 @@ private async Task<List<object>> GetProjectsFromRawSqlAsync(
             {gridSizeSelect},
             {logGridSelect},
             {siteSizeSelect},
+            {l3Select},
+            {eventSelect},
             p.created_on,
             p.Download_path,
             ST_AsText(p.polygon) AS project_polygon_wkt,
@@ -14702,6 +15470,8 @@ private async Task<List<object>> GetProjectsFromRawSqlAsync(
             apps = ReadDb("apps"),
             log_grid = ReadDb("log_grid"),
             sitesize = ReadDb("sitesize"),
+            l3 = Convert.ToBoolean(ReadDb("l3") ?? false, CultureInfo.InvariantCulture),
+            @event = Convert.ToBoolean(ReadDb("event") ?? false, CultureInfo.InvariantCulture),
             created_on = ReadDb("created_on"),
             Download_path = ReadDb("Download_path"),
             project_polygon_wkt = ReadDb("project_polygon_wkt"),
@@ -14734,6 +15504,12 @@ private async Task<List<object>> GetProjectsFallbackAsync(
     var siteSizeSelect = projectColumns.Contains("sitesize")
         ? "p.sitesize"
         : "1.00 AS sitesize";
+    var l3Select = projectColumns.Contains("l3")
+        ? "COALESCE(p.l3, FALSE) AS l3"
+        : "FALSE AS l3";
+    var eventSelect = projectColumns.Contains("event")
+        ? "COALESCE(p.`event`, FALSE) AS event"
+        : "FALSE AS event";
     var createdByUserFilter = projectColumns.Contains("created_by_user_id")
         ? "OR (@uid > 0 AND p.created_by_user_id = @uid)"
         : string.Empty;
@@ -14754,6 +15530,8 @@ private async Task<List<object>> GetProjectsFallbackAsync(
             {gridSizeSelect},
             {logGridSelect},
             {siteSizeSelect},
+            {l3Select},
+            {eventSelect},
             p.created_on,
             p.Download_path
         FROM tbl_project p
@@ -14792,6 +15570,8 @@ private async Task<List<object>> GetProjectsFallbackAsync(
             apps = ReadDb("apps"),
             log_grid = ReadDb("log_grid"),
             sitesize = ReadDb("sitesize"),
+            l3 = Convert.ToBoolean(ReadDb("l3") ?? false, CultureInfo.InvariantCulture),
+            @event = Convert.ToBoolean(ReadDb("event") ?? false, CultureInfo.InvariantCulture),
             created_on = ReadDb("created_on"),
             Download_path = ReadDb("Download_path"),
             project_polygon_wkt = (object?)null,
