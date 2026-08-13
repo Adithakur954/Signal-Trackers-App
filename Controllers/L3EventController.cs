@@ -219,99 +219,103 @@ namespace SignalTracker.Controllers
 
                 var hasL3 = preparedL3Files.Count > 0;
                 var hasEvent = preparedEventFiles.Count > 0;
-                await using var tx = await _context.Database.BeginTransactionAsync(cancellationToken);
-                try
+                var strategy = _context.Database.CreateExecutionStrategy();
+                return await strategy.ExecuteAsync(async () =>
                 {
-
-                    var history = new tbl_upload_history
+                    await using var tx = await _context.Database.BeginTransactionAsync(cancellationToken);
+                    try
                     {
-                        uploaded_on = DateTime.Now,
-                        file_type = 1,
-                        file_name = originalUploadName,
-                        uploaded_by = userId,
-                        remarks = linkedProjectId.HasValue
+
+                        var history = new tbl_upload_history
+                        {
+                            uploaded_on = DateTime.Now,
+                            file_type = 1,
+                            file_name = originalUploadName,
+                            uploaded_by = userId,
+                            remarks = linkedProjectId.HasValue
                             ? $"L3/Event Add Session upload for project {linkedProjectId.Value}"
                             : "L3/Event Add Session upload",
-                        status = 1,
-                        polygon_file = string.Empty
-                    };
-                    _context.Set<tbl_upload_history>().Add(history);
-                    await _context.SaveChangesAsync(cancellationToken);
-                    await UpdateUploadHistoryOriginalFileNameAsync(history.id, originalUploadName, cancellationToken);
+                            status = 1,
+                            polygon_file = string.Empty
+                        };
+                        _context.Set<tbl_upload_history>().Add(history);
+                        await _context.SaveChangesAsync(cancellationToken);
+                        await UpdateUploadHistoryOriginalFileNameAsync(history.id, originalUploadName, cancellationToken);
 
-                    var session = new tbl_session
-                    {
-                        user_id = userId,
-                        type = "l3_event",
-                        notes = $"Add Sessions: {(hasL3 && hasEvent ? "L3 + Event" : hasL3 ? "L3" : "Event")}",
-                        uploaded_on = DateTime.Now,
-                        tbl_upload_id = history.id.ToString(CultureInfo.InvariantCulture)
-                    };
-                    _context.tbl_session.Add(session);
-                    await _context.SaveChangesAsync(cancellationToken);
-
-                    var sessionId = session.id ?? 0;
-                    if (sessionId <= 0)
-                        throw new InvalidOperationException("Session creation failed.");
-
-                    var insertedL3Rows = 0;
-                    foreach (var file in preparedL3Files)
-                        insertedL3Rows += await ImportL3FileAsync(sessionId, history.id, file.FilePath, file.FileName, cancellationToken);
-                    var insertedEventRows = 0;
-                    foreach (var file in preparedEventFiles)
-                        insertedEventRows += await ImportEventFileAsync(sessionId, history.id, file.FilePath, file.FileName, cancellationToken);
-                    if (hasL3 && insertedL3Rows == 0)
-                        throw new InvalidDataException("No L3 rows could be parsed from the ZIP.");
-                    if (hasEvent && insertedEventRows == 0)
-                        throw new InvalidDataException("No Event rows could be parsed from the ZIP.");
-
-                    var l3EventHistoryId = await InsertL3EventHistoryAsync(
-                        linkedProjectId,
-                        sessionId,
-                        history.id,
-                        hasL3,
-                        hasEvent,
-                        originalUploadName,
-                        string.Join(", ", preparedL3Files.Select(file => file.FileName)),
-                        string.Join(", ", preparedEventFiles.Select(file => file.FileName)),
-                        totalUploadSize,
-                        insertedL3Rows,
-                        insertedEventRows,
-                        cancellationToken);
-
-                    await UpdateSessionL3EventFlagsAsync(sessionId, hasL3, hasEvent, cancellationToken);
-                    if (linkedProjectId.HasValue)
-                        await UpdateProjectForL3EventSessionAsync(linkedProjectId.Value, sessionId, hasL3, hasEvent, cancellationToken);
-
-                    await tx.CommitAsync(cancellationToken);
-
-                    return Ok(new
-                    {
-                        status = 1,
-                        message = "L3/Event session created successfully.",
-                        projectId = linkedProjectId,
-                        sessionId,
-                        uploadId = history.id,
-                        fileName = originalUploadName,
-                        l3 = hasL3,
-                        @event = hasEvent,
-                        history = new
+                        var session = new tbl_session
                         {
-                            uploadHistoryId = history.id,
-                            l3EventHistoryId
-                        },
-                        rows = new
+                            user_id = userId,
+                            type = "l3_event",
+                            notes = $"Add Sessions: {(hasL3 && hasEvent ? "L3 + Event" : hasL3 ? "L3" : "Event")}",
+                            uploaded_on = DateTime.Now,
+                            tbl_upload_id = history.id.ToString(CultureInfo.InvariantCulture)
+                        };
+                        _context.tbl_session.Add(session);
+                        await _context.SaveChangesAsync(cancellationToken);
+
+                        var sessionId = session.id ?? 0;
+                        if (sessionId <= 0)
+                            throw new InvalidOperationException("Session creation failed.");
+
+                        var insertedL3Rows = 0;
+                        foreach (var file in preparedL3Files)
+                            insertedL3Rows += await ImportL3FileAsync(sessionId, history.id, file.FilePath, file.FileName, cancellationToken);
+                        var insertedEventRows = 0;
+                        foreach (var file in preparedEventFiles)
+                            insertedEventRows += await ImportEventFileAsync(sessionId, history.id, file.FilePath, file.FileName, cancellationToken);
+                        if (hasL3 && insertedL3Rows == 0)
+                            throw new InvalidDataException("No L3 rows could be parsed from the ZIP.");
+                        if (hasEvent && insertedEventRows == 0)
+                            throw new InvalidDataException("No Event rows could be parsed from the ZIP.");
+
+                        var l3EventHistoryId = await InsertL3EventHistoryAsync(
+                            linkedProjectId,
+                            sessionId,
+                            history.id,
+                            hasL3,
+                            hasEvent,
+                            originalUploadName,
+                            string.Join(", ", preparedL3Files.Select(file => file.FileName)),
+                            string.Join(", ", preparedEventFiles.Select(file => file.FileName)),
+                            totalUploadSize,
+                            insertedL3Rows,
+                            insertedEventRows,
+                            cancellationToken);
+
+                        await UpdateSessionL3EventFlagsAsync(sessionId, hasL3, hasEvent, cancellationToken);
+                        if (linkedProjectId.HasValue)
+                            await UpdateProjectForL3EventSessionAsync(linkedProjectId.Value, sessionId, hasL3, hasEvent, cancellationToken);
+
+                        await tx.CommitAsync(cancellationToken);
+
+                        return Ok(new
                         {
-                            l3 = insertedL3Rows,
-                            events = insertedEventRows
-                        }
-                    });
-                }
-                catch
-                {
-                    await tx.RollbackAsync(cancellationToken);
-                    throw;
-                }
+                            status = 1,
+                            message = "L3/Event session created successfully.",
+                            projectId = linkedProjectId,
+                            sessionId,
+                            uploadId = history.id,
+                            fileName = originalUploadName,
+                            l3 = hasL3,
+                            @event = hasEvent,
+                            history = new
+                            {
+                                uploadHistoryId = history.id,
+                                l3EventHistoryId
+                            },
+                            rows = new
+                            {
+                                l3 = insertedL3Rows,
+                                events = insertedEventRows
+                            }
+                        });
+                    }
+                    catch
+                    {
+                        await tx.RollbackAsync(cancellationToken);
+                        throw;
+                    }
+                });
             }
             catch (InvalidDataException ex)
             {
