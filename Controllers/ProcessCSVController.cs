@@ -2,6 +2,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using SignalTracker.Helper;
 using SignalTracker.Models;
 using SignalTracker.Services;
@@ -22,6 +23,7 @@ using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 using Newtonsoft.Json;
 
@@ -44,7 +46,8 @@ namespace SignalTracker.Controllers
             ".bmp",
             ".webp",
             ".json",
-            ".geojson"
+            ".geojson",
+            ".txt"
         };
 
         // =====================================================================
@@ -887,17 +890,6 @@ public IActionResult UploadSitePrediction(
 	                                    break;
 	                                }
 
-	                                // A session-data zip can bundle other CSVs from the same logging
-	                                // session (e.g. Event_*.csv, L3_*.csv diagnostic logs) — only files
-	                                // named "NetworkLog*" are the actual GPS/signal data this app stores.
-	                                // Skip anything else entirely, silently. This only applies to zip
-	                                // uploads: a direct single-CSV upload is saved on disk under a
-	                                // generated name (never "NetworkLog*"), so it must not be filtered here.
-	                                if (isZipFile && !Path.GetFileName(file).StartsWith("NetworkLog", StringComparison.OrdinalIgnoreCase))
-	                                {
-	                                    continue;
-	                                }
-
 	                                // Accumulate (AND), don't overwrite: a zip can contain several CSVs,
 	                                // and this decides the whole session's commit/rollback below. Plain
 	                                // assignment here meant only the LAST file processed determined the
@@ -911,6 +903,29 @@ public IActionResult UploadSitePrediction(
                                     {
                                         continue;
                                     }
+
+	                                if (isZipFile && IsEventDiagnosticFile(uploadCsvName))
+	                                {
+	                                    bool eventOk = ProcessEventDiagnosticFile(sessionId, excelID, file, ref rowInserted, out errorList);
+	                                    IsValidSheet = IsValidSheet && eventOk;
+	                                    if (errorList.Count > 0)
+	                                        allErrorList.AddRange(errorList);
+	                                    continue;
+	                                }
+
+	                                if (isZipFile && IsL3DiagnosticFile(uploadCsvName))
+	                                {
+	                                    bool l3Ok = ProcessL3DiagnosticFile(sessionId, excelID, file, ref rowInserted, out errorList);
+	                                    IsValidSheet = IsValidSheet && l3Ok;
+	                                    if (errorList.Count > 0)
+	                                        allErrorList.AddRange(errorList);
+	                                    continue;
+	                                }
+
+	                                if (isZipFile && !uploadCsvName.StartsWith("NetworkLog", StringComparison.OrdinalIgnoreCase))
+	                                {
+	                                    continue;
+	                                }
 
 	                                bool worksheetOk = ProcessNetLogWorkSheet(sessionId, resolvedCompanyId, file, imageList, excelID, ref rowInserted, ref rowUpdated, out errorList, outerTx);
 	                                IsValidSheet = IsValidSheet && worksheetOk;
@@ -1197,6 +1212,11 @@ public IActionResult UploadSitePrediction(
             {
                 var extension = Path.GetExtension(file);
                 if (string.Equals(extension, ".csv", StringComparison.OrdinalIgnoreCase))
+                {
+                    csvFiles.Add(file);
+                }
+                else if (string.Equals(extension, ".txt", StringComparison.OrdinalIgnoreCase) &&
+                         Path.GetFileName(file).StartsWith("L3", StringComparison.OrdinalIgnoreCase))
                 {
                     csvFiles.Add(file);
                 }
@@ -1608,6 +1628,251 @@ public IActionResult UploadSitePrediction(
                    name.StartsWith("ColorSettings_", StringComparison.OrdinalIgnoreCase);
         }
 
+        private static bool IsEventDiagnosticFile(string? fileName)
+        {
+            return Path.GetFileName(fileName ?? string.Empty)
+                .StartsWith("Event_", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsL3DiagnosticFile(string? fileName)
+        {
+            var name = Path.GetFileName(fileName ?? string.Empty);
+            return name.StartsWith("L3_", StringComparison.OrdinalIgnoreCase) ||
+                   name.StartsWith("L3-", StringComparison.OrdinalIgnoreCase) ||
+                   name.StartsWith("L3.", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string? GetDiagnosticValue(IDictionary<string, object?> row, params string[] names)
+        {
+            foreach (var name in names)
+            {
+                foreach (var item in row)
+                {
+                    if (string.Equals(item.Key, name, StringComparison.OrdinalIgnoreCase))
+                    {
+                        var value = Convert.ToString(item.Value, CultureInfo.InvariantCulture);
+                        return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        private static Dictionary<string, object?> NormalizeDiagnosticRow(IDictionary<string, object?> row)
+        {
+            return row.ToDictionary(
+                x => x.Key,
+                x => (object?)Convert.ToString(x.Value, CultureInfo.InvariantCulture),
+                StringComparer.OrdinalIgnoreCase);
+        }
+
+        private static double? ParseDiagnosticDouble(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return null;
+
+            return double.TryParse(value.Trim(), NumberStyles.Any, CultureInfo.InvariantCulture, out var parsed)
+                ? parsed
+                : null;
+        }
+
+        private void AddDiagnosticParam(IDbCommand cmd, string name, object? value)
+        {
+            var param = cmd.CreateParameter();
+            param.ParameterName = name;
+            param.Value = value ?? DBNull.Value;
+            cmd.Parameters.Add(param);
+        }
+
+        private bool ProcessEventDiagnosticFile(int sessionId, int excelId, string filePath, ref int rowInserted, out List<string> errorList)
+        {
+            errorList = new List<string>();
+            var fileName = Path.GetFileName(filePath);
+
+            try
+            {
+                using var reader = new StreamReader(filePath);
+                using var csv = new CsvReader(reader, new CsvConfiguration(CultureInfo.InvariantCulture)
+                {
+                    BadDataFound = null,
+                    MissingFieldFound = null,
+                    HeaderValidated = null,
+                    DetectColumnCountChanges = false
+                });
+
+                var rowNo = 0;
+                foreach (var record in csv.GetRecords<dynamic>())
+                {
+                    rowNo++;
+                    var row = NormalizeDiagnosticRow((IDictionary<string, object?>)record);
+                    InsertEventDiagnosticRow(sessionId, excelId, fileName, rowNo, row);
+                    rowInserted++;
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                errorList.Add($"{fileName} event import error: {SafeException.GetInnermost(ex)}");
+                return false;
+            }
+        }
+
+        private bool ProcessL3DiagnosticFile(int sessionId, int excelId, string filePath, ref int rowInserted, out List<string> errorList)
+        {
+            errorList = new List<string>();
+            var fileName = Path.GetFileName(filePath);
+
+            try
+            {
+                if (string.Equals(Path.GetExtension(filePath), ".txt", StringComparison.OrdinalIgnoreCase))
+                {
+                    foreach (var row in ReadL3MessageTextRecords(filePath))
+                    {
+                        InsertL3DiagnosticRow(sessionId, excelId, fileName, row.RowNo, "txt", row.Values, row.RawText);
+                        rowInserted++;
+                    }
+
+                    return true;
+                }
+
+                using var reader = new StreamReader(filePath);
+                using var csv = new CsvReader(reader, new CsvConfiguration(CultureInfo.InvariantCulture)
+                {
+                    BadDataFound = null,
+                    MissingFieldFound = null,
+                    HeaderValidated = null,
+                    DetectColumnCountChanges = false
+                });
+
+                var rowNo = 0;
+                foreach (var record in csv.GetRecords<dynamic>())
+                {
+                    rowNo++;
+                    var row = NormalizeDiagnosticRow((IDictionary<string, object?>)record);
+                    InsertL3DiagnosticRow(sessionId, excelId, fileName, rowNo, "csv", row, null);
+                    rowInserted++;
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                errorList.Add($"{fileName} L3 import error: {SafeException.GetInnermost(ex)}");
+                return false;
+            }
+        }
+
+        private static List<(int RowNo, Dictionary<string, object?> Values, string RawText)> ReadL3MessageTextRecords(string filePath)
+        {
+            var records = new List<(int RowNo, Dictionary<string, object?> Values, string RawText)>();
+            var current = new List<string>();
+
+            void Flush()
+            {
+                if (current.Count == 0)
+                    return;
+
+                var first = current[0].Trim();
+                if (!Regex.IsMatch(first, @"^\d{6}\s+"))
+                {
+                    current.Clear();
+                    return;
+                }
+
+                var raw = string.Join(Environment.NewLine, current);
+                var values = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["timestamp"] = Regex.Match(first, @"^\d{6}\s+(\S+)").Groups[1].Value,
+                    ["category"] = Regex.Match(first, @"^\d{6}\s+\S+\s+\S+\s+(\S+)").Groups[1].Value,
+                    ["message"] = first
+                };
+
+                var latLon = Regex.Match(raw, @"Latitude:\s*([-+]?\d+(?:\.\d+)?),\s*Longitude:\s*([-+]?\d+(?:\.\d+)?)", RegexOptions.IgnoreCase);
+                if (latLon.Success)
+                {
+                    values["latitude"] = latLon.Groups[1].Value;
+                    values["longitude"] = latLon.Groups[2].Value;
+                }
+
+                var messageName = Regex.Match(raw, "Message Name:\\s*\"([^\"]+)\"", RegexOptions.IgnoreCase);
+                if (messageName.Success)
+                    values["message"] = messageName.Groups[1].Value;
+
+                records.Add((records.Count + 1, values, raw));
+                current.Clear();
+            }
+
+            foreach (var line in System.IO.File.ReadLines(filePath))
+            {
+                if (Regex.IsMatch(line, @"^\d{6}\s+") && current.Count > 0)
+                    Flush();
+
+                if (current.Count > 0 || Regex.IsMatch(line, @"^\d{6}\s+"))
+                    current.Add(line);
+            }
+
+            Flush();
+            return records;
+        }
+
+        private void InsertEventDiagnosticRow(int sessionId, int excelId, string fileName, int rowNo, Dictionary<string, object?> row)
+        {
+            using var cmd = db.Database.GetDbConnection().CreateCommand();
+            cmd.Transaction = db.Database.CurrentTransaction?.GetDbTransaction();
+            cmd.CommandText = @"
+                INSERT INTO tbl_event_log
+                    (tbl_upload_id, session_id, source_file_name, row_no, timestamp_text, latitude, longitude,
+                     category, event_name, detail, source, severity, raw_json)
+                VALUES
+                    (@uploadId, @sessionId, @fileName, @rowNo, @timestampText, @latitude, @longitude,
+                     @category, @eventName, @detail, @source, @severity, @rawJson);";
+            AddDiagnosticParam(cmd, "@uploadId", excelId);
+            AddDiagnosticParam(cmd, "@sessionId", sessionId);
+            AddDiagnosticParam(cmd, "@fileName", fileName);
+            AddDiagnosticParam(cmd, "@rowNo", rowNo);
+            AddDiagnosticParam(cmd, "@timestampText", GetDiagnosticValue(row, "timestamp", "time"));
+            AddDiagnosticParam(cmd, "@latitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "latitude", "lat")));
+            AddDiagnosticParam(cmd, "@longitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "longitude", "lon", "lng")));
+            AddDiagnosticParam(cmd, "@category", GetDiagnosticValue(row, "category"));
+            AddDiagnosticParam(cmd, "@eventName", GetDiagnosticValue(row, "event", "event_name", "message"));
+            AddDiagnosticParam(cmd, "@detail", GetDiagnosticValue(row, "detail", "description"));
+            AddDiagnosticParam(cmd, "@source", GetDiagnosticValue(row, "source"));
+            AddDiagnosticParam(cmd, "@severity", GetDiagnosticValue(row, "severity", "level"));
+            AddDiagnosticParam(cmd, "@rawJson", System.Text.Json.JsonSerializer.Serialize(row));
+            cmd.ExecuteNonQuery();
+        }
+
+        private void InsertL3DiagnosticRow(int sessionId, int excelId, string fileName, int rowNo, string sourceFileType, Dictionary<string, object?> row, string? rawText)
+        {
+            using var cmd = db.Database.GetDbConnection().CreateCommand();
+            cmd.Transaction = db.Database.CurrentTransaction?.GetDbTransaction();
+            cmd.CommandText = @"
+                INSERT INTO tbl_l3_log
+                    (tbl_upload_id, session_id, source_file_name, source_file_type, row_no, timestamp_text, latitude, longitude,
+                     category, message, detail, source, severity, raw_text, raw_json)
+                VALUES
+                    (@uploadId, @sessionId, @fileName, @sourceFileType, @rowNo, @timestampText, @latitude, @longitude,
+                     @category, @message, @detail, @source, @severity, @rawText, @rawJson);";
+            AddDiagnosticParam(cmd, "@uploadId", excelId);
+            AddDiagnosticParam(cmd, "@sessionId", sessionId);
+            AddDiagnosticParam(cmd, "@fileName", fileName);
+            AddDiagnosticParam(cmd, "@sourceFileType", sourceFileType);
+            AddDiagnosticParam(cmd, "@rowNo", rowNo);
+            AddDiagnosticParam(cmd, "@timestampText", GetDiagnosticValue(row, "timestamp", "time"));
+            AddDiagnosticParam(cmd, "@latitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "latitude", "lat")));
+            AddDiagnosticParam(cmd, "@longitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "longitude", "lon", "lng")));
+            AddDiagnosticParam(cmd, "@category", GetDiagnosticValue(row, "category"));
+            AddDiagnosticParam(cmd, "@message", GetDiagnosticValue(row, "message", "event", "message_name"));
+            AddDiagnosticParam(cmd, "@detail", GetDiagnosticValue(row, "detail", "description"));
+            AddDiagnosticParam(cmd, "@source", GetDiagnosticValue(row, "source"));
+            AddDiagnosticParam(cmd, "@severity", GetDiagnosticValue(row, "severity", "level"));
+            AddDiagnosticParam(cmd, "@rawText", rawText);
+            AddDiagnosticParam(cmd, "@rawJson", System.Text.Json.JsonSerializer.Serialize(row));
+            cmd.ExecuteNonQuery();
+        }
+
         private static bool IsPrimaryNo(string? primary)
         {
             var normalized = (primary ?? string.Empty).Trim();
@@ -1846,6 +2111,73 @@ public IActionResult UploadSitePrediction(
             EnsureColumn("tbl_network_log", "tbl_sub_session_cs_id", "BIGINT NULL");
             EnsureColumn("tbl_network_log_neighbour", "tbl_sub_session_ps_id", "BIGINT NULL");
             EnsureColumn("tbl_network_log_neighbour", "tbl_sub_session_cs_id", "BIGINT NULL");
+            EnsureNetworkDiagnosticTables();
+        }
+
+        private void EnsureNetworkDiagnosticTables()
+        {
+            var conn = db.Database.GetDbConnection();
+            var shouldClose = conn.State != ConnectionState.Open;
+            if (shouldClose)
+                conn.Open();
+
+            try
+            {
+                using var l3 = conn.CreateCommand();
+                l3.Transaction = db.Database.CurrentTransaction?.GetDbTransaction();
+                l3.CommandText = @"
+                    CREATE TABLE IF NOT EXISTS tbl_l3_log (
+                        id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                        tbl_upload_id INT NULL,
+                        session_id INT NULL,
+                        source_file_name VARCHAR(255) NULL,
+                        source_file_type VARCHAR(32) NULL,
+                        row_no INT NULL,
+                        timestamp_text VARCHAR(64) NULL,
+                        latitude DOUBLE NULL,
+                        longitude DOUBLE NULL,
+                        category VARCHAR(128) NULL,
+                        message VARCHAR(512) NULL,
+                        detail LONGTEXT NULL,
+                        source VARCHAR(128) NULL,
+                        severity VARCHAR(64) NULL,
+                        raw_text LONGTEXT NULL,
+                        raw_json LONGTEXT NULL,
+                        uploaded_on DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        INDEX ix_tbl_l3_log_session (session_id),
+                        INDEX ix_tbl_l3_log_upload (tbl_upload_id)
+                    );";
+                l3.ExecuteNonQuery();
+
+                using var events = conn.CreateCommand();
+                events.Transaction = db.Database.CurrentTransaction?.GetDbTransaction();
+                events.CommandText = @"
+                    CREATE TABLE IF NOT EXISTS tbl_event_log (
+                        id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                        tbl_upload_id INT NULL,
+                        session_id INT NULL,
+                        source_file_name VARCHAR(255) NULL,
+                        row_no INT NULL,
+                        timestamp_text VARCHAR(64) NULL,
+                        latitude DOUBLE NULL,
+                        longitude DOUBLE NULL,
+                        category VARCHAR(128) NULL,
+                        event_name VARCHAR(512) NULL,
+                        detail LONGTEXT NULL,
+                        source VARCHAR(128) NULL,
+                        severity VARCHAR(64) NULL,
+                        raw_json LONGTEXT NULL,
+                        uploaded_on DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        INDEX ix_tbl_event_log_session (session_id),
+                        INDEX ix_tbl_event_log_upload (tbl_upload_id)
+                    );";
+                events.ExecuteNonQuery();
+            }
+            finally
+            {
+                if (shouldClose)
+                    conn.Close();
+            }
         }
 
         private void EnsureTextColumn(string tableName, string columnName)

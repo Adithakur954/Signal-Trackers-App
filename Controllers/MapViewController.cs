@@ -2240,6 +2240,439 @@ public async Task<IActionResult> DeleteAvailablePolygon(
             }
         }
 
+        [HttpGet("GetDiagnosticCallSummary")]
+        [HttpGet("GetEventL3CallSummary")]
+        public async Task<IActionResult> GetDiagnosticCallSummary(
+            [FromQuery] int? sessionId = null,
+            [FromQuery] string? sessionIds = null,
+            [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
+            [FromQuery] int? uploadId = null,
+            [FromQuery] int take = 20000)
+        {
+            try
+            {
+                var requestedSessionIds = new List<int>();
+                if (sessionId.HasValue && sessionId.Value > 0)
+                {
+                    requestedSessionIds.Add(sessionId.Value);
+                }
+
+                requestedSessionIds.AddRange(ParseCsvToIntList(sessionIds));
+                requestedSessionIds.AddRange(ParseCsvToIntList(sessionIdsAlt));
+                requestedSessionIds = requestedSessionIds
+                    .Where(x => x > 0)
+                    .Distinct()
+                    .OrderBy(x => x)
+                    .ToList();
+
+                if (!uploadId.HasValue && requestedSessionIds.Count == 0)
+                {
+                    return BadRequest(new
+                    {
+                        status = 0,
+                        message = "Provide uploadId, sessionId, or comma-separated sessionIds/session_ids."
+                    });
+                }
+
+                take = Math.Clamp(take, 1, 50000);
+
+                var conn = db.Database.GetDbConnection();
+                if (conn.State != ConnectionState.Open)
+                {
+                    await conn.OpenAsync();
+                }
+
+                var hasEventTable = await DiagnosticTableExistsAsync(conn, "tbl_event_log");
+                var hasL3Table = await DiagnosticTableExistsAsync(conn, "tbl_l3_log");
+
+                var events = hasEventTable
+                    ? await LoadDiagnosticEventRowsAsync(conn, requestedSessionIds, uploadId, take)
+                    : new List<DiagnosticEventRow>();
+                var l3Rows = hasL3Table
+                    ? await LoadDiagnosticL3RowsAsync(conn, requestedSessionIds, uploadId, take)
+                    : new List<DiagnosticL3Row>();
+
+                var calls = BuildDiagnosticCallRows(events, l3Rows);
+                var timelineRows = BuildDiagnosticTimelineRows(events, l3Rows, calls);
+                var frontendCalls = BuildFrontendDiagnosticCalls(calls, timelineRows);
+                var connected = calls.Count(x => string.Equals(x.Result, "Connected", StringComparison.OrdinalIgnoreCase));
+                var dropped = calls.Count(x => string.Equals(x.Result, "Dropped", StringComparison.OrdinalIgnoreCase));
+                var notConnected = calls.Count(x => string.Equals(x.Result, "Not Connected", StringComparison.OrdinalIgnoreCase));
+                var analyzer = BuildDiagnosticAnalyzerSummary(timelineRows, calls, connected, dropped, notConnected);
+                var flowModels = BuildDiagnosticFlowModels();
+                var setupValues = calls
+                    .Where(x => x.SetupTimeSeconds.HasValue)
+                    .Select(x => x.SetupTimeSeconds!.Value)
+                    .ToList();
+                var durationValues = calls
+                    .Where(x => x.CallDurationSeconds.HasValue
+                        && !string.Equals(x.Result, "Not Connected", StringComparison.OrdinalIgnoreCase))
+                    .Select(x => x.CallDurationSeconds!.Value)
+                    .ToList();
+
+                return Json(new
+                {
+                    status = 1,
+                    filters = new
+                    {
+                        upload_id = uploadId,
+                        session_ids = requestedSessionIds,
+                        take
+                    },
+                    summary = new
+                    {
+                        total_call_attempts = calls.Count,
+                        totalCalls = calls.Count,
+                        connected,
+                        dropped,
+                        not_connected = notConnected,
+                        notConnected,
+                        avg_call_setup_seconds = setupValues.Count > 0 ? Math.Round(setupValues.Average(), 2) : (double?)null,
+                        avg_connected_duration_seconds = durationValues.Count > 0 ? Math.Round(durationValues.Average(), 2) : (double?)null,
+                        averageSetupTime = setupValues.Count > 0 ? (int)Math.Round(setupValues.Average() * 1000) : 0,
+                        averageTalkTime = durationValues.Count > 0 ? (int)Math.Round(durationValues.Average() * 1000) : 0,
+                        totalDurationMs = (int)Math.Round(durationValues.Sum() * 1000),
+                        totalConnectedDurationMs = (int)Math.Round(durationValues.Sum() * 1000),
+                        totalAttemptDurationMs = (int)Math.Round(calls.Where(x => x.StartSeconds.HasValue && x.EndSeconds.HasValue).Sum(x => SecondsBetween(TimeSpan.FromSeconds(x.StartSeconds!.Value), TimeSpan.FromSeconds(x.EndSeconds!.Value))) * 1000),
+                        successRate = calls.Count > 0 ? Math.Round((double)connected / calls.Count, 3) : 0,
+                        busy = calls.Count(x => string.Equals(x.StatusDetail, "Busy", StringComparison.OrdinalIgnoreCase)),
+                        rejected = calls.Count(x => string.Equals(x.StatusDetail, "Rejected", StringComparison.OrdinalIgnoreCase)),
+                        setupFailures = calls.Count(x => string.Equals(x.StatusDetail, "Call Setup Failure", StringComparison.OrdinalIgnoreCase)),
+                        ongoing = calls.Count(x => string.Equals(x.StatusDetail, "In Progress", StringComparison.OrdinalIgnoreCase)),
+                        unknown = calls.Count(x => string.Equals(x.StatusDetail, "Unknown", StringComparison.OrdinalIgnoreCase)),
+                        calls = frontendCalls
+                    },
+                    calls = calls.Select(x => new
+                    {
+                        call = x.Call,
+                        id = x.FrontendId,
+                        session_id = x.SessionId,
+                        start = x.Start,
+                        end = x.End,
+                        technology = x.Technology,
+                        result = x.Result,
+                        status = x.Result,
+                        detailedStatus = x.StatusDetail,
+                        status_detail = x.StatusDetail,
+                        setup_time_seconds = x.SetupTimeSeconds,
+                        setup_time = FormatDiagnosticDuration(x.SetupTimeSeconds),
+                        callSetupTimeMs = ToMilliseconds(x.SetupTimeSeconds),
+                        setupTimeMs = ToMilliseconds(x.SetupTimeSeconds),
+                        call_duration_seconds = x.CallDurationSeconds,
+                        call_duration = FormatDiagnosticDuration(x.CallDurationSeconds),
+                        connectedDurationMs = ToMilliseconds(x.CallDurationSeconds),
+                        talkTimeMs = ToMilliseconds(x.CallDurationSeconds),
+                        durationMs = ToMilliseconds(x.CallDurationSeconds),
+                        disconnectReason = x.Reason,
+                        reason = x.Reason
+                    }),
+                    rows = timelineRows,
+                    timeline = timelineRows,
+                    analyzer,
+                    flow_models = flowModels,
+                    flowModels,
+                    flow_model_count = flowModels.Count,
+                    frontend_summary = new
+                    {
+                        totalCalls = calls.Count,
+                        connected,
+                        dropped,
+                        notConnected,
+                        averageSetupTime = setupValues.Count > 0 ? (int)Math.Round(setupValues.Average() * 1000) : 0,
+                        averageTalkTime = durationValues.Count > 0 ? (int)Math.Round(durationValues.Average() * 1000) : 0,
+                        totalDurationMs = (int)Math.Round(durationValues.Sum() * 1000),
+                        totalConnectedDurationMs = (int)Math.Round(durationValues.Sum() * 1000),
+                        totalAttemptDurationMs = (int)Math.Round(calls.Where(x => x.StartSeconds.HasValue && x.EndSeconds.HasValue).Sum(x => SecondsBetween(TimeSpan.FromSeconds(x.StartSeconds!.Value), TimeSpan.FromSeconds(x.EndSeconds!.Value))) * 1000),
+                        successRate = calls.Count > 0 ? Math.Round((double)connected / calls.Count, 3) : 0,
+                        busy = calls.Count(x => string.Equals(x.StatusDetail, "Busy", StringComparison.OrdinalIgnoreCase)),
+                        rejected = calls.Count(x => string.Equals(x.StatusDetail, "Rejected", StringComparison.OrdinalIgnoreCase)),
+                        setupFailures = calls.Count(x => string.Equals(x.StatusDetail, "Call Setup Failure", StringComparison.OrdinalIgnoreCase)),
+                        ongoing = calls.Count(x => string.Equals(x.StatusDetail, "In Progress", StringComparison.OrdinalIgnoreCase)),
+                        unknown = calls.Count(x => string.Equals(x.StatusDetail, "Unknown", StringComparison.OrdinalIgnoreCase)),
+                        calls = frontendCalls
+                    },
+                    data = new
+                    {
+                        events = events.Select(x => new
+                        {
+                            x.Id,
+                            upload_id = x.UploadId,
+                            session_id = x.SessionId,
+                            x.SourceFileName,
+                            x.RowNo,
+                            timestamp = x.TimestampText,
+                            x.Latitude,
+                            x.Longitude,
+                            x.Category,
+                            event_name = x.EventName,
+                            x.Detail,
+                            x.Source,
+                            x.Severity
+                        }),
+                        l3 = l3Rows.Select(x => new
+                        {
+                            x.Id,
+                            upload_id = x.UploadId,
+                            session_id = x.SessionId,
+                            x.SourceFileName,
+                            x.SourceFileType,
+                            x.RowNo,
+                            timestamp = x.TimestampText,
+                            x.Latitude,
+                            x.Longitude,
+                            x.Category,
+                            x.Message,
+                            x.Detail,
+                            x.Source,
+                            x.Severity,
+                            raw_text = x.RawText
+                        })
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new
+                {
+                    status = 0,
+                    message = "An error occurred while calculating event/L3 call summary.",
+                    details = SafeException.Get(ex)
+                });
+            }
+        }
+
+        [HttpGet("GetDiagnosticTabCounts")]
+        public async Task<IActionResult> GetDiagnosticTabCounts(
+            [FromQuery] int? sessionId = null,
+            [FromQuery] string? sessionIds = null,
+            [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
+            [FromQuery] int? uploadId = null,
+            [FromQuery] int take = 50000)
+        {
+            try
+            {
+                var request = ParseDiagnosticQuery(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
+                if (request.Error != null)
+                    return request.Error;
+
+                var conn = await OpenDiagnosticConnectionAsync();
+                var eventCount = await CountDiagnosticRowsAsync(conn, "tbl_event_log", request.SessionIds, request.UploadId);
+                var l3Count = await CountDiagnosticRowsAsync(conn, "tbl_l3_log", request.SessionIds, request.UploadId);
+
+                var events = eventCount > 0
+                    ? await LoadDiagnosticEventRowsAsync(conn, request.SessionIds, request.UploadId, request.Take)
+                    : new List<DiagnosticEventRow>();
+                var l3Rows = l3Count > 0
+                    ? await LoadDiagnosticL3RowsAsync(conn, request.SessionIds, request.UploadId, request.Take)
+                    : new List<DiagnosticL3Row>();
+                var calls = BuildDiagnosticCallRows(events, l3Rows);
+                var rows = BuildDiagnosticTimelineRows(events, l3Rows, calls);
+                var connected = calls.Count(x => string.Equals(x.Result, "Connected", StringComparison.OrdinalIgnoreCase));
+                var dropped = calls.Count(x => string.Equals(x.Result, "Dropped", StringComparison.OrdinalIgnoreCase));
+                var notConnected = calls.Count(x => string.Equals(x.Result, "Not Connected", StringComparison.OrdinalIgnoreCase));
+                dynamic analyzer = BuildDiagnosticAnalyzerSummary(rows, calls, connected, dropped, notConnected);
+
+                return Json(new
+                {
+                    status = 1,
+                    map_view_count = rows.Count,
+                    excel_view_count = rows.Count,
+                    analyzer_count = analyzer.stats.totalProcedures,
+                    flow_model_count = BuildDiagnosticFlowModels().Count,
+                    l3_count = l3Count,
+                    event_count = eventCount,
+                    calls = calls.Count,
+                    connected,
+                    dropped,
+                    not_connected = notConnected
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { status = 0, message = "An error occurred while fetching diagnostic tab counts.", details = SafeException.Get(ex) });
+            }
+        }
+
+        [HttpGet("GetDiagnosticExcelRows")]
+        [HttpGet("GetDiagnosticMapRows")]
+        public async Task<IActionResult> GetDiagnosticExcelRows(
+            [FromQuery] int? sessionId = null,
+            [FromQuery] string? sessionIds = null,
+            [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
+            [FromQuery] int? uploadId = null,
+            [FromQuery] int take = 20000)
+        {
+            try
+            {
+                var request = ParseDiagnosticQuery(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
+                if (request.Error != null)
+                    return request.Error;
+
+                var conn = await OpenDiagnosticConnectionAsync();
+                var events = await LoadDiagnosticEventRowsAsync(conn, request.SessionIds, request.UploadId, request.Take);
+                var l3Rows = await LoadDiagnosticL3RowsAsync(conn, request.SessionIds, request.UploadId, request.Take);
+                var calls = BuildDiagnosticCallRows(events, l3Rows);
+                var rows = BuildDiagnosticTimelineRows(events, l3Rows, calls);
+
+                return Json(new
+                {
+                    status = 1,
+                    count = rows.Count,
+                    rows,
+                    calls = BuildFrontendDiagnosticCalls(calls, rows)
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { status = 0, message = "An error occurred while fetching diagnostic rows.", details = SafeException.Get(ex) });
+            }
+        }
+
+        [HttpGet("GetDiagnosticCallSummaryOnly")]
+        public async Task<IActionResult> GetDiagnosticCallSummaryOnly(
+            [FromQuery] int? sessionId = null,
+            [FromQuery] string? sessionIds = null,
+            [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
+            [FromQuery] int? uploadId = null,
+            [FromQuery] int take = 20000)
+        {
+            try
+            {
+                var request = ParseDiagnosticQuery(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
+                if (request.Error != null)
+                    return request.Error;
+
+                var conn = await OpenDiagnosticConnectionAsync();
+                var events = await LoadDiagnosticEventRowsAsync(conn, request.SessionIds, request.UploadId, request.Take);
+                var l3Rows = await LoadDiagnosticL3RowsAsync(conn, request.SessionIds, request.UploadId, request.Take);
+                var calls = BuildDiagnosticCallRows(events, l3Rows);
+                var rows = BuildDiagnosticTimelineRows(events, l3Rows, calls);
+                var frontendCalls = BuildFrontendDiagnosticCalls(calls, rows);
+                var connected = calls.Count(x => string.Equals(x.Result, "Connected", StringComparison.OrdinalIgnoreCase));
+                var dropped = calls.Count(x => string.Equals(x.Result, "Dropped", StringComparison.OrdinalIgnoreCase));
+                var notConnected = calls.Count(x => string.Equals(x.Result, "Not Connected", StringComparison.OrdinalIgnoreCase));
+                var setupValues = calls.Where(x => x.SetupTimeSeconds.HasValue).Select(x => x.SetupTimeSeconds!.Value).ToList();
+                var durationValues = calls.Where(x => x.CallDurationSeconds.HasValue && !string.Equals(x.Result, "Not Connected", StringComparison.OrdinalIgnoreCase)).Select(x => x.CallDurationSeconds!.Value).ToList();
+
+                return Json(new
+                {
+                    status = 1,
+                    summary = new
+                    {
+                        totalCalls = calls.Count,
+                        connected,
+                        dropped,
+                        notConnected,
+                        averageSetupTime = setupValues.Count > 0 ? (int)Math.Round(setupValues.Average() * 1000) : 0,
+                        averageTalkTime = durationValues.Count > 0 ? (int)Math.Round(durationValues.Average() * 1000) : 0,
+                        totalDurationMs = (int)Math.Round(durationValues.Sum() * 1000),
+                        totalConnectedDurationMs = (int)Math.Round(durationValues.Sum() * 1000),
+                        calls = frontendCalls
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { status = 0, message = "An error occurred while fetching call summary.", details = SafeException.Get(ex) });
+            }
+        }
+
+        [HttpGet("GetDiagnosticAnalyzerSummary")]
+        public async Task<IActionResult> GetDiagnosticAnalyzerSummary(
+            [FromQuery] int? sessionId = null,
+            [FromQuery] string? sessionIds = null,
+            [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
+            [FromQuery] int? uploadId = null,
+            [FromQuery] int take = 50000)
+        {
+            try
+            {
+                var request = ParseDiagnosticQuery(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
+                if (request.Error != null)
+                    return request.Error;
+
+                var conn = await OpenDiagnosticConnectionAsync();
+                var events = await LoadDiagnosticEventRowsAsync(conn, request.SessionIds, request.UploadId, request.Take);
+                var l3Rows = await LoadDiagnosticL3RowsAsync(conn, request.SessionIds, request.UploadId, request.Take);
+                var calls = BuildDiagnosticCallRows(events, l3Rows);
+                var rows = BuildDiagnosticTimelineRows(events, l3Rows, calls);
+                var connected = calls.Count(x => string.Equals(x.Result, "Connected", StringComparison.OrdinalIgnoreCase));
+                var dropped = calls.Count(x => string.Equals(x.Result, "Dropped", StringComparison.OrdinalIgnoreCase));
+                var notConnected = calls.Count(x => string.Equals(x.Result, "Not Connected", StringComparison.OrdinalIgnoreCase));
+
+                return Json(new
+                {
+                    status = 1,
+                    analyzer = BuildDiagnosticAnalyzerSummary(rows, calls, connected, dropped, notConnected)
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { status = 0, message = "An error occurred while fetching analyzer summary.", details = SafeException.Get(ex) });
+            }
+        }
+
+        [HttpGet("GetDiagnosticFlowModels")]
+        public IActionResult GetDiagnosticFlowModels()
+        {
+            var flowModels = BuildDiagnosticFlowModels();
+            return Json(new
+            {
+                status = 1,
+                count = flowModels.Count,
+                flow_models = flowModels,
+                flowModels
+            });
+        }
+
+        [HttpGet("GetDiagnosticL3Messages")]
+        public async Task<IActionResult> GetDiagnosticL3Messages(
+            [FromQuery] int? sessionId = null,
+            [FromQuery] string? sessionIds = null,
+            [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
+            [FromQuery] int? uploadId = null,
+            [FromQuery] int take = 20000)
+        {
+            try
+            {
+                var request = ParseDiagnosticQuery(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
+                if (request.Error != null)
+                    return request.Error;
+
+                var conn = await OpenDiagnosticConnectionAsync();
+                var rows = await LoadDiagnosticL3RowsAsync(conn, request.SessionIds, request.UploadId, request.Take);
+                return Json(new { status = 1, count = rows.Count, l3 = rows });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { status = 0, message = "An error occurred while fetching L3 messages.", details = SafeException.Get(ex) });
+            }
+        }
+
+        [HttpGet("GetDiagnosticEvents")]
+        public async Task<IActionResult> GetDiagnosticEvents(
+            [FromQuery] int? sessionId = null,
+            [FromQuery] string? sessionIds = null,
+            [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
+            [FromQuery] int? uploadId = null,
+            [FromQuery] int take = 20000)
+        {
+            try
+            {
+                var request = ParseDiagnosticQuery(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
+                if (request.Error != null)
+                    return request.Error;
+
+                var conn = await OpenDiagnosticConnectionAsync();
+                var rows = await LoadDiagnosticEventRowsAsync(conn, request.SessionIds, request.UploadId, request.Take);
+                return Json(new { status = 1, count = rows.Count, events = rows });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { status = 0, message = "An error occurred while fetching events.", details = SafeException.Get(ex) });
+            }
+        }
+
 // ========================================
 //  RESPONSE DTO FOR CACHING
 // ========================================
@@ -2248,6 +2681,14 @@ public class AvailablePolygonsResponse
     public string? currentSessionId { get; set; }
     public List<object> data { get; set; } = new();
 }   // ----- helpers -----
+        private sealed class DiagnosticQueryRequest
+        {
+            public List<int> SessionIds { get; init; } = new();
+            public int? UploadId { get; init; }
+            public int Take { get; init; }
+            public IActionResult? Error { get; init; }
+        }
+
         private sealed class SubSessionPolygonScope
         {
             public List<int> ProjectIds { get; } = new();
@@ -2270,6 +2711,1286 @@ public class AvailablePolygonsResponse
                 parameterNames.Add(parameterName);
                 AddParam(cmd, parameterName, values[i]);
             }
+        }
+
+        private DiagnosticQueryRequest ParseDiagnosticQuery(
+            int? sessionId,
+            string? sessionIds,
+            string? sessionIdsAlt,
+            int? uploadId,
+            int take)
+        {
+            var requestedSessionIds = new List<int>();
+            if (sessionId.HasValue && sessionId.Value > 0)
+            {
+                requestedSessionIds.Add(sessionId.Value);
+            }
+
+            requestedSessionIds.AddRange(ParseCsvToIntList(sessionIds));
+            requestedSessionIds.AddRange(ParseCsvToIntList(sessionIdsAlt));
+            requestedSessionIds = requestedSessionIds
+                .Where(x => x > 0)
+                .Distinct()
+                .OrderBy(x => x)
+                .ToList();
+
+            if (!uploadId.HasValue && requestedSessionIds.Count == 0)
+            {
+                return new DiagnosticQueryRequest
+                {
+                    Error = BadRequest(new
+                    {
+                        status = 0,
+                        message = "Provide uploadId, sessionId, or comma-separated sessionIds/session_ids."
+                    })
+                };
+            }
+
+            return new DiagnosticQueryRequest
+            {
+                SessionIds = requestedSessionIds,
+                UploadId = uploadId.HasValue && uploadId.Value > 0 ? uploadId : null,
+                Take = Math.Clamp(take, 1, 50000)
+            };
+        }
+
+        private async Task<DbConnection> OpenDiagnosticConnectionAsync()
+        {
+            var conn = db.Database.GetDbConnection();
+            if (conn.State != ConnectionState.Open)
+            {
+                await conn.OpenAsync();
+            }
+
+            return conn;
+        }
+
+        private sealed class DiagnosticEventRow
+        {
+            public long Id { get; init; }
+            public int? UploadId { get; init; }
+            public int? SessionId { get; init; }
+            public string? SourceFileName { get; init; }
+            public int? RowNo { get; init; }
+            public string? TimestampText { get; init; }
+            public double? Latitude { get; init; }
+            public double? Longitude { get; init; }
+            public string? Category { get; init; }
+            public string? EventName { get; init; }
+            public string? Detail { get; init; }
+            public string? Source { get; init; }
+            public string? Severity { get; init; }
+            public TimeSpan? EventTime => ParseDiagnosticTime(TimestampText);
+            public string Text => string.Join(" ", new[] { Category, EventName, Detail, Source, Severity }.Where(x => !string.IsNullOrWhiteSpace(x)));
+        }
+
+        private sealed class DiagnosticL3Row
+        {
+            public long Id { get; init; }
+            public int? UploadId { get; init; }
+            public int? SessionId { get; init; }
+            public string? SourceFileName { get; init; }
+            public string? SourceFileType { get; init; }
+            public int? RowNo { get; init; }
+            public string? TimestampText { get; init; }
+            public double? Latitude { get; init; }
+            public double? Longitude { get; init; }
+            public string? Category { get; init; }
+            public string? Message { get; init; }
+            public string? Detail { get; init; }
+            public string? Source { get; init; }
+            public string? Severity { get; init; }
+            public string? RawText { get; init; }
+            public TimeSpan? EventTime => ParseDiagnosticTime(TimestampText);
+            public string Text => string.Join(" ", new[] { Category, Message, Detail, RawText, Source, Severity }.Where(x => !string.IsNullOrWhiteSpace(x)));
+        }
+
+        private sealed class DiagnosticCallRow
+        {
+            public string Call { get; init; } = string.Empty;
+            public string FrontendId { get; init; } = string.Empty;
+            public int? SessionId { get; init; }
+            public string? Start { get; init; }
+            public string? End { get; init; }
+            public double? StartSeconds { get; init; }
+            public double? ConnectedSeconds { get; init; }
+            public double? EndSeconds { get; init; }
+            public string Technology { get; init; } = "Unknown";
+            public string Result { get; init; } = "Not Connected";
+            public string StatusDetail { get; init; } = string.Empty;
+            public double? SetupTimeSeconds { get; init; }
+            public double? CallDurationSeconds { get; init; }
+            public string Reason { get; init; } = string.Empty;
+        }
+
+        private sealed class DiagnosticTimelineRow
+        {
+            public string Id { get; init; } = string.Empty;
+            public string SourceType { get; init; } = string.Empty;
+            public string Type { get; init; } = string.Empty;
+            public long SourceId { get; init; }
+            public int? UploadId { get; init; }
+            public int? SessionId { get; init; }
+            public string? SourceFile { get; init; }
+            public int? SourceIndex { get; init; }
+            public string? TimestampLabel { get; init; }
+            public string? Timestamp { get; init; }
+            public double? TimeOfDaySeconds { get; init; }
+            public string? Category { get; init; }
+            public string? SourceCategory { get; init; }
+            public string Domain { get; init; } = "Radio";
+            public string Title { get; init; } = string.Empty;
+            public string OfficialName { get; init; } = string.Empty;
+            public string Message { get; init; } = string.Empty;
+            public string Summary { get; init; } = string.Empty;
+            public string RawMessage { get; init; } = string.Empty;
+            public string? OriginSource { get; init; }
+            public string Severity { get; init; } = "info";
+            public string Technology { get; init; } = "Unknown";
+            public string? Interface { get; init; }
+            public string? Protocol { get; init; }
+            public string? Procedure { get; init; }
+            public string? EventKey { get; init; }
+            public double? Latitude { get; init; }
+            public double? Longitude { get; init; }
+            public string? CallId { get; set; }
+        }
+
+        private sealed class FrontendDiagnosticCall
+        {
+            public string Id { get; init; } = string.Empty;
+            public string? StartTime { get; init; }
+            public string? DialTime { get; init; }
+            public string? ConnectedTime { get; init; }
+            public string? EndTime { get; init; }
+            public string? TerminationTime { get; init; }
+            public int? CallSetupTimeMs { get; init; }
+            public int? SetupTimeMs { get; init; }
+            public int? ConnectedDurationMs { get; init; }
+            public int? TalkTimeMs { get; init; }
+            public int? DurationMs { get; init; }
+            public int? AttemptDurationMs { get; init; }
+            public int? TotalDurationMs { get; init; }
+            public string Status { get; init; } = "Not Connected";
+            public string DetailedStatus { get; init; } = string.Empty;
+            public string CallResult { get; init; } = string.Empty;
+            public string Classification { get; init; } = string.Empty;
+            public double Confidence { get; init; } = 0.75;
+            public bool ConnectionEstimated { get; init; }
+            public string Direction { get; init; } = "Unknown";
+            public string TechnologyStart { get; init; } = "Unknown";
+            public string TechnologyEnd { get; init; } = "Unknown";
+            public string DisconnectReason { get; init; } = string.Empty;
+            public int? CauseCode { get; init; }
+            public string? CauseName { get; init; }
+            public List<object> ConnectedEvidence { get; init; } = new();
+            public List<object> ConnectionSupportingEvidence { get; init; } = new();
+            public List<object> ReleaseEvidence { get; init; } = new();
+            public List<object> HandoverAttempts { get; init; } = new();
+            public List<object> SuccessfulHandovers { get; init; } = new();
+            public List<object> FailedHandovers { get; init; } = new();
+            public List<object> Handovers { get; init; } = new();
+            public List<object> RrcRecoveryEvents { get; init; } = new();
+            public bool RadioIssueDetected { get; init; }
+            public bool RadioRecovered { get; init; }
+            public List<DiagnosticTimelineRow> SipEvents { get; init; } = new();
+            public List<DiagnosticTimelineRow> ImsEvents { get; init; } = new();
+            public List<DiagnosticTimelineRow> L3Events { get; init; } = new();
+            public List<DiagnosticTimelineRow> EventEvents { get; init; } = new();
+            public List<DiagnosticTimelineRow> Events { get; init; } = new();
+            public List<string> Warnings { get; init; } = new();
+            public List<string> Recommendations { get; init; } = new();
+        }
+
+        private sealed class DiagnosticCallBuilder
+        {
+            public int? SessionId { get; init; }
+            public TimeSpan? StartTime { get; set; }
+            public TimeSpan? ConnectedTime { get; set; }
+            public TimeSpan? EndTime { get; set; }
+            public string? StartText { get; set; }
+            public string? EndText { get; set; }
+            public string Technology { get; set; } = "Unknown";
+            public string Result { get; set; } = "Not Connected";
+            public string StatusDetail { get; set; } = string.Empty;
+            public string Reason { get; set; } = string.Empty;
+        }
+
+        private static async Task<bool> DiagnosticTableExistsAsync(DbConnection conn, string tableName)
+        {
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT 1
+                FROM INFORMATION_SCHEMA.TABLES
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = @tableName
+                LIMIT 1;";
+            AddParam(cmd, "@tableName", tableName);
+            var result = await cmd.ExecuteScalarAsync();
+            return result != null && result != DBNull.Value;
+        }
+
+        private static async Task<int> CountDiagnosticRowsAsync(
+            DbConnection conn,
+            string tableName,
+            IReadOnlyList<int> sessionIds,
+            int? uploadId)
+        {
+            if (!await DiagnosticTableExistsAsync(conn, tableName))
+                return 0;
+
+            await using var cmd = conn.CreateCommand();
+            var safeTableName = tableName.Replace("`", "``");
+            var whereSql = BuildDiagnosticFilterSql(cmd, sessionIds, uploadId);
+            cmd.CommandTimeout = 180;
+            cmd.CommandText = $"SELECT COUNT(*) FROM `{safeTableName}`{whereSql};";
+            var value = await cmd.ExecuteScalarAsync();
+            return value == null || value == DBNull.Value
+                ? 0
+                : Convert.ToInt32(value, CultureInfo.InvariantCulture);
+        }
+
+        private static string BuildDiagnosticFilterSql(DbCommand cmd, IReadOnlyList<int> sessionIds, int? uploadId)
+        {
+            var where = new List<string>();
+            if (sessionIds.Count > 0)
+            {
+                var names = new List<string>();
+                AddParams(cmd, "diagSid", sessionIds, names);
+                where.Add($"session_id IN ({string.Join(", ", names)})");
+            }
+
+            if (uploadId.HasValue && uploadId.Value > 0)
+            {
+                AddParam(cmd, "@diagUploadId", uploadId.Value);
+                where.Add("tbl_upload_id = @diagUploadId");
+            }
+
+            return where.Count > 0 ? " WHERE " + string.Join(" AND ", where) : string.Empty;
+        }
+
+        private static async Task<List<DiagnosticEventRow>> LoadDiagnosticEventRowsAsync(
+            DbConnection conn,
+            IReadOnlyList<int> sessionIds,
+            int? uploadId,
+            int take)
+        {
+            var rows = new List<DiagnosticEventRow>();
+            if (!await DiagnosticTableExistsAsync(conn, "tbl_event_log"))
+                return rows;
+
+            await using var cmd = conn.CreateCommand();
+            var whereSql = BuildDiagnosticFilterSql(cmd, sessionIds, uploadId);
+            AddParam(cmd, "@diagTake", take);
+            cmd.CommandTimeout = 180;
+            cmd.CommandText = @"
+                SELECT id, tbl_upload_id, session_id, source_file_name, row_no, timestamp_text,
+                       latitude, longitude, category, event_name, detail, source, severity
+                FROM tbl_event_log" + whereSql + @"
+                ORDER BY session_id, id
+                LIMIT @diagTake;";
+
+            await using var reader = await cmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                rows.Add(new DiagnosticEventRow
+                {
+                    Id = ReadInt64(reader, 0) ?? 0,
+                    UploadId = ReadInt32(reader, 1),
+                    SessionId = ReadInt32(reader, 2),
+                    SourceFileName = ReadString(reader, 3),
+                    RowNo = ReadInt32(reader, 4),
+                    TimestampText = ReadString(reader, 5),
+                    Latitude = ReadDouble(reader, 6),
+                    Longitude = ReadDouble(reader, 7),
+                    Category = ReadString(reader, 8),
+                    EventName = ReadString(reader, 9),
+                    Detail = ReadString(reader, 10),
+                    Source = ReadString(reader, 11),
+                    Severity = ReadString(reader, 12)
+                });
+            }
+
+            return rows;
+        }
+
+        private static async Task<List<DiagnosticL3Row>> LoadDiagnosticL3RowsAsync(
+            DbConnection conn,
+            IReadOnlyList<int> sessionIds,
+            int? uploadId,
+            int take)
+        {
+            var rows = new List<DiagnosticL3Row>();
+            if (!await DiagnosticTableExistsAsync(conn, "tbl_l3_log"))
+                return rows;
+
+            await using var cmd = conn.CreateCommand();
+            var whereSql = BuildDiagnosticFilterSql(cmd, sessionIds, uploadId);
+            AddParam(cmd, "@diagTake", take);
+            cmd.CommandTimeout = 180;
+            cmd.CommandText = @"
+                SELECT id, tbl_upload_id, session_id, source_file_name, source_file_type, row_no, timestamp_text,
+                       latitude, longitude, category, message, detail, source, severity, raw_text
+                FROM tbl_l3_log" + whereSql + @"
+                ORDER BY session_id, id
+                LIMIT @diagTake;";
+
+            await using var reader = await cmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                rows.Add(new DiagnosticL3Row
+                {
+                    Id = ReadInt64(reader, 0) ?? 0,
+                    UploadId = ReadInt32(reader, 1),
+                    SessionId = ReadInt32(reader, 2),
+                    SourceFileName = ReadString(reader, 3),
+                    SourceFileType = ReadString(reader, 4),
+                    RowNo = ReadInt32(reader, 5),
+                    TimestampText = ReadString(reader, 6),
+                    Latitude = ReadDouble(reader, 7),
+                    Longitude = ReadDouble(reader, 8),
+                    Category = ReadString(reader, 9),
+                    Message = ReadString(reader, 10),
+                    Detail = ReadString(reader, 11),
+                    Source = ReadString(reader, 12),
+                    Severity = ReadString(reader, 13),
+                    RawText = ReadString(reader, 14)
+                });
+            }
+
+            return rows;
+        }
+
+        private static List<DiagnosticCallRow> BuildDiagnosticCallRows(
+            IReadOnlyList<DiagnosticEventRow> events,
+            IReadOnlyList<DiagnosticL3Row> l3Rows)
+        {
+            var calls = new List<DiagnosticCallRow>();
+            var activeBySession = new Dictionary<int, DiagnosticCallBuilder>();
+            var orderedEvents = events
+                .Where(IsDiagnosticCallRelated)
+                .OrderBy(x => x.SessionId ?? 0)
+                .ThenBy(x => x.EventTime ?? TimeSpan.Zero)
+                .ThenBy(x => x.Id)
+                .ToList();
+
+            foreach (var ev in orderedEvents)
+            {
+                var sessionKey = ev.SessionId ?? 0;
+                var text = ev.Text;
+                var upper = text.ToUpperInvariant();
+                var eventTime = ev.EventTime;
+                activeBySession.TryGetValue(sessionKey, out var active);
+
+                var startsCall = HasAny(upper, "DIAL", "DIALING", "ORIGINATING", "OUTGOING", "RINGING", "ALERTING", "OFFHOOK");
+                var connectedCall = HasAny(upper, "CONNECTED", "ACTIVE", "OFFHOOK", "ACCEPTED", "ANSWERED");
+                var endsCall = HasAny(upper, "IDLE", "ENDED", "END", "DISCONNECT", "DISCONNECTED", "RELEASE", "BUSY", "FAIL", "FAILED", "DROP", "DROPPED", "RADIO FAILURE", "REJECT", "NO ANSWER");
+
+                if (startsCall && active == null)
+                {
+                    active = new DiagnosticCallBuilder
+                    {
+                        SessionId = ev.SessionId,
+                        StartTime = eventTime,
+                        StartText = ev.TimestampText,
+                        Technology = ResolveDiagnosticTechnology(text, l3Rows, ev.SessionId, eventTime)
+                    };
+                    activeBySession[sessionKey] = active;
+                }
+                else if (startsCall && active != null && active.EndTime.HasValue)
+                {
+                    calls.Add(ToDiagnosticCallRow(active, calls.Count + 1));
+                    active = new DiagnosticCallBuilder
+                    {
+                        SessionId = ev.SessionId,
+                        StartTime = eventTime,
+                        StartText = ev.TimestampText,
+                        Technology = ResolveDiagnosticTechnology(text, l3Rows, ev.SessionId, eventTime)
+                    };
+                    activeBySession[sessionKey] = active;
+                }
+
+                if (connectedCall)
+                {
+                    active ??= new DiagnosticCallBuilder
+                    {
+                        SessionId = ev.SessionId,
+                        StartTime = eventTime,
+                        StartText = ev.TimestampText,
+                        Technology = ResolveDiagnosticTechnology(text, l3Rows, ev.SessionId, eventTime)
+                    };
+
+                    active.ConnectedTime ??= eventTime;
+                    active.StatusDetail = "Completed";
+                    if (active.Technology == "Unknown")
+                    {
+                        active.Technology = ResolveDiagnosticTechnology(text, l3Rows, ev.SessionId, eventTime);
+                    }
+                    activeBySession[sessionKey] = active;
+                }
+
+                if (!endsCall)
+                {
+                    continue;
+                }
+
+                active ??= new DiagnosticCallBuilder
+                {
+                    SessionId = ev.SessionId,
+                    StartTime = eventTime,
+                    StartText = ev.TimestampText,
+                    Technology = ResolveDiagnosticTechnology(text, l3Rows, ev.SessionId, eventTime)
+                };
+
+                active.EndTime = eventTime;
+                active.EndText = ev.TimestampText;
+                active.Reason = ResolveDiagnosticReason(text);
+                active.Result = ResolveDiagnosticResult(text, active.ConnectedTime.HasValue);
+                active.StatusDetail = ResolveDiagnosticStatusDetail(text, active.Result);
+                if (active.Technology == "Unknown")
+                {
+                    active.Technology = ResolveDiagnosticTechnology(text, l3Rows, ev.SessionId, eventTime);
+                }
+
+                calls.Add(ToDiagnosticCallRow(active, calls.Count + 1));
+                activeBySession.Remove(sessionKey);
+            }
+
+            foreach (var active in activeBySession.Values.Where(x => x.StartTime.HasValue))
+            {
+                active.Result = active.ConnectedTime.HasValue ? "Connected" : "Not Connected";
+                active.StatusDetail = active.ConnectedTime.HasValue ? "In Progress" : "No End Event";
+                active.Reason = active.ConnectedTime.HasValue ? "No call end event found." : "No connected event found.";
+                calls.Add(ToDiagnosticCallRow(active, calls.Count + 1));
+            }
+
+            if (calls.Count == 0 && orderedEvents.Count > 0)
+            {
+                foreach (var ev in orderedEvents)
+                {
+                    var text = ev.Text;
+                    var connected = HasAny(text.ToUpperInvariant(), "CONNECTED", "ACTIVE", "OFFHOOK");
+                    var result = ResolveDiagnosticResult(text, connected);
+                    calls.Add(new DiagnosticCallRow
+                    {
+                        Call = $"C{calls.Count + 1}",
+                        FrontendId = $"Cl{calls.Count + 1}",
+                        SessionId = ev.SessionId,
+                        Start = FormatDiagnosticTime(ev.EventTime, ev.TimestampText),
+                        End = FormatDiagnosticTime(ev.EventTime, ev.TimestampText),
+                        StartSeconds = ev.EventTime?.TotalSeconds,
+                        EndSeconds = ev.EventTime?.TotalSeconds,
+                        Technology = ResolveDiagnosticTechnology(text, l3Rows, ev.SessionId, ev.EventTime),
+                        Result = result,
+                        StatusDetail = ResolveDiagnosticStatusDetail(text, result),
+                        Reason = ResolveDiagnosticReason(text)
+                    });
+                }
+            }
+
+            return calls;
+        }
+
+        private static DiagnosticCallRow ToDiagnosticCallRow(DiagnosticCallBuilder call, int index)
+        {
+            var setupSeconds = call.StartTime.HasValue && call.ConnectedTime.HasValue
+                ? SecondsBetween(call.StartTime.Value, call.ConnectedTime.Value)
+                : (double?)null;
+            var durationSeconds = call.ConnectedTime.HasValue && call.EndTime.HasValue
+                ? SecondsBetween(call.ConnectedTime.Value, call.EndTime.Value)
+                : (double?)null;
+
+            return new DiagnosticCallRow
+            {
+                Call = $"C{index}",
+                FrontendId = $"Cl{index}",
+                SessionId = call.SessionId,
+                Start = FormatDiagnosticTime(call.StartTime, call.StartText),
+                End = FormatDiagnosticTime(call.EndTime, call.EndText),
+                StartSeconds = call.StartTime?.TotalSeconds,
+                ConnectedSeconds = call.ConnectedTime?.TotalSeconds,
+                EndSeconds = call.EndTime?.TotalSeconds,
+                Technology = string.IsNullOrWhiteSpace(call.Technology) ? "Unknown" : call.Technology,
+                Result = call.Result,
+                StatusDetail = call.StatusDetail,
+                SetupTimeSeconds = setupSeconds.HasValue ? Math.Round(setupSeconds.Value, 2) : null,
+                CallDurationSeconds = durationSeconds.HasValue ? Math.Round(durationSeconds.Value, 2) : null,
+                Reason = string.IsNullOrWhiteSpace(call.Reason) ? "No reason found in Event/L3 logs." : call.Reason
+            };
+        }
+
+        private static List<DiagnosticTimelineRow> BuildDiagnosticTimelineRows(
+            IReadOnlyList<DiagnosticEventRow> events,
+            IReadOnlyList<DiagnosticL3Row> l3Rows,
+            IReadOnlyList<DiagnosticCallRow> calls)
+        {
+            var rows = new List<DiagnosticTimelineRow>();
+
+            rows.AddRange(events.Select(x =>
+            {
+                var text = x.Text;
+                var time = x.EventTime;
+                return new DiagnosticTimelineRow
+                {
+                    Id = $"event-{x.Id}",
+                    SourceType = "event",
+                    Type = "event",
+                    SourceId = x.Id,
+                    UploadId = x.UploadId,
+                    SessionId = x.SessionId,
+                    SourceFile = x.SourceFileName,
+                    SourceIndex = x.RowNo,
+                    TimestampLabel = x.TimestampText,
+                    Timestamp = ToDiagnosticIsoTimestamp(time),
+                    TimeOfDaySeconds = time?.TotalSeconds,
+                    Category = string.IsNullOrWhiteSpace(x.Category) ? "Event" : x.Category,
+                    SourceCategory = x.Category,
+                    Domain = ResolveDiagnosticDomain(x.Category, x.EventName, x.Detail),
+                    Title = FirstNonEmpty(x.EventName, x.Category, "Event"),
+                    OfficialName = FirstNonEmpty(x.EventName, x.Category, "Event"),
+                    Message = FirstNonEmpty(x.EventName, x.Detail, x.Category, "Event"),
+                    Summary = FirstNonEmpty(x.Detail, x.EventName, x.Category, string.Empty),
+                    RawMessage = FirstNonEmpty(x.Detail, x.EventName, x.Category, string.Empty),
+                    OriginSource = x.Source,
+                    Severity = NormalizeDiagnosticSeverity(x.Severity, text),
+                    Technology = ResolveDiagnosticTechnology(text, l3Rows, x.SessionId, time),
+                    Interface = ResolveDiagnosticInterface(text),
+                    Protocol = ResolveDiagnosticProtocol(text),
+                    Procedure = ResolveDiagnosticProcedure(text),
+                    EventKey = x.EventName,
+                    Latitude = x.Latitude,
+                    Longitude = x.Longitude
+                };
+            }));
+
+            rows.AddRange(l3Rows.Select(x =>
+            {
+                var text = x.Text;
+                var time = x.EventTime;
+                return new DiagnosticTimelineRow
+                {
+                    Id = $"l3-{x.Id}",
+                    SourceType = "l3",
+                    Type = "l3",
+                    SourceId = x.Id,
+                    UploadId = x.UploadId,
+                    SessionId = x.SessionId,
+                    SourceFile = x.SourceFileName,
+                    SourceIndex = x.RowNo,
+                    TimestampLabel = x.TimestampText,
+                    Timestamp = ToDiagnosticIsoTimestamp(time),
+                    TimeOfDaySeconds = time?.TotalSeconds,
+                    Category = string.IsNullOrWhiteSpace(x.Category) ? "L3" : x.Category,
+                    SourceCategory = x.Category,
+                    Domain = ResolveDiagnosticDomain(x.Category, x.Message, x.Detail),
+                    Title = FirstNonEmpty(x.Message, x.Category, "L3 Message"),
+                    OfficialName = FirstNonEmpty(x.Message, x.Category, "L3 Message"),
+                    Message = FirstNonEmpty(x.Message, x.Category, "L3 Message"),
+                    Summary = FirstNonEmpty(x.Detail, x.RawText, x.Message, string.Empty),
+                    RawMessage = FirstNonEmpty(x.RawText, x.Detail, x.Message, string.Empty),
+                    OriginSource = x.Source,
+                    Severity = NormalizeDiagnosticSeverity(x.Severity, text),
+                    Technology = ResolveDiagnosticTechnology(text, l3Rows, x.SessionId, time),
+                    Interface = ResolveDiagnosticInterface(text),
+                    Protocol = ResolveDiagnosticProtocol(text),
+                    Procedure = ResolveDiagnosticProcedure(text),
+                    EventKey = x.Message,
+                    Latitude = x.Latitude,
+                    Longitude = x.Longitude
+                };
+            }));
+
+            rows = rows
+                .OrderBy(x => x.SessionId ?? 0)
+                .ThenBy(x => x.TimeOfDaySeconds ?? double.MaxValue)
+                .ThenBy(x => x.SourceId)
+                .ToList();
+
+            foreach (var row in rows)
+            {
+                row.CallId = FindDiagnosticCallId(row, calls);
+            }
+
+            return rows;
+        }
+
+        private static List<FrontendDiagnosticCall> BuildFrontendDiagnosticCalls(
+            IReadOnlyList<DiagnosticCallRow> calls,
+            IReadOnlyList<DiagnosticTimelineRow> rows)
+        {
+            return calls.Select(call =>
+            {
+                var callRows = rows
+                    .Where(row => string.Equals(row.CallId, call.FrontendId, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                var connectedMs = ToMilliseconds(call.CallDurationSeconds);
+                var setupMs = ToMilliseconds(call.SetupTimeSeconds);
+                var attemptMs = call.StartSeconds.HasValue && call.EndSeconds.HasValue
+                    ? ToMilliseconds(SecondsBetween(TimeSpan.FromSeconds(call.StartSeconds.Value), TimeSpan.FromSeconds(call.EndSeconds.Value)))
+                    : null;
+                var causeCode = ExtractCauseCode(callRows.Select(x => x.RawMessage).Concat(new[] { call.Reason }));
+
+                return new FrontendDiagnosticCall
+                {
+                    Id = call.FrontendId,
+                    StartTime = ToDiagnosticIsoTimestamp(call.StartSeconds),
+                    DialTime = ToDiagnosticIsoTimestamp(call.StartSeconds),
+                    ConnectedTime = ToDiagnosticIsoTimestamp(call.ConnectedSeconds),
+                    EndTime = ToDiagnosticIsoTimestamp(call.EndSeconds),
+                    TerminationTime = ToDiagnosticIsoTimestamp(call.EndSeconds),
+                    CallSetupTimeMs = setupMs,
+                    SetupTimeMs = setupMs,
+                    ConnectedDurationMs = connectedMs,
+                    TalkTimeMs = connectedMs,
+                    DurationMs = connectedMs,
+                    AttemptDurationMs = attemptMs,
+                    TotalDurationMs = connectedMs,
+                    Status = call.Result,
+                    DetailedStatus = call.StatusDetail,
+                    CallResult = call.Result,
+                    Classification = call.StatusDetail,
+                    Direction = InferDiagnosticDirection(callRows),
+                    TechnologyStart = call.Technology,
+                    TechnologyEnd = call.Technology,
+                    DisconnectReason = call.Reason,
+                    CauseCode = causeCode,
+                    CauseName = causeCode.HasValue ? ResolveCauseName(causeCode.Value) : null,
+                    ConnectedEvidence = call.ConnectedSeconds.HasValue ? new List<object> { new { label = "Connected event", timestamp = ToDiagnosticIsoTimestamp(call.ConnectedSeconds) } } : new List<object>(),
+                    ReleaseEvidence = call.EndSeconds.HasValue ? new List<object> { new { label = call.Reason, timestamp = ToDiagnosticIsoTimestamp(call.EndSeconds) } } : new List<object>(),
+                    RadioIssueDetected = callRows.Any(x => HasAny(x.RawMessage, "RADIO FAILURE", "RLF", "SCGFAIL", "RADIO LINK FAILURE")),
+                    RadioRecovered = callRows.Any(x => HasAny(x.RawMessage, "RECONFIGURATION COMPLETE", "RECOVERY", "REESTABLISHMENT COMPLETE")),
+                    SipEvents = callRows.Where(x => HasAny(x.RawMessage, "SIP", "IMS")).ToList(),
+                    ImsEvents = callRows.Where(x => HasAny($"{x.Category} {x.RawMessage}", "SIP", "IMS")).ToList(),
+                    L3Events = callRows.Where(x => x.Type == "l3").ToList(),
+                    EventEvents = callRows.Where(x => x.Type == "event").ToList(),
+                    Events = callRows,
+                    Warnings = callRows.Count == 0 ? new List<string> { "No Event/L3 rows were matched to this call window." } : new List<string>(),
+                    Recommendations = new List<string>()
+                };
+            }).ToList();
+        }
+
+        private static object BuildDiagnosticAnalyzerSummary(
+            IReadOnlyList<DiagnosticTimelineRow> rows,
+            IReadOnlyList<DiagnosticCallRow> calls,
+            int connected,
+            int dropped,
+            int notConnected)
+        {
+            var ordered = rows
+                .Where(x => !string.IsNullOrWhiteSpace(x.Procedure) || !string.IsNullOrWhiteSpace(x.Message))
+                .OrderBy(x => x.SessionId ?? 0)
+                .ThenBy(x => x.TimeOfDaySeconds ?? double.MaxValue)
+                .ThenBy(x => x.SourceId)
+                .ToList();
+
+            var procedureCount = 0;
+            string? lastKey = null;
+            double? lastTime = null;
+            foreach (var row in ordered)
+            {
+                var procedure = FirstNonEmpty(row.Procedure, row.Message, row.Category, "Unknown");
+                var key = $"{row.SessionId ?? 0}|{row.CallId ?? "no-call"}|{procedure}";
+                var gapSeconds = row.TimeOfDaySeconds.HasValue && lastTime.HasValue
+                    ? Math.Abs(row.TimeOfDaySeconds.Value - lastTime.Value)
+                    : 0;
+
+                if (!string.Equals(key, lastKey, StringComparison.OrdinalIgnoreCase) || gapSeconds > 10)
+                {
+                    procedureCount += 1;
+                    lastKey = key;
+                }
+
+                if (row.TimeOfDaySeconds.HasValue)
+                {
+                    lastTime = row.TimeOfDaySeconds.Value;
+                }
+            }
+
+            var failures = ordered.Count(x => string.Equals(x.Severity, "failure", StringComparison.OrdinalIgnoreCase));
+            var rsrpMatched = ordered.Count(x => HasAny($"{x.RawMessage} {x.Summary} {x.Message}", "RSRP"));
+            var technologies = ordered
+                .Select(x => x.Technology)
+                .Where(x => !string.IsNullOrWhiteSpace(x) && !string.Equals(x, "Unknown", StringComparison.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            return new
+            {
+                procedures = new List<object>(),
+                calls,
+                states = new
+                {
+                    rrc = InferAnalyzerRrcState(ordered),
+                    nas = InferAnalyzerNasState(ordered),
+                    ims = InferAnalyzerImsState(ordered)
+                },
+                stats = new
+                {
+                    totalRows = rows.Count,
+                    analyzedRows = ordered.Count,
+                    totalProcedures = procedureCount,
+                    callProcedures = ordered.Select(x => x.CallId).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct().Count(),
+                    totalCalls = calls.Count,
+                    completedCalls = connected,
+                    droppedCalls = dropped,
+                    notConnectedCalls = notConnected,
+                    failures,
+                    rsrpProcedures = rsrpMatched,
+                    technologies
+                }
+            };
+        }
+
+        private static List<object> BuildDiagnosticFlowModels()
+        {
+            static object Step(string label, string from, string to) => new { label, from, to };
+            static object Model(string id, string name, string technology, string access, string objective, string[] nodes, string[] kpis, string observation, object[] steps) => new
+            {
+                id,
+                name,
+                technology,
+                access,
+                objective,
+                nodes,
+                kpis,
+                observation,
+                steps
+            };
+
+            return new List<object>
+            {
+                Model("gsm-mo-call", "GSM MO Call", "GSM", "2G", "CS voice accessibility and setup",
+                    new[] { "UE", "BTS/BSC", "MSC" },
+                    new[] { "CSSR", "Accessibility", "DCR" },
+                    "Failures before Connect impact CSSR.",
+                    new[]
+                    {
+                        Step("Channel Request", "UE", "BTS/BSC"),
+                        Step("Immediate Assignment", "BTS/BSC", "UE"),
+                        Step("CM Service Request", "UE", "MSC"),
+                        Step("Authentication", "MSC", "UE"),
+                        Step("Cipher Mode", "MSC", "UE"),
+                        Step("SETUP", "UE", "MSC"),
+                        Step("Call Proceeding", "MSC", "UE"),
+                        Step("Alerting", "MSC", "UE"),
+                        Step("Connect", "MSC", "UE"),
+                        Step("Disconnect", "UE", "MSC"),
+                        Step("Release", "MSC", "UE")
+                    }),
+                Model("umts-cs-mo-call", "UMTS CS MO Call", "UMTS", "3G", "CS voice setup over UTRAN",
+                    new[] { "UE", "NodeB/RNC", "MSC" },
+                    new[] { "CSSR", "RRC Setup Success", "DCR" },
+                    "RRC setup and RAB assignment failures block CS call setup.",
+                    new[]
+                    {
+                        Step("RRC Connection Request", "UE", "NodeB/RNC"),
+                        Step("RRC Connection Setup", "NodeB/RNC", "UE"),
+                        Step("RRC Setup Complete", "UE", "NodeB/RNC"),
+                        Step("CM Service Request", "UE", "MSC"),
+                        Step("Authentication", "MSC", "UE"),
+                        Step("Security Mode", "MSC", "UE"),
+                        Step("RAB Assignment", "MSC", "NodeB/RNC"),
+                        Step("SETUP", "UE", "MSC"),
+                        Step("Alerting", "MSC", "UE"),
+                        Step("Connect", "MSC", "UE"),
+                        Step("Release", "MSC", "UE")
+                    }),
+                Model("lte-initial-attach", "LTE Initial Attach", "LTE", "4G", "UE registration with EPC",
+                    new[] { "UE", "eNodeB", "MME", "SGW/PGW" },
+                    new[] { "Accessibility", "Attach Success", "EPS Bearer Success" },
+                    "Successful attach confirms UE registration with EPC.",
+                    new[]
+                    {
+                        Step("Cell Selection", "UE", "eNodeB"),
+                        Step("MIB/SIB", "eNodeB", "UE"),
+                        Step("RRC Connection Request", "UE", "eNodeB"),
+                        Step("RRC Connection Setup", "eNodeB", "UE"),
+                        Step("RRC Setup Complete", "UE", "eNodeB"),
+                        Step("Attach Request", "UE", "MME"),
+                        Step("Authentication", "MME", "UE"),
+                        Step("Security Mode", "MME", "UE"),
+                        Step("Attach Accept", "MME", "UE"),
+                        Step("Attach Complete", "UE", "MME"),
+                        Step("Default EPS Bearer", "MME", "SGW/PGW"),
+                        Step("RRC Reconfiguration Complete", "UE", "eNodeB")
+                    }),
+                Model("lte-volte-mo-call", "LTE VoLTE MO Call", "LTE IMS", "4G", "Mobile originated VoLTE call setup",
+                    new[] { "UE", "eNodeB", "MME", "IMS" },
+                    new[] { "VoLTE CSSR", "MOS", "RTP Continuity" },
+                    "Voice is carried over LTE using IMS.",
+                    new[]
+                    {
+                        Step("IMS Registration", "UE", "IMS"),
+                        Step("Service Request", "UE", "MME"),
+                        Step("Dedicated EPS Bearer", "MME", "IMS"),
+                        Step("SIP INVITE", "UE", "IMS"),
+                        Step("100 Trying", "IMS", "UE"),
+                        Step("183 Session Progress", "IMS", "UE"),
+                        Step("PRACK", "UE", "IMS"),
+                        Step("180 Ringing", "IMS", "UE"),
+                        Step("200 OK", "IMS", "UE"),
+                        Step("ACK", "UE", "IMS"),
+                        Step("RTP Voice", "UE", "IMS"),
+                        Step("BYE", "UE", "IMS")
+                    }),
+                Model("lte-volte-mt-call", "LTE VoLTE MT Call", "LTE IMS", "4G", "Mobile terminated VoLTE call setup",
+                    new[] { "UE", "eNodeB", "MME", "IMS" },
+                    new[] { "Paging Success", "CSSR", "MOS" },
+                    "Paging and RRC resume/connectivity drive MT call accessibility.",
+                    new[]
+                    {
+                        Step("Paging", "eNodeB", "UE"),
+                        Step("RRC Connection", "UE", "eNodeB"),
+                        Step("Service Request", "UE", "MME"),
+                        Step("Dedicated Bearer", "MME", "IMS"),
+                        Step("SIP INVITE", "IMS", "UE"),
+                        Step("180 Ringing", "UE", "IMS"),
+                        Step("200 OK", "UE", "IMS"),
+                        Step("ACK", "IMS", "UE"),
+                        Step("RTP Voice", "UE", "IMS"),
+                        Step("BYE", "UE", "IMS")
+                    }),
+                Model("lte-handover", "LTE X2/S1 Handover", "LTE", "4G", "Connected-mode mobility",
+                    new[] { "UE", "Source eNodeB", "Target eNodeB", "MME/SGW" },
+                    new[] { "HOSR", "Mobility Success", "RLF" },
+                    "Measurement, HO command, random access and path switch identify the mobility break point.",
+                    new[]
+                    {
+                        Step("Measurement Report", "UE", "Source eNodeB"),
+                        Step("Handover Request", "Source eNodeB", "Target eNodeB"),
+                        Step("Handover Request Ack", "Target eNodeB", "Source eNodeB"),
+                        Step("RRC Reconfiguration HO Command", "Source eNodeB", "UE"),
+                        Step("Random Access", "UE", "Target eNodeB"),
+                        Step("RRC Reconfiguration Complete", "UE", "Target eNodeB"),
+                        Step("Path Switch", "Target eNodeB", "MME/SGW"),
+                        Step("UE Context Release", "Source eNodeB", "MME/SGW")
+                    }),
+                Model("lte-nsa-endc", "LTE-NSA EN-DC", "LTE-NR NSA", "5G NSA", "NR secondary node addition and release",
+                    new[] { "UE", "eNodeB", "gNB" },
+                    new[] { "EN-DC Success", "5G Availability" },
+                    "B1/B2 measurements and SCG reconfiguration reveal EN-DC activation health.",
+                    new[]
+                    {
+                        Step("LTE Connected", "UE", "eNodeB"),
+                        Step("Measurement Report B1/B2", "UE", "eNodeB"),
+                        Step("Secondary Node Addition Request", "eNodeB", "gNB"),
+                        Step("Secondary Node Addition Ack", "gNB", "eNodeB"),
+                        Step("RRC Reconfiguration SCG Add", "eNodeB", "UE"),
+                        Step("RRC Reconfiguration Complete", "UE", "eNodeB"),
+                        Step("EN-DC Active", "UE", "gNB"),
+                        Step("SCG Modification/Release", "eNodeB", "UE")
+                    }),
+                Model("nsa-voice-data", "5G NSA Voice and Data", "LTE-NR NSA IMS", "5G NSA", "VoLTE voice with NR data split",
+                    new[] { "UE", "eNodeB", "gNB", "IMS" },
+                    new[] { "5G Availability", "Throughput", "VoLTE CSSR" },
+                    "Voice remains on LTE anchor while user data uses NR.",
+                    new[]
+                    {
+                        Step("EN-DC Active", "UE", "gNB"),
+                        Step("IMS Registration", "UE", "IMS"),
+                        Step("SIP INVITE", "UE", "IMS"),
+                        Step("100 Trying", "IMS", "UE"),
+                        Step("183 Session Progress", "IMS", "UE"),
+                        Step("PRACK", "UE", "IMS"),
+                        Step("180 Ringing", "IMS", "UE"),
+                        Step("200 OK", "IMS", "UE"),
+                        Step("ACK", "UE", "IMS"),
+                        Step("RTP Voice LTE Anchor", "UE", "IMS"),
+                        Step("User Data NR", "UE", "gNB")
+                    }),
+                Model("sa-registration", "5G SA Registration", "NR SA", "5G SA", "UE registration with 5GC",
+                    new[] { "UE", "gNB", "AMF", "SMF/UPF" },
+                    new[] { "Registration Success", "Accessibility" },
+                    "Registration and PDU session setup confirm 5GC access.",
+                    new[]
+                    {
+                        Step("Cell Selection", "UE", "gNB"),
+                        Step("MIB/SIB", "gNB", "UE"),
+                        Step("RRC Setup", "UE", "gNB"),
+                        Step("Registration Request", "UE", "AMF"),
+                        Step("Authentication", "AMF", "UE"),
+                        Step("Security Mode", "AMF", "UE"),
+                        Step("Registration Accept", "AMF", "UE"),
+                        Step("Registration Complete", "UE", "AMF"),
+                        Step("PDU Session Establishment", "UE", "SMF/UPF")
+                    }),
+                Model("sa-vonr", "5G SA VoNR", "NR SA IMS", "5G SA", "Voice over NR setup",
+                    new[] { "UE", "gNB", "AMF/SMF", "IMS" },
+                    new[] { "VoNR CSSR", "MOS", "QoS Flow Success" },
+                    "QoS flow setup and SIP call setup define VoNR accessibility.",
+                    new[]
+                    {
+                        Step("IMS Registration", "UE", "IMS"),
+                        Step("QoS Flow Setup", "AMF/SMF", "UE"),
+                        Step("SIP INVITE", "UE", "IMS"),
+                        Step("100 Trying", "IMS", "UE"),
+                        Step("183 Session Progress", "IMS", "UE"),
+                        Step("PRACK", "UE", "IMS"),
+                        Step("180 Ringing", "IMS", "UE"),
+                        Step("200 OK", "IMS", "UE"),
+                        Step("ACK", "UE", "IMS"),
+                        Step("RTP Voice over NR", "UE", "IMS"),
+                        Step("BYE", "UE", "IMS")
+                    })
+            };
+        }
+
+        private static string InferAnalyzerRrcState(IReadOnlyList<DiagnosticTimelineRow> rows)
+        {
+            var latest = rows.LastOrDefault(x => HasAny($"{x.RawMessage} {x.Message}", "RRC CONNECTED", "RECONFIGURATION COMPLETE", "SETUP COMPLETE", "RRC RELEASE", "RRC IDLE"));
+            var text = $"{latest?.RawMessage} {latest?.Message}";
+            if (HasAny(text, "RRC RELEASE", "RRC IDLE"))
+                return "RRC_IDLE";
+            if (latest != null)
+                return "RRC_CONNECTED";
+            return "RRC_IDLE";
+        }
+
+        private static string InferAnalyzerNasState(IReadOnlyList<DiagnosticTimelineRow> rows)
+        {
+            var text = string.Join(" ", rows.Select(x => $"{x.RawMessage} {x.Message}"));
+            if (HasAny(text, "ATTACH ACCEPT", "REGISTRATION ACCEPT", "NAS REGISTERED", "EPS BEARER"))
+                return "NAS Registered";
+            return "NAS Deregistered";
+        }
+
+        private static string InferAnalyzerImsState(IReadOnlyList<DiagnosticTimelineRow> rows)
+        {
+            var text = string.Join(" ", rows.Select(x => $"{x.RawMessage} {x.Message}"));
+            if (HasAny(text, "IMS REGISTERED", "SIP REGISTER 200", "SIP 200 OK", "CALL_ACTIVE"))
+                return "IMS Registered";
+            return "IMS Unregistered";
+        }
+
+        private static string? FindDiagnosticCallId(DiagnosticTimelineRow row, IReadOnlyList<DiagnosticCallRow> calls)
+        {
+            if (!row.TimeOfDaySeconds.HasValue)
+                return null;
+
+            var sameSessionCalls = calls
+                .Where(call => call.SessionId == row.SessionId && call.StartSeconds.HasValue)
+                .ToList();
+
+            var matching = sameSessionCalls.FirstOrDefault(call =>
+            {
+                var start = call.StartSeconds!.Value;
+                var end = call.EndSeconds ?? call.ConnectedSeconds ?? start;
+                if (end < start)
+                    end += TimeSpan.FromDays(1).TotalSeconds;
+                var value = row.TimeOfDaySeconds.Value < start ? row.TimeOfDaySeconds.Value + TimeSpan.FromDays(1).TotalSeconds : row.TimeOfDaySeconds.Value;
+                return value >= start - 2 && value <= end + 2;
+            });
+
+            if (matching != null)
+                return matching.FrontendId;
+
+            return sameSessionCalls
+                .OrderBy(call => Math.Abs((call.StartSeconds ?? 0) - row.TimeOfDaySeconds.Value))
+                .FirstOrDefault(call => Math.Abs((call.StartSeconds ?? 0) - row.TimeOfDaySeconds.Value) <= 30)
+                ?.FrontendId;
+        }
+
+        private static int? ToMilliseconds(double? seconds)
+        {
+            return seconds.HasValue ? (int)Math.Round(seconds.Value * 1000) : null;
+        }
+
+        private static string? ToDiagnosticIsoTimestamp(double? seconds)
+        {
+            return seconds.HasValue
+                ? DateTimeOffset.UnixEpoch.AddSeconds(seconds.Value).ToString("O", CultureInfo.InvariantCulture)
+                : null;
+        }
+
+        private static string? ToDiagnosticIsoTimestamp(TimeSpan? time)
+        {
+            return time.HasValue ? ToDiagnosticIsoTimestamp(time.Value.TotalSeconds) : null;
+        }
+
+        private static string FirstNonEmpty(params string?[] values)
+        {
+            return values.FirstOrDefault(x => !string.IsNullOrWhiteSpace(x))?.Trim() ?? string.Empty;
+        }
+
+        private static string NormalizeDiagnosticSeverity(string? severity, string text)
+        {
+            if (HasAny(text, "FAIL", "FAILED", "FAILURE", "DROP", "DROPPED", "REJECT", "BUSY", "RLF"))
+                return "failure";
+            return string.IsNullOrWhiteSpace(severity) ? "info" : severity.Trim().ToLowerInvariant();
+        }
+
+        private static string ResolveDiagnosticDomain(string? category, string? name, string? detail)
+        {
+            var text = $"{category} {name} {detail}".ToUpperInvariant();
+            if (HasAny(text, "NAS"))
+                return "NAS";
+            if (HasAny(text, "IMS", "SIP", "CALL"))
+                return "IMS";
+            if (HasAny(text, "RRC", "LTE", "NR", "GSM", "WCDMA", "RADIO"))
+                return "RRC";
+            return "Event";
+        }
+
+        private static string ResolveDiagnosticProtocol(string text)
+        {
+            if (HasAny(text, "SIP", "IMS"))
+                return "IMS";
+            if (HasAny(text, "NR-RRC", "NR RRC"))
+                return "NR-RRC";
+            if (HasAny(text, "LTE-RRC", "LTE RRC", "RRC"))
+                return "LTE-RRC";
+            if (HasAny(text, "NAS"))
+                return "NAS";
+            return "Event";
+        }
+
+        private static string ResolveDiagnosticInterface(string text)
+        {
+            if (HasAny(text, "SIP", "IMS"))
+                return "IMS";
+            if (HasAny(text, "NR"))
+                return "NR-Uu";
+            if (HasAny(text, "LTE", "RRC"))
+                return "LTE-Uu";
+            if (HasAny(text, "NAS"))
+                return "NAS";
+            return "Event";
+        }
+
+        private static string ResolveDiagnosticProcedure(string text)
+        {
+            if (HasAny(text, "HANDOVER"))
+                return "Handover";
+            if (HasAny(text, "REESTABLISHMENT"))
+                return "RRC Reestablishment";
+            if (HasAny(text, "SIP INVITE", "SIP 200", "SIP ACK", "SIP BYE"))
+                return "IMS Call";
+            if (HasAny(text, "CALL"))
+                return "Call";
+            if (HasAny(text, "MEASUREMENT"))
+                return "Measurement";
+            return ResolveDiagnosticProtocol(text);
+        }
+
+        private static string InferDiagnosticDirection(IReadOnlyList<DiagnosticTimelineRow> rows)
+        {
+            var text = string.Join(" ", rows.Select(x => x.RawMessage));
+            if (HasAny(text, "INCOMING", "MT CALL", "RINGING"))
+                return "Incoming";
+            if (HasAny(text, "OUTGOING", "MO CALL", "DIAL"))
+                return "Outgoing";
+            return "Unknown";
+        }
+
+        private static int? ExtractCauseCode(IEnumerable<string?> texts)
+        {
+            foreach (var text in texts)
+            {
+                if (string.IsNullOrWhiteSpace(text))
+                    continue;
+
+                var match = Regex.Match(text, @"cause\s*=\s*(\d+)", RegexOptions.IgnoreCase);
+                if (match.Success && int.TryParse(match.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var cause))
+                    return cause;
+            }
+
+            return null;
+        }
+
+        private static string ResolveCauseName(int causeCode)
+        {
+            return causeCode switch
+            {
+                2 => "Remote normal release",
+                3 => "Local normal release",
+                4 => "Busy / not connected",
+                16 => "Rejected",
+                _ => $"Cause {causeCode}"
+            };
+        }
+
+        private static bool IsDiagnosticCallRelated(DiagnosticEventRow row)
+        {
+            var text = row.Text.ToUpperInvariant();
+            return HasAny(text, "CALL", "IMS", "DIAL", "OFFHOOK", "IDLE", "BUSY", "RADIO FAILURE", "DROP", "DISCONNECT", "RING", "RELEASE", "REJECT", "NO ANSWER");
+        }
+
+        private static string ResolveDiagnosticResult(string text, bool connected)
+        {
+            var upper = text.ToUpperInvariant();
+            if (HasAny(upper, "DROP", "DROPPED", "RADIO FAILURE", "RLF", "CONNECTION LOST"))
+            {
+                return connected ? "Dropped" : "Not Connected";
+            }
+
+            if (HasAny(upper, "BUSY", "REJECT", "NO ANSWER", "NOT CONNECTED", "FAILED", "FAILURE"))
+            {
+                return "Not Connected";
+            }
+
+            return connected ? "Connected" : "Not Connected";
+        }
+
+        private static string ResolveDiagnosticStatusDetail(string text, string result)
+        {
+            var upper = text.ToUpperInvariant();
+            if (HasAny(upper, "BUSY"))
+                return "Busy";
+            if (HasAny(upper, "RADIO FAILURE"))
+                return "Radio Failure";
+            if (HasAny(upper, "REJECT"))
+                return "Rejected";
+            if (HasAny(upper, "NO ANSWER"))
+                return "No Answer";
+            if (string.Equals(result, "Connected", StringComparison.OrdinalIgnoreCase))
+                return "Completed";
+            return result;
+        }
+
+        private static string ResolveDiagnosticReason(string text)
+        {
+            var upper = text.ToUpperInvariant();
+            if (HasAny(upper, "RADIO FAILURE"))
+                return "Radio Failure";
+            if (HasAny(upper, "BUSY"))
+                return "Busy";
+            if (HasAny(upper, "REJECT"))
+                return "Rejected by network or remote party.";
+            if (HasAny(upper, "NO ANSWER"))
+                return "No answer.";
+            if (HasAny(upper, "DROP", "DROPPED", "RLF"))
+                return "Call dropped.";
+            if (HasAny(upper, "LOCAL", "USER", "DEVICE"))
+                return "Call ended locally by the user or device.";
+            if (HasAny(upper, "IDLE", "ENDED", "DISCONNECT", "RELEASE"))
+                return "Call ended.";
+            return "No reason found in Event/L3 logs.";
+        }
+
+        private static string ResolveDiagnosticTechnology(
+            string text,
+            IReadOnlyList<DiagnosticL3Row> l3Rows,
+            int? sessionId,
+            TimeSpan? eventTime)
+        {
+            var upper = text.ToUpperInvariant();
+            if (HasAny(upper, "LTE IMS", "VOLTE", "IMS"))
+                return "LTE IMS";
+            if (HasAny(upper, "NR", "5G"))
+                return "5G";
+            if (HasAny(upper, "LTE", "4G"))
+                return "LTE";
+            if (HasAny(upper, "WCDMA", "UMTS", "3G"))
+                return "3G";
+            if (HasAny(upper, "GSM", "2G"))
+                return "2G";
+
+            var nearby = l3Rows
+                .Where(x => x.SessionId == sessionId)
+                .Select(x => new { Row = x, Distance = eventTime.HasValue && x.EventTime.HasValue ? Math.Abs(SecondsBetween(eventTime.Value, x.EventTime.Value)) : double.MaxValue })
+                .Where(x => x.Distance <= 30 || !eventTime.HasValue)
+                .OrderBy(x => x.Distance)
+                .FirstOrDefault();
+
+            var l3Text = nearby?.Row.Text.ToUpperInvariant() ?? string.Empty;
+            if (HasAny(l3Text, "NR-RRC", " 5G", "NR "))
+                return "5G";
+            if (HasAny(l3Text, "LTE", "LTE-RRC", "E-UTRA"))
+                return "LTE";
+            if (HasAny(l3Text, "IMS"))
+                return "LTE IMS";
+
+            return "Unknown";
+        }
+
+        private static bool HasAny(string text, params string[] terms)
+        {
+            return terms.Any(term => text.Contains(term, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static string? FormatDiagnosticTime(TimeSpan? value, string? fallback)
+        {
+            if (value.HasValue)
+            {
+                return value.Value.ToString(@"hh\:mm\:ss", CultureInfo.InvariantCulture);
+            }
+
+            return string.IsNullOrWhiteSpace(fallback) ? null : fallback;
+        }
+
+        private static string? FormatDiagnosticDuration(double? seconds)
+        {
+            if (!seconds.HasValue)
+                return null;
+
+            var rounded = (int)Math.Round(seconds.Value);
+            if (rounded < 60)
+                return $"{rounded}s";
+
+            var minutes = rounded / 60;
+            var remainSeconds = rounded % 60;
+            return remainSeconds == 0 ? $"{minutes}m" : $"{minutes}m {remainSeconds}s";
+        }
+
+        private static double SecondsBetween(TimeSpan start, TimeSpan end)
+        {
+            var seconds = (end - start).TotalSeconds;
+            if (seconds < 0)
+            {
+                seconds += TimeSpan.FromDays(1).TotalSeconds;
+            }
+
+            return seconds;
+        }
+
+        private static TimeSpan? ParseDiagnosticTime(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return null;
+
+            value = value.Trim();
+            var formats = new[]
+            {
+                @"hh\:mm\:ss\.fff",
+                @"h\:mm\:ss\.fff",
+                @"hh\:mm\:ss",
+                @"h\:mm\:ss"
+            };
+
+            if (TimeSpan.TryParseExact(value, formats, CultureInfo.InvariantCulture, out var exact))
+                return exact;
+
+            if (DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out var dateTime))
+                return dateTime.TimeOfDay;
+
+            return null;
+        }
+
+        private static string? ReadString(DbDataReader reader, int ordinal)
+        {
+            return reader.IsDBNull(ordinal) ? null : reader.GetValue(ordinal)?.ToString();
+        }
+
+        private static int? ReadInt32(DbDataReader reader, int ordinal)
+        {
+            if (reader.IsDBNull(ordinal))
+                return null;
+            return Convert.ToInt32(reader.GetValue(ordinal), CultureInfo.InvariantCulture);
+        }
+
+        private static long? ReadInt64(DbDataReader reader, int ordinal)
+        {
+            if (reader.IsDBNull(ordinal))
+                return null;
+            return Convert.ToInt64(reader.GetValue(ordinal), CultureInfo.InvariantCulture);
+        }
+
+        private static double? ReadDouble(DbDataReader reader, int ordinal)
+        {
+            if (reader.IsDBNull(ordinal))
+                return null;
+            return Convert.ToDouble(reader.GetValue(ordinal), CultureInfo.InvariantCulture);
         }
 
         private async Task<SubSessionPolygonScope> ResolveSubSessionPolygonScopeAsync(
