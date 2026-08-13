@@ -210,8 +210,11 @@ namespace SignalTracker.Controllers
 
             try
             {
-                foreach (var upload in uploads)
+                var fileGroups = ResolveLogFileGroups(uploads.Count, Request.HasFormContentType ? Request.Form : null, Request.Query);
+
+                for (int zipIdx = 0; zipIdx < uploads.Count; zipIdx++)
                 {
+                    var upload = uploads[zipIdx];
                     var tempPath = await SaveUploadToTempFileAsync(upload, HttpContext.RequestAborted);
                     allTempPaths.Add(tempPath);
 
@@ -228,7 +231,16 @@ namespace SignalTracker.Controllers
                     var sid = (int)(request.SessionIdOverride ?? detectedSessionId ?? 0);
                     if (sid > 0 && !sessionIds.Contains(sid)) sessionIds.Add(sid);
 
-                    allRawRows.AddRange(ExtractNetworkRowsFromZip(archive, sid));
+                    var zipRows = ExtractNetworkRowsFromZip(archive, sid);
+                    int assignedGroup = fileGroups[zipIdx];
+                    string fileName = Path.GetFileNameWithoutExtension(upload.FileName);
+                    foreach (var r in zipRows)
+                    {
+                        r.FileIndex = zipIdx;
+                        r.SourceFileName = fileName;
+                        r.FileGroup = assignedGroup;
+                    }
+                    allRawRows.AddRange(zipRows);
 
                     // First zip with a ColorSettings file wins for thresholds
                     if (thresholds == null)
@@ -239,7 +251,7 @@ namespace SignalTracker.Controllers
                     }
 
                     allSiteRows.AddRange(ExtractSiteSummaryRowsFromZip(archive));
-                    fileNames.Add(Path.GetFileNameWithoutExtension(upload.FileName));
+                    fileNames.Add(fileName);
                 }
 
                 thresholds ??= ReportThresholdConfig.Hardcoded();
@@ -289,10 +301,11 @@ namespace SignalTracker.Controllers
                 var imageBytesByUrl = BuildImageBytesByUrlFromZip(mergedImages, sessionIds);
                 var reportMode      = ResolveReportMode(request, Request.HasFormContentType ? Request.Form : null);
                 var showSampleCount = ResolveShowSampleCount(request, Request.HasFormContentType ? Request.Form : null);
+                var customSheetNames = ResolveCustomSheetNames(Request.HasFormContentType ? Request.Form : null, Request.Query);
 
                 var workbook = BuildWorkbook(
                     projectName, sessionIds, rows, allSiteRows,
-                    imageBytesByUrl, thresholds, reportMode, filterByImageName, showSampleCount);
+                    imageBytesByUrl, thresholds, reportMode, filterByImageName, showSampleCount, customSheetNames);
 
                 var bytes = SimpleXlsxWriter.Write(workbook);
                 var primarySessionId = sessionIds.Count > 0 ? sessionIds[0] : 0;
@@ -326,8 +339,9 @@ namespace SignalTracker.Controllers
 
             try
             {
-                foreach (var upload in uploads)
+                for (int zipIdx = 0; zipIdx < uploads.Count; zipIdx++)
                 {
+                    var upload = uploads[zipIdx];
                     var tempPath = await SaveUploadToTempFileAsync(upload, HttpContext.RequestAborted);
                     allTempPaths.Add(tempPath);
 
@@ -340,7 +354,14 @@ namespace SignalTracker.Controllers
                     var sid = (int)(request.SessionIdOverride ?? detectedSessionId ?? 0);
                     if (sid > 0 && !sessionIds.Contains(sid)) sessionIds.Add(sid);
 
-                    allRawRows.AddRange(ExtractNetworkRowsFromZip(archive, sid));
+                    var zipRows = ExtractNetworkRowsFromZip(archive, sid);
+                    string fileName = Path.GetFileNameWithoutExtension(upload.FileName);
+                    foreach (var r in zipRows)
+                    {
+                        r.FileIndex = zipIdx;
+                        r.SourceFileName = fileName;
+                    }
+                    allRawRows.AddRange(zipRows);
                 }
 
                 // Merge & deduplicate all rows across all zips
@@ -377,6 +398,42 @@ namespace SignalTracker.Controllers
                     .OrderByDescending(x => x.Count)
                     .ToList();
 
+                var bandsByFile = rowsToSummarize
+                    .GroupBy(r => new { r.FileIndex, FileName = !string.IsNullOrWhiteSpace(r.SourceFileName) ? r.SourceFileName : $"File {r.FileIndex + 1}" })
+                    .OrderBy(g => g.Key.FileIndex)
+                    .Select(g =>
+                    {
+                        var fValidRows = g.Where(r => !string.IsNullOrWhiteSpace(r.BandSheetName) &&
+                                                     !r.BandSheetName.Equals("Unknown Band", StringComparison.OrdinalIgnoreCase) &&
+                                                     !r.BandSheetName.Equals("Unknown", StringComparison.OrdinalIgnoreCase))
+                                          .ToList();
+                        if (fValidRows.Count == 0 && g.Count() > 0) fValidRows = g.ToList();
+
+                        var fTotalValid = fValidRows.Count;
+                        var fBandSummary = fValidRows
+                            .GroupBy(r => r.BandSheetName, StringComparer.OrdinalIgnoreCase)
+                            .Select(bg => new
+                            {
+                                Band       = bg.Key,
+                                Count      = bg.Count(),
+                                Percentage = fTotalValid == 0 ? 0 : Math.Round(bg.Count() * 100.0 / fTotalValid, 2)
+                            })
+                            .OrderByDescending(x => x.Count)
+                            .ToList();
+
+                        var fSessionId = g.Select(r => r.SessionId).FirstOrDefault(sid => sid > 0);
+
+                        return new
+                        {
+                            FileIndex      = g.Key.FileIndex,
+                            FileName       = g.Key.FileName,
+                            SessionId      = fSessionId,
+                            TotalRows      = g.Count(),
+                            AvailableBands = fBandSummary
+                        };
+                    })
+                    .ToList();
+
                 // SessionId (first, for backward compat) + SessionIds array + FileCount
                 var primarySessionId = sessionIds.Count > 0 ? sessionIds[0] : 0;
 
@@ -386,7 +443,8 @@ namespace SignalTracker.Controllers
                     SessionIds     = sessionIds,
                     FileCount      = uploads.Count,
                     TotalRows      = rowsToSummarize.Count,
-                    AvailableBands = bandSummary
+                    AvailableBands = bandSummary,
+                    BandsByFile    = bandsByFile
                 });
             }
             finally
@@ -540,8 +598,7 @@ namespace SignalTracker.Controllers
                         fn.StartsWith("SiteSummary", StringComparison.OrdinalIgnoreCase) ||
                         fn.StartsWith("sites", StringComparison.OrdinalIgnoreCase) ||
                         fn.StartsWith("Event", StringComparison.OrdinalIgnoreCase) ||
-                        fn.StartsWith("L3", StringComparison.OrdinalIgnoreCase) ||
-                        fn.Contains("Unsent", StringComparison.OrdinalIgnoreCase))
+                        fn.StartsWith("L3", StringComparison.OrdinalIgnoreCase))
                     {
                         return false;
                     }
@@ -1352,7 +1409,9 @@ namespace SignalTracker.Controllers
                     Cqi = x.cqi,
                     Ta = x.ta ?? ExtractPuschTxFromPrimaryCellInfo(x.primary_cell_info_1),
                     Level = x.level,
-                    Primary = x.primary
+                    Primary = x.primary,
+                    RawImageName = x.image_path,
+                    MetricColors = ParseImageNameColors(x.image_path)
                 })
                 .ToListAsync(HttpContext.RequestAborted);
 
@@ -1546,6 +1605,47 @@ namespace SignalTracker.Controllers
                 : null;
         }
 
+        private static List<(string DisplayTitle, string BandSheetName, List<WalkTestLogRow> BandRows)> CreateBandBlocks(List<WalkTestLogRow> rows)
+        {
+            var blocks = new List<(string DisplayTitle, string BandSheetName, List<WalkTestLogRow> BandRows)>();
+            var validRows = rows
+                .Where(x => !string.IsNullOrWhiteSpace(x.BandSheetName) &&
+                            !x.BandSheetName.Equals("Unknown Band", StringComparison.OrdinalIgnoreCase) &&
+                            !x.BandSheetName.Equals("Unknown", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            bool hasMultipleFiles = validRows.Select(x => x.FileIndex).Distinct().Count() > 1;
+
+            if (hasMultipleFiles)
+            {
+                var groupedByFileAndBand = validRows
+                    .GroupBy(x => new { x.FileIndex, SourceFileName = !string.IsNullOrWhiteSpace(x.SourceFileName) ? x.SourceFileName : $"Log {x.FileIndex + 1}", x.BandSheetName })
+                    .OrderBy(g => g.Key.FileIndex)
+                    .ThenBy(g => BandSortKey(g.Key.BandSheetName), StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                foreach (var g in groupedByFileAndBand)
+                {
+                    string displayTitle = $"{g.Key.BandSheetName} ({g.Key.SourceFileName})";
+                    blocks.Add((displayTitle, g.Key.BandSheetName, g.ToList()));
+                }
+            }
+            else
+            {
+                var groupedByBand = validRows
+                    .GroupBy(x => x.BandSheetName)
+                    .OrderBy(g => BandSortKey(g.Key), StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                foreach (var g in groupedByBand)
+                {
+                    blocks.Add((g.Key, g.Key, g.ToList()));
+                }
+            }
+
+            return blocks;
+        }
+
         private static XlsxWorkbook BuildWorkbook(
             string projectName,
             List<int> sessionIds,
@@ -1555,7 +1655,8 @@ namespace SignalTracker.Controllers
             ReportThresholdConfig thresholds,
             string reportMode = "separate",
             bool filterByImageName = true,
-            bool showSampleCount = false)
+            bool showSampleCount = false,
+            List<string>? customSheetNames = null)
         {
             var workbook = new XlsxWorkbook();
             workbook.Sheets.Add(BuildSiteSummarySheet(projectName, sessionIds, rows, siteRows));
@@ -1570,7 +1671,47 @@ namespace SignalTracker.Controllers
 
             if (string.Equals(reportMode, "combined", StringComparison.OrdinalIgnoreCase))
             {
-                workbook.Sheets.Add(BuildCombinedBandSheet(bandGroups, rows, imageBytesByUrl, thresholds, filterByImageName, showSampleCount));
+                var fileGroupIds = rows
+                    .Select(x => x.FileGroup)
+                    .Distinct()
+                    .OrderBy(x => x)
+                    .ToList();
+
+                if (fileGroupIds.Count > 1)
+                {
+                    for (int idx = 0; idx < fileGroupIds.Count; idx++)
+                    {
+                        int fg = fileGroupIds[idx];
+                        var fgRows = rows.Where(x => x.FileGroup == fg).ToList();
+                        var fgBandBlocks = CreateBandBlocks(fgRows);
+
+                        string sheetTitle;
+                        if (customSheetNames != null && idx < customSheetNames.Count && !string.IsNullOrWhiteSpace(customSheetNames[idx]))
+                        {
+                            sheetTitle = SanitizeExcelSheetName(customSheetNames[idx]);
+                        }
+                        else
+                        {
+                            sheetTitle = $"Combined Group {fg}";
+                        }
+
+                        workbook.Sheets.Add(BuildCombinedBandSheet(
+                            fgBandBlocks, fgRows, imageBytesByUrl, thresholds,
+                            filterByImageName, showSampleCount, sheetTitle));
+                    }
+                }
+                else
+                {
+                    var bandBlocks = CreateBandBlocks(rows);
+
+                    string sheetTitle = (customSheetNames != null && customSheetNames.Count > 0 && !string.IsNullOrWhiteSpace(customSheetNames[0]))
+                        ? SanitizeExcelSheetName(customSheetNames[0])
+                        : "Combined";
+
+                    workbook.Sheets.Add(BuildCombinedBandSheet(
+                        bandBlocks, rows, imageBytesByUrl, thresholds,
+                        filterByImageName, showSampleCount, sheetTitle));
+                }
             }
             else
             {
@@ -1658,6 +1799,140 @@ namespace SignalTracker.Controllers
             return false;
         }
 
+        private static string SanitizeExcelSheetName(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name)) return "Combined";
+            var clean = Regex.Replace(name.Trim(), @"[\\/\?\*::\[\]]", "").Trim();
+            if (string.IsNullOrWhiteSpace(clean)) return "Combined";
+            return clean.Length <= 31 ? clean : clean[..31];
+        }
+
+        private static List<string> ResolveCustomSheetNames(IFormCollection? form, IQueryCollection? query = null)
+        {
+            var sheetNames = new List<string>();
+            var keysToMatch = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "SheetNames", "CustomSheetNames", "SheetName", "SheetTitles", "SheetTitle", "SheetLabels", "SheetLabel"
+            };
+
+            if (form != null)
+            {
+                foreach (var k in form.Keys)
+                {
+                    var normalized = k.Replace("_", "").Replace("-", "");
+                    if (keysToMatch.Contains(normalized) || keysToMatch.Contains(k))
+                    {
+                        var values = form[k].ToArray();
+                        foreach (var v in values)
+                        {
+                            if (!string.IsNullOrWhiteSpace(v))
+                            {
+                                var parts = v.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries);
+                                foreach (var p in parts)
+                                {
+                                    var cleaned = p.Trim().Trim('[', ']', '"', '\'');
+                                    if (!string.IsNullOrWhiteSpace(cleaned))
+                                        sheetNames.Add(cleaned);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (sheetNames.Count == 0 && query != null)
+            {
+                foreach (var k in query.Keys)
+                {
+                    var normalized = k.Replace("_", "").Replace("-", "");
+                    if (keysToMatch.Contains(normalized) || keysToMatch.Contains(k))
+                    {
+                        var values = query[k].ToArray();
+                        foreach (var v in values)
+                        {
+                            if (!string.IsNullOrWhiteSpace(v))
+                            {
+                                var parts = v.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries);
+                                foreach (var p in parts)
+                                {
+                                    var cleaned = p.Trim().Trim('[', ']', '"', '\'');
+                                    if (!string.IsNullOrWhiteSpace(cleaned))
+                                        sheetNames.Add(cleaned);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            return sheetNames;
+        }
+
+        private static List<int> ResolveLogFileGroups(int fileCount, IFormCollection? form, IQueryCollection? query = null)
+        {
+            var groups = new List<int>();
+            var keysToMatch = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "LogFileGroups", "FileGroups", "GroupAssignments", "FileGroup", "FileGroupMap", "LogGroups", "Groups"
+            };
+
+            var rawTokens = new List<string>();
+
+            if (form != null)
+            {
+                foreach (var k in form.Keys)
+                {
+                    var normalized = k.Replace("_", "").Replace("-", "");
+                    if (keysToMatch.Contains(normalized) || keysToMatch.Contains(k))
+                    {
+                        var values = form[k].ToArray();
+                        foreach (var v in values)
+                        {
+                            if (!string.IsNullOrWhiteSpace(v))
+                            {
+                                var parts = v.Split(new[] { ',', ';', '[', ']', ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                                rawTokens.AddRange(parts);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (rawTokens.Count == 0 && query != null)
+            {
+                foreach (var k in query.Keys)
+                {
+                    var normalized = k.Replace("_", "").Replace("-", "");
+                    if (keysToMatch.Contains(normalized) || keysToMatch.Contains(k))
+                    {
+                        var values = query[k].ToArray();
+                        foreach (var v in values)
+                        {
+                            if (!string.IsNullOrWhiteSpace(v))
+                            {
+                                var parts = v.Split(new[] { ',', ';', '[', ']', ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                                rawTokens.AddRange(parts);
+                            }
+                        }
+                    }
+                }
+            }
+
+            for (int i = 0; i < fileCount; i++)
+            {
+                if (i < rawTokens.Count && int.TryParse(rawTokens[i].Trim(), out int parsedGroup) && parsedGroup > 0)
+                {
+                    groups.Add(parsedGroup);
+                }
+                else
+                {
+                    groups.Add(1);
+                }
+            }
+
+            return groups;
+        }
+
         private static bool ResolveFilterByImageName(object? request, IFormCollection? form, IQueryCollection? query = null)
         {
             var keysToMatch = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -1711,49 +1986,60 @@ namespace SignalTracker.Controllers
         }
 
         private static XlsxSheet BuildCombinedBandSheet(
-            List<IGrouping<string, WalkTestLogRow>> bandGroups,
+            List<(string DisplayTitle, string BandSheetName, List<WalkTestLogRow> BandRows)> bandBlocks,
             List<WalkTestLogRow> allRows,
             IReadOnlyDictionary<string, byte[]?> imageBytesByUrl,
             ReportThresholdConfig thresholds,
             bool filterByImageName = true,
-            bool showSampleCount = false)
+            bool showSampleCount = false,
+            string sheetName = "Combined")
         {
-            int numBands = bandGroups.Count;
+            int numBands = bandBlocks.Count;
             int totalCols = Math.Max(15, numBands * 9);
             var columnWidths = new double[totalCols];
             for (int c = 0; c < totalCols; c++)
                 columnWidths[c] = (c % 9 >= 6) ? 3.5 : 13.5;
 
-            var sheet = new XlsxSheet("Combined") { ColumnWidths = columnWidths, FreezeTopRow = false };
+            var safeSheetName = string.IsNullOrWhiteSpace(sheetName) ? "Combined" : sheetName.Trim();
+            if (safeSheetName.Length > 31) safeSheetName = safeSheetName[..31];
+
+            var sheet = new XlsxSheet(safeSheetName) { ColumnWidths = columnWidths, FreezeTopRow = false };
 
             const int cellSpan = 6; // Block 1: A-F (cols 0-5), Block 2: J-O (cols 9-14)...
             const int maxWidthEmu = 3_619_500; // ~380 px wide
 
-            var bandDataList = new List<(string BandName, List<WalkTestLogRow> BandRows, int PrimarySessionId, List<(string Header, byte[] FinalBytes, (int WidthEmu, int HeightEmu) Size)> Plots)>();
+            var bandDataList = new List<(string DisplayTitle, string BandName, List<WalkTestLogRow> BandRows, int PrimarySessionId, List<(string Header, byte[] FinalBytes, (int WidthEmu, int HeightEmu) Size)> Plots)>();
 
-            foreach (var group in bandGroups)
+            foreach (var block in bandBlocks)
             {
-                var bandName = group.Key;
-                var bandRows = group.ToList();
+                var displayTitle = block.DisplayTitle;
+                var bandName = block.BandSheetName;
+                var bandRows = block.BandRows;
                 var primarySessionId = bandRows.Select(x => x.SessionId).FirstOrDefault(x => x > 0);
 
-                var plots = new List<(string Header, byte[] FinalBytes, (int WidthEmu, int HeightEmu) Size)>();
+                var plotSlots = new (string Header, byte[] FinalBytes, (int WidthEmu, int HeightEmu) Size)?[ImageHeaders.Length];
 
-                foreach (var header in ImageHeaders)
+                Parallel.For(0, ImageHeaders.Length, hIdx =>
                 {
+                    var header = ImageHeaders[hIdx];
                     var mapRawBytes = TryResolveMapImage(imageBytesByUrl, primarySessionId, header, bandName);
-                    if (mapRawBytes == null || mapRawBytes.Length == 0) continue;
+                    if (mapRawBytes != null && mapRawBytes.Length > 0)
+                    {
+                        var legendBytes = TryResolveLegendPhoto(imageBytesByUrl, primarySessionId, header, bandRows, thresholds, filterByImageName, showSampleCount);
+                        var finalBytes  = OverlayLegendOnMap(mapRawBytes, legendBytes);
+                        var size        = ScaleToEmu(ReadPngSizePx(finalBytes), maxWidthEmu);
+                        plotSlots[hIdx] = (header, finalBytes, size);
+                    }
+                });
 
-                    var legendBytes = TryResolveLegendPhoto(imageBytesByUrl, primarySessionId, header, bandRows, thresholds, filterByImageName, showSampleCount);
-                    var finalBytes  = OverlayLegendOnMap(mapRawBytes, legendBytes);
-                    var size        = ScaleToEmu(ReadPngSizePx(finalBytes), maxWidthEmu);
-
-                    plots.Add((header, finalBytes, size));
-                }
+                var plots = plotSlots
+                    .Where(p => p.HasValue)
+                    .Select(p => p!.Value)
+                    .ToList();
 
                 if (plots.Count > 0)
                 {
-                    bandDataList.Add((bandName, bandRows, primarySessionId, plots));
+                    bandDataList.Add((displayTitle, bandName, bandRows, primarySessionId, plots));
                 }
             }
 
@@ -1768,7 +2054,7 @@ namespace SignalTracker.Controllers
             for (int b = 0; b < activeBands; b++)
             {
                 int colStart = b * 9;
-                headerRow.Cells[colStart] = XlsxCell.Text($"Band: {bandDataList[b].BandName}", 4);
+                headerRow.Cells[colStart] = XlsxCell.Text($"Band: {bandDataList[b].DisplayTitle}", 4);
             }
             sheet.Rows.Add(headerRow);
             sheet.Rows.Add(XlsxRow.Blank());
@@ -1791,7 +2077,7 @@ namespace SignalTracker.Controllers
                     {
                         int colStart = b * 9;
                         var plot = plots[p];
-                        titleRow.Cells[colStart] = XlsxCell.Text($"{bandDataList[b].BandName} - {plot.Header} Plot", 4);
+                        titleRow.Cells[colStart] = XlsxCell.Text($"{bandDataList[b].DisplayTitle} - {plot.Header} Plot", 4);
 
                         double heightPts = plot.Size.HeightEmu / 12700.0;
                         if (heightPts > maxRowHeight) maxRowHeight = heightPts;
@@ -3306,6 +3592,9 @@ namespace SignalTracker.Controllers
             public string? Primary { get; set; }
             public string? RawImageName { get; set; }
             public Dictionary<string, string>? MetricColors { get; set; }
+            public int FileIndex { get; set; }
+            public string? SourceFileName { get; set; }
+            public int FileGroup { get; set; } = 1;
         }
 
         private sealed class WalkTestSiteSummaryRow

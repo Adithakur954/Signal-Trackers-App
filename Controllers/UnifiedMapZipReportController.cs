@@ -696,10 +696,10 @@ namespace SignalTracker.Controllers
         // CSV extraction
         // ---------------------------------------------------------------
 
-        // Only consume normal timestamped logs, e.g. NetworkLog_20260711_163832.csv.
-        // NetworkLogUnsent_{session_id}.csv files are intentionally ignored here.
+        // Consume timestamped network logs (e.g. NetworkLog_20260711_163832.csv)
+        // as well as NetworkLogUnsent_{session_id}.csv files.
         private static readonly Regex NetworkLogCsvNamePattern =
-            new(@"^NetworkLogs?_\d{8}_\d{6}\.csv$", RegexOptions.IgnoreCase);
+            new(@"^NetworkLogs?_.*\.csv$", RegexOptions.IgnoreCase);
 
         private List<UnifiedMapReportRow> ExtractNetworkRows(ZipArchive archive, long sessionId)
         {
@@ -714,8 +714,7 @@ namespace SignalTracker.Controllers
                         fn.StartsWith("SiteSummary", StringComparison.OrdinalIgnoreCase) ||
                         fn.StartsWith("sites", StringComparison.OrdinalIgnoreCase) ||
                         fn.StartsWith("Event", StringComparison.OrdinalIgnoreCase) ||
-                        fn.StartsWith("L3", StringComparison.OrdinalIgnoreCase) ||
-                        fn.Contains("Unsent", StringComparison.OrdinalIgnoreCase))
+                        fn.StartsWith("L3", StringComparison.OrdinalIgnoreCase))
                     {
                         return false;
                     }

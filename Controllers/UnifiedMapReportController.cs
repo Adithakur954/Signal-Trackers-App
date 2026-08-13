@@ -263,7 +263,7 @@ namespace SignalTracker.Controllers
                     ) AS provider_name,
                     band, pci, rssi, rsrp, rsrq, sinr, mos, jitter, latency,
                     packet_loss, dl_tpt, ul_tpt, apps, app_name, indoor_outdoor, nodeb_id, cell_id, earfcn, bler, volte_call,
-                    primary_cell_info_1
+                    primary_cell_info_1, image_path
                 FROM tbl_network_log
                 WHERE {whereClause}
                 ORDER BY timestamp, id
@@ -308,7 +308,8 @@ namespace SignalTracker.Controllers
                         Apps = ReadString(reader, "apps"),
                         IndoorOutdoor = ReadString(reader, "indoor_outdoor"),
                         CellId = ReadString(reader, "cell_id"),
-                        PuschTx = ExtractPuschTx(primaryCellInfo)
+                        PuschTx = ExtractPuschTx(primaryCellInfo),
+                        RawImageName = ReadString(reader, "image_path")
                     });
                 }
             }
