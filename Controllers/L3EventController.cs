@@ -1504,28 +1504,12 @@ namespace SignalTracker.Controllers
                 rows.Add(new
                 {
                     id = ReadDb<long>(reader, "id"),
-                    projectId = ReadDb<int?>(reader, "project_id"),
                     project_id = ReadDb<int?>(reader, "project_id"),
-                    uploadId = ReadDb<int?>(reader, "tbl_upload_id"),
-                    upload_id = ReadDb<int?>(reader, "tbl_upload_id"),
-                    tbl_upload_id = ReadDb<int?>(reader, "tbl_upload_id"),
-                    projectName = ReadDb<string>(reader, "project_name"),
-                    project_name = ReadDb<string>(reader, "project_name"),
-                    sessionId = ReadDb<int?>(reader, "session_id"),
                     session_id = ReadDb<int?>(reader, "session_id"),
-                    originalFileName = ReadDb<string>(reader, "original_file_name"),
-                    original_file_name = ReadDb<string>(reader, "original_file_name"),
-                    l3Rows = ReadDb<int>(reader, "l3_rows"),
-                    l3_rows = ReadDb<int>(reader, "l3_rows"),
-                    eventsRows = ReadDb<int>(reader, "events_rows"),
-                    events_rows = ReadDb<int>(reader, "events_rows"),
-                    uploadedBy = ReadDb<int>(reader, "uploaded_by"),
-                    uploaded_by = ReadDb<int>(reader, "uploaded_by"),
-                    uploadedByName = ReadDb<string>(reader, "uploaded_by_name"),
-                    uploaded_by_name = ReadDb<string>(reader, "uploaded_by_name"),
-                    uploadedOn = ReadDb<DateTime>(reader, "uploaded_on"),
+                    upload_id = ReadDb<int?>(reader, "tbl_upload_id"),
                     uploaded_on = ReadDb<DateTime>(reader, "uploaded_on"),
-                    status = ReadDb<short>(reader, "status")
+                    status = ReadDb<short>(reader, "status"),
+                    original_file_name = ReadDb<string>(reader, "original_file_name")
                 });
             }
 
