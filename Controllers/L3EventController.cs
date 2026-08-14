@@ -165,6 +165,75 @@ namespace SignalTracker.Controllers
             return denied ?? await CreateMapViewController().GenerateDiagnosticL3SummaryPdf(sessionId, sessionIds, sessionIdsAlt, uploadId, take, reportRows, sourceFileName);
         }
 
+        [HttpPost("SaveL3EventHistory")]
+        public async Task<IActionResult> SaveL3EventHistory(
+            [FromBody] Dictionary<string, JsonElement>? payload,
+            CancellationToken cancellationToken = default)
+        {
+            var userId = GetCurrentUserId();
+            if (userId <= 0)
+                return Unauthorized(new { status = 0, message = "Unable to resolve logged-in user." });
+
+            await EnsureL3EventSchemaAsync(cancellationToken);
+
+            payload ??= new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase);
+            var projectId = GetJsonInt(payload, "project_id", "projectId");
+            var sessionId = GetJsonInt(payload, "session_id", "sessionId");
+            var uploadId = GetJsonInt(payload, "tbl_upload_id", "upload_id", "uploadId");
+            var l3Rows = Math.Max(0, GetJsonInt(payload, "l3_rows", "l3Rows", "l3_rows_imported") ?? 0);
+            var eventRows = Math.Max(0, GetJsonInt(payload, "events_rows", "eventRows", "event_rows", "eventRowsImported") ?? 0);
+            var uploadedBy = GetJsonInt(payload, "uploaded_by", "uploadedBy") ?? userId;
+            var status = (short)Math.Clamp(GetJsonInt(payload, "status") ?? 1, 0, short.MaxValue);
+            var originalFileName = FirstNonBlank(
+                GetJsonString(payload, "original_file_name", "originalFileName"),
+                GetJsonString(payload, "file_name", "fileName"),
+                "L3/Event history");
+
+            if (projectId.GetValueOrDefault() > 0)
+            {
+                var projectInfo = await GetAuthorizedProjectInfoAsync(projectId!.Value, userId, cancellationToken);
+                if (projectInfo == null)
+                    return NotFound(new { status = 0, message = "Project was not found or is not available for this user." });
+            }
+
+            if (sessionId.GetValueOrDefault() > 0)
+            {
+                var denied = await ValidateDiagnosticAccessAsync(sessionId, null, null, null, cancellationToken);
+                if (denied != null)
+                    return denied;
+            }
+
+            var historyId = await InsertL3EventHistoryAsync(
+                projectId.GetValueOrDefault() > 0 ? projectId : null,
+                uploadId.GetValueOrDefault(),
+                sessionId.GetValueOrDefault(),
+                originalFileName!,
+                l3Rows,
+                eventRows,
+                uploadedBy,
+                status,
+                cancellationToken);
+
+            if (projectId.GetValueOrDefault() > 0)
+                await UpdateProjectL3EventFlagsAsync(projectId!.Value, l3Rows > 0, eventRows > 0, cancellationToken);
+
+            return Ok(new
+            {
+                status = 1,
+                message = "L3/Event history saved.",
+                data = new
+                {
+                    id = historyId,
+                    projectId,
+                    sessionId,
+                    uploadId,
+                    originalFileName,
+                    l3Rows,
+                    eventsRows = eventRows
+                }
+            });
+        }
+
         [HttpPost("AddSessionUpload")]
         [RequestSizeLimit(512L * 1024 * 1024)]
         [RequestFormLimits(MultipartBodyLengthLimit = 512L * 1024 * 1024)]
@@ -277,6 +346,7 @@ namespace SignalTracker.Controllers
                             insertedL3Rows,
                             insertedEventRows,
                             userId,
+                            1,
                             cancellationToken);
 
                         await CreateMapViewController().PersistDiagnosticCallSummaryAsync(
@@ -357,14 +427,28 @@ namespace SignalTracker.Controllers
         [HttpGet("GetL3EventHistory")]
         public async Task<IActionResult> GetL3EventHistory(
             [FromQuery] int? projectId = null,
+            [FromQuery(Name = "project_id")] int? projectIdAlt = null,
             [FromQuery] int? sessionId = null,
+            [FromQuery(Name = "session_id")] int? sessionIdAlt = null,
             [FromQuery] string? sessionIds = null,
+            [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
+            [FromQuery] int? uploadId = null,
+            [FromQuery(Name = "upload_id")] int? uploadIdAlt = null,
+            [FromQuery] long? historyId = null,
+            [FromQuery(Name = "history_id")] long? historyIdAlt = null,
             [FromQuery] string? dataType = null,
             [FromQuery] int take = 100,
             CancellationToken cancellationToken = default)
         {
             await EnsureL3EventSchemaAsync(cancellationToken);
-            var rows = await GetL3EventUploadHistoryAsync(projectId, sessionId, sessionIds, Math.Clamp(take, 1, 50000), cancellationToken);
+            var rows = await GetL3EventUploadHistoryAsync(
+                projectId ?? projectIdAlt,
+                sessionId ?? sessionIdAlt,
+                FirstNonBlank(sessionIds, sessionIdsAlt),
+                uploadId ?? uploadIdAlt,
+                historyId ?? historyIdAlt,
+                Math.Clamp(take, 1, 50000),
+                cancellationToken);
             return Ok(new { status = 1, data = rows });
         }
 
@@ -944,6 +1028,7 @@ namespace SignalTracker.Controllers
             int l3Rows,
             int eventRows,
             int uploadedBy,
+            short status,
             CancellationToken cancellationToken)
         {
             var insertedId = await ExecuteScalarAsync(@"
@@ -952,17 +1037,18 @@ namespace SignalTracker.Controllers
                      uploaded_by, uploaded_on, status)
                 VALUES
                     (@projectId, @uploadId, @sessionId, @originalFileName, @l3Rows, @eventRows,
-                     @uploadedBy, @uploadedOn, 1);
+                     @uploadedBy, @uploadedOn, @status);
                 SELECT LAST_INSERT_ID();",
                 cancellationToken,
                 ("@projectId", projectId),
-                ("@uploadId", uploadId),
+                ("@uploadId", uploadId > 0 ? uploadId : DBNull.Value),
                 ("@sessionId", sessionId > 0 ? sessionId : DBNull.Value),
                 ("@originalFileName", originalFileName),
                 ("@l3Rows", l3Rows),
                 ("@eventRows", eventRows),
                 ("@uploadedBy", uploadedBy),
-                ("@uploadedOn", DateTime.Now));
+                ("@uploadedOn", DateTime.Now),
+                ("@status", status));
 
             return Convert.ToInt64(insertedId, CultureInfo.InvariantCulture);
         }
@@ -1004,6 +1090,7 @@ namespace SignalTracker.Controllers
                     l3Rows,
                     eventRows,
                     uploadedBy,
+                    1,
                     cancellationToken);
             }
 
@@ -1016,6 +1103,8 @@ namespace SignalTracker.Controllers
             int? projectId,
             int? sessionId,
             string? sessionIds,
+            int? uploadId,
+            long? historyId,
             int take,
             CancellationToken cancellationToken)
         {
@@ -1061,6 +1150,18 @@ namespace SignalTracker.Controllers
                 AddParam(cmd, "@projectId", projectId.Value);
             }
 
+            if (uploadId.HasValue && uploadId.Value > 0)
+            {
+                where.Add("h.tbl_upload_id = @uploadId");
+                AddParam(cmd, "@uploadId", uploadId.Value);
+            }
+
+            if (historyId.HasValue && historyId.Value > 0)
+            {
+                where.Add("h.id = @historyId");
+                AddParam(cmd, "@historyId", historyId.Value);
+            }
+
             if (parsedSessionIds.Count > 0)
             {
                 var names = new List<string>();
@@ -1094,15 +1195,26 @@ namespace SignalTracker.Controllers
                 {
                     id = ReadDb<long>(reader, "id"),
                     projectId = ReadDb<int?>(reader, "project_id"),
+                    project_id = ReadDb<int?>(reader, "project_id"),
                     uploadId = ReadDb<int?>(reader, "tbl_upload_id"),
+                    upload_id = ReadDb<int?>(reader, "tbl_upload_id"),
+                    tbl_upload_id = ReadDb<int?>(reader, "tbl_upload_id"),
                     projectName = ReadDb<string>(reader, "project_name"),
+                    project_name = ReadDb<string>(reader, "project_name"),
                     sessionId = ReadDb<int?>(reader, "session_id"),
+                    session_id = ReadDb<int?>(reader, "session_id"),
                     originalFileName = ReadDb<string>(reader, "original_file_name"),
+                    original_file_name = ReadDb<string>(reader, "original_file_name"),
                     l3Rows = ReadDb<int>(reader, "l3_rows"),
+                    l3_rows = ReadDb<int>(reader, "l3_rows"),
                     eventsRows = ReadDb<int>(reader, "events_rows"),
+                    events_rows = ReadDb<int>(reader, "events_rows"),
                     uploadedBy = ReadDb<int>(reader, "uploaded_by"),
+                    uploaded_by = ReadDb<int>(reader, "uploaded_by"),
                     uploadedByName = ReadDb<string>(reader, "uploaded_by_name"),
+                    uploaded_by_name = ReadDb<string>(reader, "uploaded_by_name"),
                     uploadedOn = ReadDb<DateTime>(reader, "uploaded_on"),
+                    uploaded_on = ReadDb<DateTime>(reader, "uploaded_on"),
                     status = ReadDb<short>(reader, "status")
                 });
             }
@@ -1332,6 +1444,52 @@ namespace SignalTracker.Controllers
                 return typed;
 
             return (T)Convert.ChangeType(value, Nullable.GetUnderlyingType(typeof(T)) ?? typeof(T), CultureInfo.InvariantCulture);
+        }
+
+        private static int? GetJsonInt(IReadOnlyDictionary<string, JsonElement> payload, params string[] keys)
+        {
+            foreach (var key in keys)
+            {
+                if (!payload.TryGetValue(key, out var value))
+                    continue;
+
+                if (value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var number))
+                    return number;
+
+                if (value.ValueKind == JsonValueKind.String &&
+                    int.TryParse(value.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
+                    return parsed;
+            }
+
+            return null;
+        }
+
+        private static string? GetJsonString(IReadOnlyDictionary<string, JsonElement> payload, params string[] keys)
+        {
+            foreach (var key in keys)
+            {
+                if (!payload.TryGetValue(key, out var value))
+                    continue;
+
+                var text = value.ValueKind == JsonValueKind.String
+                    ? value.GetString()
+                    : value.ToString();
+                if (!string.IsNullOrWhiteSpace(text))
+                    return text.Trim();
+            }
+
+            return null;
+        }
+
+        private static string? FirstNonBlank(params string?[] values)
+        {
+            foreach (var value in values)
+            {
+                if (!string.IsNullOrWhiteSpace(value))
+                    return value.Trim();
+            }
+
+            return null;
         }
 
         private static Dictionary<string, object?> NormalizeDiagnosticRow(IDictionary<string, object?> source)
