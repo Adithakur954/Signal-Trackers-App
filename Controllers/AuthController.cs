@@ -2,6 +2,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using System;
 using System.Linq;
 using System.Security.Claims;
 using System.Threading;
@@ -537,14 +538,22 @@ namespace SignalTracker.Controllers
                     })
                     .FirstOrDefaultAsync(ct);
             }
+            catch (OperationCanceledException ex)
+            {
+                _logger.LogWarning(ex, "Auth status check was cancelled for {Email}; preserving authenticated cookie state.", email);
+                return Ok(new AuthStatusResponse
+                {
+                    authenticated = true,
+                    user = BuildUserSummaryFromClaims(User, email)
+                });
+            }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Auth status check failed for {Email}", email);
-                return StatusCode(503, new
+                return Ok(new AuthStatusResponse
                 {
-                    authenticated = false,
-                    user = (object?)null,
-                    message = "Database is busy. Please try again shortly."
+                    authenticated = true,
+                    user = BuildUserSummaryFromClaims(User, email)
                 });
             }
 
@@ -564,6 +573,23 @@ namespace SignalTracker.Controllers
                 authenticated = true,
                 user = user
             });
+        }
+
+        private static UserSummaryDto BuildUserSummaryFromClaims(ClaimsPrincipal principal, string email)
+        {
+            int.TryParse(principal.FindFirst("UserId")?.Value, out var userId);
+            int.TryParse(principal.FindFirst("UserTypeId")?.Value ?? principal.FindFirst("m_user_type_id")?.Value, out var userTypeId);
+            int.TryParse(principal.FindFirst("CompanyId")?.Value ?? principal.FindFirst("company_id")?.Value, out var companyId);
+
+            return new UserSummaryDto
+            {
+                id = userId,
+                name = principal.FindFirst(ClaimTypes.Name)?.Value,
+                email = email,
+                m_user_type_id = userTypeId,
+                country_code = principal.FindFirst("country_code")?.Value,
+                company_id = companyId > 0 ? companyId : null
+            };
         }
 
         private static string? GetEmailFromClaims(ClaimsPrincipal user)

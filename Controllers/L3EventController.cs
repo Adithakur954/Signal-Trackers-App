@@ -1474,6 +1474,8 @@ namespace SignalTracker.Controllers
             if (l3Rows == 0 && eventRows == 0)
                 return;
 
+            var sessionId = await ResolveSessionIdForUploadAsync(uploadId, cancellationToken);
+
             var existingHistoryId = Convert.ToInt64(await ExecuteScalarAsync(@"
                 SELECT COALESCE(MAX(id), 0) FROM tbl_l3_event_history
                 WHERE tbl_upload_id = @uploadId AND original_file_name = @originalFileName;",
@@ -1485,7 +1487,21 @@ namespace SignalTracker.Controllers
                 existingHistoryId = await InsertL3EventHistoryAsync(
                     projectId,
                     uploadId,
-                    0,
+                    sessionId.GetValueOrDefault(),
+                    originalFileName,
+                    l3Rows,
+                    eventRows,
+                    uploadedBy,
+                    1,
+                    cancellationToken);
+            }
+            else
+            {
+                await UpdateL3EventHistoryAsync(
+                    existingHistoryId,
+                    projectId,
+                    uploadId,
+                    sessionId.GetValueOrDefault(),
                     originalFileName,
                     l3Rows,
                     eventRows,
@@ -1495,8 +1511,35 @@ namespace SignalTracker.Controllers
             }
 
             if (projectId.GetValueOrDefault() > 0)
-                await UpdateProjectL3EventFlagsAsync(projectId!.Value, l3Rows > 0, eventRows > 0, cancellationToken);
-            await CreateMapViewController().PersistDiagnosticCallSummaryAsync(0, existingHistoryId, uploadId, cancellationToken);
+            {
+                if (sessionId.GetValueOrDefault() > 0)
+                    await UpdateProjectForL3EventSessionAsync(projectId!.Value, sessionId.Value, l3Rows > 0, eventRows > 0, cancellationToken);
+                else
+                    await UpdateProjectL3EventFlagsAsync(projectId!.Value, l3Rows > 0, eventRows > 0, cancellationToken);
+            }
+
+            if (sessionId.GetValueOrDefault() > 0)
+                await UpdateSessionL3EventFlagsAsync(sessionId.Value, l3Rows > 0, eventRows > 0, cancellationToken);
+
+            await CreateMapViewController().PersistDiagnosticCallSummaryAsync(sessionId.GetValueOrDefault(), existingHistoryId, uploadId, cancellationToken);
+        }
+
+        private async Task<int?> ResolveSessionIdForUploadAsync(int uploadId, CancellationToken cancellationToken)
+        {
+            var value = await ExecuteScalarAsync(@"
+                SELECT id
+                FROM tbl_session
+                WHERE tbl_upload_id = @uploadIdText
+                   OR tbl_upload_id = @uploadId
+                ORDER BY id DESC
+                LIMIT 1;",
+                cancellationToken,
+                ("@uploadIdText", uploadId.ToString(CultureInfo.InvariantCulture)),
+                ("@uploadId", uploadId));
+
+            return value == null || value == DBNull.Value
+                ? null
+                : Convert.ToInt32(value, CultureInfo.InvariantCulture);
         }
 
         private async Task<List<object>> GetL3EventUploadHistoryAsync(
