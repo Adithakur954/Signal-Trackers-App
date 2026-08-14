@@ -115,6 +115,11 @@ public static class SecurityServiceExtensions
                     }
 
                     var currentLockValue = await redis.GetStringAsync($"{UserLoginLockKeyPrefix}{userId}");
+                    if (string.IsNullOrWhiteSpace(currentLockValue))
+                    {
+                        return;
+                    }
+
                     if (!string.Equals(currentLockValue, cookieLockValue, StringComparison.Ordinal))
                     {
                         ctx.RejectPrincipal();
