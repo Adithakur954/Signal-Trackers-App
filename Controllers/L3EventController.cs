@@ -1506,7 +1506,6 @@ namespace SignalTracker.Controllers
                     id = ReadDb<long>(reader, "id"),
                     project_id = ReadDb<int?>(reader, "project_id"),
                     session_id = ReadDb<int?>(reader, "session_id"),
-                    upload_id = ReadDb<int?>(reader, "tbl_upload_id"),
                     uploaded_on = ReadDb<DateTime>(reader, "uploaded_on"),
                     status = ReadDb<short>(reader, "status"),
                     original_file_name = ReadDb<string>(reader, "original_file_name")
