@@ -230,6 +230,7 @@ namespace SignalTracker.Controllers
         public async Task<IActionResult> AddSessionUpload(
             [FromForm] int? projectId = null,
             [FromForm] int? sessionId = null,
+            [FromForm] long? historyId = null,
             [FromForm] string? dataType = null,
             [FromForm] IFormFile? zipFile = null,
             [FromForm] IFormFile? l3File = null,
@@ -250,7 +251,24 @@ namespace SignalTracker.Controllers
                     return NotFound(new { status = 0, message = "Project was not found or is not available for this user." });
             }
 
-            int? linkedSessionId = null;
+            int? linkedSessionId = sessionId.GetValueOrDefault() > 0 ? sessionId.Value : null;
+            if (linkedSessionId.HasValue)
+            {
+                var denied = await ValidateDiagnosticAccessAsync(linkedSessionId.Value, null, null, null, cancellationToken);
+                if (denied != null)
+                    return denied;
+            }
+
+            var replaceHistory = historyId.GetValueOrDefault() > 0
+                ? await GetAuthorizedL3EventHistoryForUpdateAsync(historyId.Value, userId, cancellationToken)
+                : null;
+            if (historyId.GetValueOrDefault() > 0 && replaceHistory == null)
+                return NotFound(new { status = 0, message = "The selected L3 session was not found or is not available for this user." });
+            if (replaceHistory != null)
+            {
+                linkedProjectId = projectId.GetValueOrDefault() > 0 ? projectId.Value : replaceHistory.ProjectId;
+                linkedSessionId = sessionId.GetValueOrDefault() > 0 ? sessionId.Value : replaceHistory.SessionId;
+            }
 
             var tempFiles = new List<string>();
             try
@@ -298,51 +316,117 @@ namespace SignalTracker.Controllers
                     try
                     {
 
-                        var history = new tbl_upload_history
+                        int uploadHistoryId;
+                        if (replaceHistory != null)
                         {
-                            uploaded_on = DateTime.Now,
-                            file_type = 1,
-                            file_name = originalUploadName,
-                            uploaded_by = userId,
-                            remarks = linkedProjectId.HasValue
-                            ? $"L3/Event Add Session upload for project {linkedProjectId.Value}"
-                            : "L3/Event Add Session upload",
-                            status = 1,
-                            polygon_file = string.Empty
-                        };
-                        _context.Set<tbl_upload_history>().Add(history);
-                        await _context.SaveChangesAsync(cancellationToken);
-                        await UpdateUploadHistoryOriginalFileNameAsync(history.id, originalUploadName, cancellationToken);
+                            uploadHistoryId = replaceHistory.UploadId.GetValueOrDefault();
+                            if (uploadHistoryId <= 0)
+                            {
+                                var replacement = new tbl_upload_history
+                                {
+                                    uploaded_on = DateTime.Now,
+                                    file_type = 1,
+                                    file_name = originalUploadName,
+                                    uploaded_by = userId,
+                                    remarks = linkedProjectId.HasValue
+                                        ? $"L3/Event replacement upload for project {linkedProjectId.Value}"
+                                        : "L3/Event replacement upload",
+                                    status = 1,
+                                    polygon_file = string.Empty
+                                };
+                                _context.Set<tbl_upload_history>().Add(replacement);
+                                await _context.SaveChangesAsync(cancellationToken);
+                                uploadHistoryId = replacement.id;
+                            }
+                            else
+                            {
+                                await ExecuteNonQueryAsync(@"
+                                    UPDATE tbl_upload_history
+                                    SET uploaded_on = @uploadedOn,
+                                        file_type = 1,
+                                        file_name = @fileName,
+                                        uploaded_by = @uploadedBy,
+                                        remarks = @remarks,
+                                        status = 1,
+                                        errors = NULL,
+                                        polygon_file = ''
+                                    WHERE id = @uploadId;",
+                                    cancellationToken,
+                                    ("@uploadedOn", DateTime.Now),
+                                    ("@fileName", originalUploadName),
+                                    ("@uploadedBy", userId),
+                                    ("@remarks", linkedProjectId.HasValue
+                                        ? $"L3/Event replacement upload for project {linkedProjectId.Value}"
+                                        : "L3/Event replacement upload"),
+                                    ("@uploadId", uploadHistoryId));
+                            }
+
+                            await ExecuteDeleteAsync("DELETE FROM tbl_l3_event_call_summary WHERE tbl_l3_event_history_id = @historyId;", cancellationToken, ("@historyId", replaceHistory.Id));
+                            await ExecuteDeleteAsync("DELETE FROM tbl_l3_log WHERE tbl_upload_id = @uploadId;", cancellationToken, ("@uploadId", uploadHistoryId));
+                            await ExecuteDeleteAsync("DELETE FROM tbl_event_log WHERE tbl_upload_id = @uploadId;", cancellationToken, ("@uploadId", uploadHistoryId));
+                            await UpdateUploadHistoryOriginalFileNameAsync(uploadHistoryId, originalUploadName, cancellationToken);
+                        }
+                        else
+                        {
+                            var history = new tbl_upload_history
+                            {
+                                uploaded_on = DateTime.Now,
+                                file_type = 1,
+                                file_name = originalUploadName,
+                                uploaded_by = userId,
+                                remarks = linkedProjectId.HasValue
+                                ? $"L3/Event Add Session upload for project {linkedProjectId.Value}"
+                                : "L3/Event Add Session upload",
+                                status = 1,
+                                polygon_file = string.Empty
+                            };
+                            _context.Set<tbl_upload_history>().Add(history);
+                            await _context.SaveChangesAsync(cancellationToken);
+                            uploadHistoryId = history.id;
+                            await UpdateUploadHistoryOriginalFileNameAsync(uploadHistoryId, originalUploadName, cancellationToken);
+                        }
 
                         var sessionCreated = false;
                         var targetSessionId = linkedSessionId.GetValueOrDefault();
 
                         var insertedL3Rows = 0;
                         foreach (var file in preparedL3Files)
-                            insertedL3Rows += await ImportL3FileAsync(targetSessionId, history.id, file.FilePath, file.FileName, cancellationToken);
+                            insertedL3Rows += await ImportL3FileAsync(targetSessionId, uploadHistoryId, file.FilePath, file.FileName, cancellationToken);
                         var insertedEventRows = 0;
                         foreach (var file in preparedEventFiles)
-                            insertedEventRows += await ImportEventFileAsync(targetSessionId, history.id, file.FilePath, file.FileName, cancellationToken);
+                            insertedEventRows += await ImportEventFileAsync(targetSessionId, uploadHistoryId, file.FilePath, file.FileName, cancellationToken);
                         if (hasL3 && insertedL3Rows == 0)
                             throw new InvalidDataException("No L3 rows could be parsed from the ZIP.");
                         if (hasEvent && insertedEventRows == 0)
                             throw new InvalidDataException("No Event rows could be parsed from the ZIP.");
 
-                        var l3EventHistoryId = await InsertL3EventHistoryAsync(
-                            linkedProjectId,
-                            history.id,
-                            targetSessionId,
-                            originalUploadName,
-                            insertedL3Rows,
-                            insertedEventRows,
-                            userId,
-                            1,
-                            cancellationToken);
+                        var l3EventHistoryId = replaceHistory?.Id ?? await InsertL3EventHistoryAsync(
+                                linkedProjectId,
+                                uploadHistoryId,
+                                targetSessionId,
+                                originalUploadName,
+                                insertedL3Rows,
+                                insertedEventRows,
+                                userId,
+                                1,
+                                cancellationToken);
+                        if (replaceHistory != null)
+                            await UpdateL3EventHistoryAsync(
+                                replaceHistory.Id,
+                                linkedProjectId,
+                                uploadHistoryId,
+                                targetSessionId,
+                                originalUploadName,
+                                insertedL3Rows,
+                                insertedEventRows,
+                                userId,
+                                1,
+                                cancellationToken);
 
                         await CreateMapViewController().PersistDiagnosticCallSummaryAsync(
                             targetSessionId,
                             l3EventHistoryId,
-                            history.id,
+                            uploadHistoryId,
                             cancellationToken);
 
                         if (targetSessionId > 0)
@@ -369,13 +453,14 @@ namespace SignalTracker.Controllers
                             projectId = linkedProjectId,
                             sessionId = targetSessionId > 0 ? targetSessionId : (int?)null,
                             sessionCreated,
-                            uploadId = history.id,
+                            uploadId = uploadHistoryId,
                             fileName = originalUploadName,
                             l3 = hasL3,
                             @event = hasEvent,
+                            replaced = replaceHistory != null,
                             history = new
                             {
-                                uploadHistoryId = history.id,
+                                uploadHistoryId,
                                 l3EventHistoryId
                             },
                             rows = new
@@ -442,6 +527,136 @@ namespace SignalTracker.Controllers
             return Ok(new { status = 1, data = rows });
         }
 
+        [HttpPut("UpdateL3EventHistory/{historyId:long}")]
+        public async Task<IActionResult> UpdateL3EventHistoryMetadata(
+            long historyId,
+            [FromBody] Dictionary<string, JsonElement>? payload,
+            CancellationToken cancellationToken = default)
+        {
+            if (historyId <= 0)
+                return BadRequest(new { status = 0, message = "A valid L3/Event history ID is required." });
+
+            var userId = GetCurrentUserId();
+            if (userId <= 0)
+                return Unauthorized(new { status = 0, message = "Unable to resolve logged-in user." });
+
+            await EnsureL3EventSchemaAsync(cancellationToken);
+            payload ??= new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase);
+
+            var existing = await GetAuthorizedL3EventHistoryForUpdateAsync(historyId, userId, cancellationToken);
+            if (existing == null)
+                return NotFound(new { status = 0, message = "The selected L3 session was not found or is not available for this user." });
+
+            var nextProjectId = GetJsonInt(payload, "project_id", "projectId");
+            var nextSessionId = GetJsonInt(payload, "session_id", "sessionId");
+            var nextUploadId = GetJsonInt(payload, "tbl_upload_id", "upload_id", "uploadId") ?? existing.UploadId.GetValueOrDefault();
+            var nextFileName = FirstNonBlank(GetJsonString(payload, "original_file_name", "originalFileName"), existing.OriginalFileName, "L3/Event history")!;
+            var nextL3Rows = Math.Max(0, GetJsonInt(payload, "l3_rows", "l3Rows") ?? existing.L3Rows);
+            var nextEventRows = Math.Max(0, GetJsonInt(payload, "events_rows", "eventsRows", "eventRows") ?? existing.EventRows);
+            var nextStatus = (short)Math.Clamp(GetJsonInt(payload, "status") ?? existing.Status, 0, short.MaxValue);
+
+            if (nextProjectId.GetValueOrDefault() > 0)
+            {
+                var projectInfo = await GetAuthorizedProjectInfoAsync(nextProjectId!.Value, userId, cancellationToken);
+                if (projectInfo == null)
+                    return NotFound(new { status = 0, message = "Project was not found or is not available for this user." });
+            }
+
+            if (nextSessionId.GetValueOrDefault() > 0)
+            {
+                var denied = await ValidateDiagnosticAccessAsync(nextSessionId.Value, null, null, null, cancellationToken);
+                if (denied != null)
+                    return denied;
+            }
+
+            if (nextUploadId > 0)
+            {
+                var denied = await ValidateDiagnosticAccessAsync(null, null, null, nextUploadId, cancellationToken);
+                if (denied != null)
+                    return denied;
+            }
+
+            var strategy = _context.Database.CreateExecutionStrategy();
+            return await strategy.ExecuteAsync(async () =>
+            {
+                await using var tx = await _context.Database.BeginTransactionAsync(cancellationToken);
+                try
+                {
+                    await ExecuteNonQueryAsync(@"
+                        UPDATE tbl_l3_event_history
+                        SET project_id = @projectId,
+                            tbl_upload_id = @uploadId,
+                            session_id = @sessionId,
+                            original_file_name = @originalFileName,
+                            l3_rows = @l3Rows,
+                            events_rows = @eventRows,
+                            status = @status
+                        WHERE id = @historyId;",
+                        cancellationToken,
+                        ("@historyId", historyId),
+                        ("@projectId", nextProjectId.GetValueOrDefault() > 0 ? nextProjectId : DBNull.Value),
+                        ("@uploadId", nextUploadId > 0 ? nextUploadId : DBNull.Value),
+                        ("@sessionId", nextSessionId.GetValueOrDefault() > 0 ? nextSessionId : DBNull.Value),
+                        ("@originalFileName", nextFileName),
+                        ("@l3Rows", nextL3Rows),
+                        ("@eventRows", nextEventRows),
+                        ("@status", nextStatus));
+
+                    if (nextUploadId > 0)
+                    {
+                        await ExecuteNonQueryAsync(@"
+                            UPDATE tbl_upload_history
+                            SET file_name = @fileName,
+                                original_file_name = @fileName,
+                                status = @status
+                            WHERE id = @uploadId;",
+                            cancellationToken,
+                            ("@fileName", nextFileName),
+                            ("@status", nextStatus),
+                            ("@uploadId", nextUploadId));
+
+                        await ExecuteNonQueryAsync("UPDATE tbl_l3_log SET session_id = @sessionId WHERE tbl_upload_id = @uploadId;", cancellationToken, ("@sessionId", nextSessionId.GetValueOrDefault() > 0 ? nextSessionId : DBNull.Value), ("@uploadId", nextUploadId));
+                        await ExecuteNonQueryAsync("UPDATE tbl_event_log SET session_id = @sessionId WHERE tbl_upload_id = @uploadId;", cancellationToken, ("@sessionId", nextSessionId.GetValueOrDefault() > 0 ? nextSessionId : DBNull.Value), ("@uploadId", nextUploadId));
+                    }
+
+                    await ExecuteNonQueryAsync("UPDATE tbl_l3_event_call_summary SET session_id = @sessionId WHERE tbl_l3_event_history_id = @historyId;", cancellationToken, ("@sessionId", nextSessionId.GetValueOrDefault() > 0 ? nextSessionId : DBNull.Value), ("@historyId", historyId));
+
+                    if (existing.SessionId.GetValueOrDefault() > 0)
+                        await RecalculateSessionL3EventFlagsAsync(existing.SessionId.Value, cancellationToken);
+                    if (nextSessionId.GetValueOrDefault() > 0 && nextSessionId != existing.SessionId)
+                        await RecalculateSessionL3EventFlagsAsync(nextSessionId.Value, cancellationToken);
+                    if (existing.ProjectId.GetValueOrDefault() > 0)
+                        await RecalculateProjectL3EventFlagsAsync(existing.ProjectId.Value, cancellationToken);
+                    if (nextProjectId.GetValueOrDefault() > 0 && nextProjectId != existing.ProjectId)
+                        await RecalculateProjectL3EventFlagsAsync(nextProjectId.Value, cancellationToken);
+
+                    await tx.CommitAsync(cancellationToken);
+
+                    return Ok(new
+                    {
+                        status = 1,
+                        message = "L3 session updated successfully.",
+                        data = new
+                        {
+                            id = historyId,
+                            projectId = nextProjectId,
+                            sessionId = nextSessionId,
+                            uploadId = nextUploadId > 0 ? nextUploadId : (int?)null,
+                            originalFileName = nextFileName,
+                            l3Rows = nextL3Rows,
+                            eventsRows = nextEventRows,
+                            statusValue = nextStatus
+                        }
+                    });
+                }
+                catch
+                {
+                    await tx.RollbackAsync(cancellationToken);
+                    throw;
+                }
+            });
+        }
+
         [HttpDelete("DeleteL3EventHistory/{historyId:long}")]
         public async Task<IActionResult> DeleteL3EventHistory(long historyId, CancellationToken cancellationToken = default)
         {
@@ -469,7 +684,7 @@ namespace SignalTracker.Controllers
                 AddParam(historyCmd, "@historyId", historyId);
                 await using var reader = await historyCmd.ExecuteReaderAsync(cancellationToken);
                 if (!await reader.ReadAsync(cancellationToken))
-                    return NotFound(new { status = 0, message = "The selected L3/Event upload history was not found." });
+                    return NotFound(new { status = 0, message = "The selected L3 session was not found." });
 
                 sessionId = reader.IsDBNull(reader.GetOrdinal("session_id")) ? null : reader.GetInt32(reader.GetOrdinal("session_id"));
                 projectId = reader.IsDBNull(reader.GetOrdinal("project_id")) ? null : reader.GetInt32(reader.GetOrdinal("project_id"));
@@ -963,6 +1178,36 @@ namespace SignalTracker.Controllers
             await ExecuteNonQueryAsync(
                 $"UPDATE tbl_project SET {string.Join(", ", setParts)} WHERE id = @projectId;",
                 cancellationToken,
+                    ("@projectId", projectId));
+        }
+
+        private async Task RecalculateSessionL3EventFlagsAsync(int sessionId, CancellationToken cancellationToken)
+        {
+            var remainingL3 = Convert.ToInt64(await ExecuteScalarAsync(
+                "SELECT COUNT(*) FROM tbl_l3_log WHERE session_id = @sessionId;",
+                cancellationToken,
+                ("@sessionId", sessionId)), CultureInfo.InvariantCulture) > 0;
+            var remainingEvents = Convert.ToInt64(await ExecuteScalarAsync(
+                "SELECT COUNT(*) FROM tbl_event_log WHERE session_id = @sessionId;",
+                cancellationToken,
+                ("@sessionId", sessionId)), CultureInfo.InvariantCulture) > 0;
+            await UpdateSessionL3EventFlagsAsync(sessionId, remainingL3, remainingEvents, cancellationToken);
+        }
+
+        private Task RecalculateProjectL3EventFlagsAsync(int projectId, CancellationToken cancellationToken)
+        {
+            return ExecuteNonQueryAsync(@"
+                UPDATE tbl_project
+                SET `l3` = EXISTS(
+                        SELECT 1 FROM tbl_l3_event_history h
+                        WHERE h.project_id = @projectId AND h.l3_rows > 0
+                    ),
+                    `event` = EXISTS(
+                        SELECT 1 FROM tbl_l3_event_history h
+                        WHERE h.project_id = @projectId AND h.events_rows > 0
+                    )
+                WHERE id = @projectId;",
+                cancellationToken,
                 ("@projectId", projectId));
         }
 
@@ -973,6 +1218,73 @@ namespace SignalTracker.Controllers
                 cancellationToken,
                 ("@fileName", fileName),
                 ("@uploadId", uploadId));
+        }
+
+        private async Task<ExistingL3EventHistory?> GetAuthorizedL3EventHistoryForUpdateAsync(
+            long historyId,
+            int currentUserId,
+            CancellationToken cancellationToken)
+        {
+            var conn = _context.Database.GetDbConnection();
+            if (conn.State != ConnectionState.Open)
+                await conn.OpenAsync(cancellationToken);
+
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT h.id, h.project_id, h.tbl_upload_id, h.session_id, h.uploaded_by,
+                       h.original_file_name, h.uploaded_on, h.l3_rows, h.events_rows, h.status
+                FROM tbl_l3_event_history h
+                LEFT JOIN tbl_project p ON p.id = h.project_id
+                LEFT JOIN tbl_user uploader ON uploader.id = h.uploaded_by
+                LEFT JOIN tbl_user viewer_user ON viewer_user.id = @currentUserId
+                WHERE h.id = @historyId
+                  AND (
+                    @isSuperAdmin = 1
+                    OR h.uploaded_by = @currentUserId
+                    OR (p.company_id IS NOT NULL AND viewer_user.company_id IS NOT NULL AND p.company_id = viewer_user.company_id)
+                    OR (uploader.company_id IS NOT NULL AND viewer_user.company_id IS NOT NULL AND uploader.company_id = viewer_user.company_id)
+                  )
+                LIMIT 1;";
+            AddParam(cmd, "@historyId", historyId);
+            AddParam(cmd, "@currentUserId", currentUserId);
+            AddParam(cmd, "@isSuperAdmin", _userScope.IsSuperAdmin(User) ? 1 : 0);
+
+            int? sessionId;
+            int? projectId;
+            int? uploadId;
+            int uploadedBy;
+            string originalFileName;
+            DateTime uploadedOn;
+            int l3Rows;
+            int eventRows;
+            short status;
+            await using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
+            {
+                if (!await reader.ReadAsync(cancellationToken))
+                    return null;
+
+                sessionId = ReadDb<int?>(reader, "session_id");
+                projectId = ReadDb<int?>(reader, "project_id");
+                uploadId = ReadDb<int?>(reader, "tbl_upload_id");
+                uploadedBy = ReadDb<int>(reader, "uploaded_by");
+                originalFileName = ReadDb<string>(reader, "original_file_name") ?? string.Empty;
+                uploadedOn = ReadDb<DateTime>(reader, "uploaded_on");
+                l3Rows = ReadDb<int>(reader, "l3_rows");
+                eventRows = ReadDb<int>(reader, "events_rows");
+                status = ReadDb<short>(reader, "status");
+            }
+
+            if (!uploadId.HasValue)
+            {
+                uploadId = await ResolveL3EventUploadIdAsync(
+                    sessionId.GetValueOrDefault(),
+                    uploadedBy,
+                    originalFileName,
+                    uploadedOn,
+                    cancellationToken);
+            }
+
+            return new ExistingL3EventHistory(historyId, projectId, uploadId, sessionId, originalFileName, l3Rows, eventRows, status);
         }
 
         private async Task<int?> ResolveL3EventUploadIdAsync(
@@ -1041,6 +1353,43 @@ namespace SignalTracker.Controllers
                 ("@status", status));
 
             return Convert.ToInt64(insertedId, CultureInfo.InvariantCulture);
+        }
+
+        private Task UpdateL3EventHistoryAsync(
+            long historyId,
+            int? projectId,
+            int uploadId,
+            int sessionId,
+            string originalFileName,
+            int l3Rows,
+            int eventRows,
+            int uploadedBy,
+            short status,
+            CancellationToken cancellationToken)
+        {
+            return ExecuteNonQueryAsync(@"
+                UPDATE tbl_l3_event_history
+                SET project_id = @projectId,
+                    tbl_upload_id = @uploadId,
+                    session_id = @sessionId,
+                    original_file_name = @originalFileName,
+                    l3_rows = @l3Rows,
+                    events_rows = @eventRows,
+                    uploaded_by = @uploadedBy,
+                    uploaded_on = @uploadedOn,
+                    status = @status
+                WHERE id = @historyId;",
+                cancellationToken,
+                ("@historyId", historyId),
+                ("@projectId", projectId),
+                ("@uploadId", uploadId > 0 ? uploadId : DBNull.Value),
+                ("@sessionId", sessionId > 0 ? sessionId : DBNull.Value),
+                ("@originalFileName", originalFileName),
+                ("@l3Rows", l3Rows),
+                ("@eventRows", eventRows),
+                ("@uploadedBy", uploadedBy),
+                ("@uploadedOn", DateTime.Now),
+                ("@status", status));
         }
 
         [NonAction]
@@ -1612,5 +1961,14 @@ namespace SignalTracker.Controllers
 
         private sealed record ProjectInfo(int Id, int? CompanyId, string? RefSessionId);
         private sealed record PreparedDiagnosticFile(string FilePath, string FileName, long Length);
+        private sealed record ExistingL3EventHistory(
+            long Id,
+            int? ProjectId,
+            int? UploadId,
+            int? SessionId,
+            string OriginalFileName,
+            int L3Rows,
+            int EventRows,
+            short Status);
     }
 }
