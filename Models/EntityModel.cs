@@ -1069,9 +1069,21 @@ public string? level { get; set; }
 
         public int? is_default { get; set; }
 
-      
+
         public double? coveragehole_value { get; set; }
         public string? delta_json { get; set; }
+        public string? mac_dl_json { get; set; }
+        public string? mac_dl_delivered_json { get; set; }
+        public string? mac_ul_json { get; set; }
+        public string? mac_ul_delivered_json { get; set; }
+        public string? mac_bler_json { get; set; }
+        public string? mac_bler_init_json { get; set; }
+        public string? mac_mcs_json { get; set; }
+        public string? mac_retx_json { get; set; }
+        public string? mac_rb_json { get; set; }
+        public string? mac_grants_json { get; set; }
+        public string? mac_tx_power_json { get; set; }
+        public string? mac_modulation_pct_json { get; set; }
     }
 
 [Table("tbl_company")]

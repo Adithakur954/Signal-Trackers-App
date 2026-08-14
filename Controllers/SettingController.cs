@@ -1,5 +1,10 @@
-﻿using Microsoft.AspNetCore.Http;
+﻿using System;
+using System.Data;
+using System.Globalization;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using SignalTracker.Helper;
 using SignalTracker.Models;
 using Microsoft.AspNetCore.Authorization;
@@ -39,6 +44,61 @@ namespace SignalTracker.Controllers
         /// <summary>
         /// Get threshold settings for logged-in user (or default).
         /// </summary>
+private void EnsureMacDetailThresholdColumns()
+{
+    EnsureColumn("thresholds", "mac_dl_json", "LONGTEXT NULL");
+    EnsureColumn("thresholds", "mac_dl_delivered_json", "LONGTEXT NULL");
+    EnsureColumn("thresholds", "mac_ul_json", "LONGTEXT NULL");
+    EnsureColumn("thresholds", "mac_ul_delivered_json", "LONGTEXT NULL");
+    EnsureColumn("thresholds", "mac_bler_json", "LONGTEXT NULL");
+    EnsureColumn("thresholds", "mac_bler_init_json", "LONGTEXT NULL");
+    EnsureColumn("thresholds", "mac_mcs_json", "LONGTEXT NULL");
+    EnsureColumn("thresholds", "mac_retx_json", "LONGTEXT NULL");
+    EnsureColumn("thresholds", "mac_rb_json", "LONGTEXT NULL");
+    EnsureColumn("thresholds", "mac_grants_json", "LONGTEXT NULL");
+    EnsureColumn("thresholds", "mac_tx_power_json", "LONGTEXT NULL");
+    EnsureColumn("thresholds", "mac_modulation_pct_json", "LONGTEXT NULL");
+}
+
+private void EnsureColumn(string tableName, string columnName, string columnDefinition)
+{
+    var conn = db.Database.GetDbConnection();
+    var shouldClose = conn.State != ConnectionState.Open;
+    if (shouldClose)
+        conn.Open();
+
+    try
+    {
+        using var exists = conn.CreateCommand();
+        exists.CommandText = @"
+            SELECT COUNT(*)
+            FROM information_schema.columns
+            WHERE table_schema = DATABASE()
+              AND table_name = @tableName
+              AND column_name = @columnName;";
+        var tableParam = exists.CreateParameter();
+        tableParam.ParameterName = "@tableName";
+        tableParam.Value = tableName;
+        exists.Parameters.Add(tableParam);
+        var columnParam = exists.CreateParameter();
+        columnParam.ParameterName = "@columnName";
+        columnParam.Value = columnName;
+        exists.Parameters.Add(columnParam);
+
+        var count = Convert.ToInt32(exists.ExecuteScalar(), CultureInfo.InvariantCulture);
+        if (count > 0) return;
+
+        using var alter = conn.CreateCommand();
+        alter.CommandText = $"ALTER TABLE `{tableName.Replace("`", "``")}` ADD COLUMN `{columnName.Replace("`", "``")}` {columnDefinition};";
+        alter.ExecuteNonQuery();
+    }
+    finally
+    {
+        if (shouldClose)
+            conn.Close();
+    }
+}
+
 [HttpGet("GetThresholdSettings")]
 public IActionResult GetThresholdSettings()
 {
@@ -48,6 +108,7 @@ public IActionResult GetThresholdSettings()
     {
         cf.SessionCheck();
         int uid = cf.UserId;
+        EnsureMacDetailThresholdColumns();
 
         // 1ï¸âƒ£ User-specific threshold (highest priority)
         var userSetting = db.thresholds
@@ -111,6 +172,7 @@ public IActionResult SaveThreshold([FromBody] thresholds model)
     {
         cf.SessionCheck();
         int uid = cf.UserId;
+        EnsureMacDetailThresholdColumns();
 
         thresholds? existing = null;
 
@@ -154,6 +216,18 @@ public IActionResult SaveThreshold([FromBody] thresholds model)
               existing.dominance = model.dominance;
                 existing.coverage_violation = model.coverage_violation;
                 existing.delta_json = model.delta_json;
+                existing.mac_dl_json = model.mac_dl_json;
+                existing.mac_dl_delivered_json = model.mac_dl_delivered_json;
+                existing.mac_ul_json = model.mac_ul_json;
+                existing.mac_ul_delivered_json = model.mac_ul_delivered_json;
+                existing.mac_bler_json = model.mac_bler_json;
+                existing.mac_bler_init_json = model.mac_bler_init_json;
+                existing.mac_mcs_json = model.mac_mcs_json;
+                existing.mac_retx_json = model.mac_retx_json;
+                existing.mac_rb_json = model.mac_rb_json;
+                existing.mac_grants_json = model.mac_grants_json;
+                existing.mac_tx_power_json = model.mac_tx_power_json;
+                existing.mac_modulation_pct_json = model.mac_modulation_pct_json;
             db.thresholds.Update(existing);
         }
         else
