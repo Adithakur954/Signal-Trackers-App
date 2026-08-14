@@ -2609,11 +2609,11 @@ public async Task<IActionResult> DeleteAvailablePolygon(
             int? uploadId = null,
             CancellationToken cancellationToken = default)
         {
-            if (sessionId <= 0 || l3EventHistoryId <= 0)
+            if (l3EventHistoryId <= 0 || (sessionId <= 0 && !uploadId.HasValue))
                 return;
 
             var conn = await OpenDiagnosticConnectionAsync();
-            var sessionIds = new List<int> { sessionId };
+            var sessionIds = sessionId > 0 ? new List<int> { sessionId } : new List<int>();
             var transaction = db.Database.CurrentTransaction?.GetDbTransaction();
             var events = await LoadDiagnosticEventRowsAsync(conn, sessionIds, uploadId, 50000, transaction);
             var l3Rows = await LoadDiagnosticL3RowsAsync(conn, sessionIds, uploadId, 50000, transaction);
@@ -2639,7 +2639,7 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                         (@historyId, @sessionId, @callId, @startTime, @alertingTime, @connectedTime,
                          @endTime, @callStatus, @technology, @setupTime, @duration, @reason, @analysisVersion);";
                 AddParam(insertCmd, "@historyId", l3EventHistoryId);
-                AddParam(insertCmd, "@sessionId", sessionId);
+                AddParam(insertCmd, "@sessionId", sessionId > 0 ? sessionId : DBNull.Value);
                 AddParam(insertCmd, "@callId", call.FrontendId);
                 AddParam(insertCmd, "@startTime", ToDiagnosticIsoTimestamp(call.StartSeconds));
                 AddParam(insertCmd, "@alertingTime", call.Alerting);
@@ -3668,6 +3668,9 @@ public class AvailablePolygonsResponse
             {
                 var text = x.Text;
                 var time = x.EventTime;
+                var nrRrcSummary = NrRrcOtaDecoder.TryDecodeSummary(text);
+                var rawMessage = FirstNonEmpty(nrRrcSummary, x.RawText, x.Detail, x.Message, string.Empty);
+                var summary = FirstNonEmpty(nrRrcSummary, x.Detail, x.RawText, x.Message, string.Empty);
                 return new DiagnosticTimelineRow
                 {
                     Id = $"l3-{x.Id}",
@@ -3687,8 +3690,8 @@ public class AvailablePolygonsResponse
                     Title = FirstNonEmpty(x.Message, x.Category, "L3 Message"),
                     OfficialName = FirstNonEmpty(x.Message, x.Category, "L3 Message"),
                     Message = FirstNonEmpty(x.Message, x.Category, "L3 Message"),
-                    Summary = FirstNonEmpty(x.Detail, x.RawText, x.Message, string.Empty),
-                    RawMessage = FirstNonEmpty(x.RawText, x.Detail, x.Message, string.Empty),
+                    Summary = summary,
+                    RawMessage = rawMessage,
                     OriginSource = x.Source,
                     Severity = NormalizeDiagnosticSeverity(x.Severity, text),
                     Technology = ResolveDiagnosticTechnology(text, l3Rows, x.SessionId, time),
