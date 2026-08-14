@@ -3270,7 +3270,16 @@ public class AvailablePolygonsResponse
             if (uploadId.HasValue && uploadId.Value > 0)
             {
                 AddParam(cmd, "@diagUploadId", uploadId.Value);
-                where.Add("tbl_upload_id = @diagUploadId");
+                where.Add(@"(
+                    tbl_upload_id = @diagUploadId
+                    OR tbl_upload_id = (
+                        SELECT h.tbl_upload_id
+                        FROM tbl_l3_event_history h
+                        WHERE h.id = @diagUploadId
+                          AND h.tbl_upload_id IS NOT NULL
+                        LIMIT 1
+                    )
+                )");
             }
 
             return where.Count > 0 ? " WHERE " + string.Join(" AND ", where) : string.Empty;
