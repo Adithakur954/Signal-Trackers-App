@@ -297,6 +297,10 @@ namespace SignalTracker.Controllers
                         return BadRequest(new { status = 0, message = "L3 file is required for this upload type." });
                     if (requestedEvent && (eventFile == null || eventFile.Length == 0))
                         return BadRequest(new { status = 0, message = "Event file is required for this upload type." });
+                    if (requestedL3 && l3File != null && !AllowedL3Extensions.Contains(Path.GetExtension(l3File.FileName)))
+                        return BadRequest(new { status = 0, message = "L3 upload supports only .csv files. L3 .txt files are not allowed." });
+                    if (requestedEvent && eventFile != null && !AllowedEventExtensions.Contains(Path.GetExtension(eventFile.FileName)))
+                        return BadRequest(new { status = 0, message = "Event upload supports only .csv or .txt files." });
 
                     preparedL3Files = requestedL3 && l3File != null
                         ? [new PreparedDiagnosticFile(await SaveUploadTempFileAsync(l3File, tempFiles, cancellationToken), Path.GetFileName(l3File.FileName), l3File.Length)]
@@ -932,13 +936,14 @@ namespace SignalTracker.Controllers
                 .ToList();
             var l3Entries = supportedEntries
                 .Where(entry => Path.GetFileNameWithoutExtension(entry.Name).Contains("L3", StringComparison.OrdinalIgnoreCase))
+                .Where(entry => AllowedL3Extensions.Contains(Path.GetExtension(entry.Name)))
                 .ToList();
             var eventEntries = supportedEntries
                 .Where(entry => Path.GetFileNameWithoutExtension(entry.Name).Contains("Event", StringComparison.OrdinalIgnoreCase))
                 .ToList();
 
             if (l3Entries.Count == 0 || eventEntries.Count == 0)
-                throw new InvalidDataException("ZIP must contain L3 and Event files (.csv or .txt) whose filenames contain 'L3' and 'Event'.");
+                throw new InvalidDataException("ZIP must contain an L3 .csv file and Event .csv/.txt files whose filenames contain 'L3' and 'Event'. L3 .txt files are not allowed.");
 
             var selectedEntries = l3Entries.Concat(eventEntries).Distinct().ToList();
             if (selectedEntries.Any(entry => entry.Length > maxUncompressedBytes) || selectedEntries.Sum(entry => entry.Length) > maxUncompressedBytes)
@@ -993,13 +998,7 @@ namespace SignalTracker.Controllers
             var inserted = 0;
             if (string.Equals(Path.GetExtension(filePath), ".txt", StringComparison.OrdinalIgnoreCase))
             {
-                foreach (var row in ReadL3MessageTextRecords(filePath))
-                {
-                    await InsertL3DiagnosticRowAsync(sessionId, uploadId, originalFileName, row.RowNo, "txt", row.Values, row.RawText, cancellationToken);
-                    inserted++;
-                }
-
-                return inserted;
+                throw new InvalidDataException("L3 .txt files are not allowed. Upload L3 as .csv.");
             }
 
             using var reader = new StreamReader(filePath);
@@ -1908,6 +1907,17 @@ namespace SignalTracker.Controllers
         }
 
         private static readonly HashSet<string> AllowedL3EventExtensions = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ".csv",
+            ".txt"
+        };
+
+        private static readonly HashSet<string> AllowedL3Extensions = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ".csv"
+        };
+
+        private static readonly HashSet<string> AllowedEventExtensions = new(StringComparer.OrdinalIgnoreCase)
         {
             ".csv",
             ".txt"
