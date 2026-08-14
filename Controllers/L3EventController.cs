@@ -910,8 +910,8 @@ namespace SignalTracker.Controllers
             var message = GetDiagnosticValue(row, "message_name", "messagename", "msg_name", "message_type", "messagetype", "message", "msg", "name", "event");
             var detail = GetDiagnosticValue(row, "decode", "decoded", "decoded_text", "detail", "details", "text", "content", "info", "description");
             var decodedNrRrcSummary = NrRrcOtaDecoder.TryDecodeSummary(category, message, detail, rawText, sourceFileType);
-            var storedDetail = decodedNrRrcSummary ?? detail;
-            var storedRawText = decodedNrRrcSummary ?? rawText;
+            var storedDetail = NormalizeUnavailableNrArfcn(decodedNrRrcSummary ?? detail);
+            var storedRawText = NormalizeUnavailableNrArfcn(decodedNrRrcSummary ?? rawText);
 
             AddParam(cmd, "@timestampText", GetDiagnosticValue(row, "timestamp", "time_stamp", "datetime", "date_time", "time", "date"));
             AddParam(cmd, "@latitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "latitude", "lat", "y")));
@@ -1516,6 +1516,18 @@ namespace SignalTracker.Controllers
                 }
             }
             return null;
+        }
+
+        private static string? NormalizeUnavailableNrArfcn(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return value;
+
+            return Regex.Replace(
+                value,
+                @"\bNR\s*ARFCN\s*:\s*-1\b",
+                "NR ARFCN: NA",
+                RegexOptions.IgnoreCase);
         }
 
         private static double? ParseDiagnosticDouble(string? value)

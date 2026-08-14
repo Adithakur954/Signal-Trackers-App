@@ -32,12 +32,13 @@ namespace SignalTracker.Services
 
             var pci = ReadUIntLittleEndian(bytes, 7, 2);
             var arfcn = ReadUIntLittleEndian(bytes, 17, 4);
-            var frequencyMhz = arfcn.HasValue ? NrArfcnToMhz(arfcn.Value) : null;
-            var band = arfcn.HasValue ? InferNrBand(arfcn.Value) : null;
+            var hasValidArfcn = arfcn.HasValue && arfcn.Value >= 0;
+            var frequencyMhz = hasValidArfcn ? NrArfcnToMhz(arfcn!.Value) : null;
+            var band = hasValidArfcn ? InferNrBand(arfcn!.Value) : null;
             var parts = new List<string>();
 
             if (pci.HasValue) parts.Add($"NR PCI: {pci.Value}");
-            if (arfcn.HasValue) parts.Add($"NR ARFCN: {arfcn.Value}");
+            if (arfcn.HasValue) parts.Add(arfcn.Value < 0 ? "NR ARFCN: NA" : $"NR ARFCN: {arfcn.Value}");
             if (frequencyMhz.HasValue) parts.Add($"NR Frequency: {frequencyMhz.Value.ToString("0.000", CultureInfo.InvariantCulture)} MHz");
             if (!string.IsNullOrWhiteSpace(band) && !string.Equals(band, "Unknown", StringComparison.OrdinalIgnoreCase)) parts.Add($"NR Band: {band}");
 
