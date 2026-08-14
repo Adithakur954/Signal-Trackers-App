@@ -34,7 +34,7 @@ namespace SignalTracker.Controllers
     [Authorize]
     public class MapViewController : BaseController
     {
-        private const int DiagnosticCallAnalysisVersion = 4;
+        private const int DiagnosticCallAnalysisVersion = 5;
         private readonly IWebHostEnvironment _env;
         private readonly ApplicationDbContext db;
         private readonly CommonFunction cf;
@@ -5011,6 +5011,9 @@ public class AvailablePolygonsResponse
                 "Connected" => "Normal disconnection.",
                 _ => "Unknown call state."
             };
+            var l3Technology = ResolveDiagnosticCallTechnologyFromL3(window, l3Rows, call.SessionId, call.StartTime, call.EndTime);
+            if (!IsUnknownDiagnosticCategory(l3Technology))
+                call.Technology = l3Technology;
             call.Evidence.AddRange(window.Take(100).Select(row => $"L3|{row.TimestampText}|{row.Category}|{row.Message}"));
         }
 
@@ -5157,6 +5160,60 @@ public class AvailablePolygonsResponse
             if (HasAny(l3Text, "IMS"))
                 return "LTE IMS";
 
+            return "Unknown";
+        }
+
+        private static string ResolveDiagnosticCallTechnologyFromL3(
+            IReadOnlyList<DiagnosticL3Row> windowRows,
+            IReadOnlyList<DiagnosticL3Row> allL3Rows,
+            int? sessionId,
+            TimeSpan? startTime,
+            TimeSpan? endTime)
+        {
+            var technology = ResolveTechnologyFromL3Rows(windowRows);
+            if (!IsUnknownDiagnosticCategory(technology))
+                return technology;
+
+            var anchor = startTime ?? endTime;
+            if (!anchor.HasValue)
+                return "Unknown";
+
+            var nearby = allL3Rows
+                .Where(row => row.SessionId == sessionId && row.EventTime.HasValue)
+                .Select(row => new
+                {
+                    Row = row,
+                    Distance = Math.Min(
+                        SecondsBetween(anchor.Value, row.EventTime!.Value),
+                        SecondsBetween(row.EventTime!.Value, anchor.Value))
+                })
+                .Where(item => item.Distance <= 30)
+                .OrderBy(item => item.Distance)
+                .Take(20)
+                .Select(item => item.Row)
+                .ToList();
+
+            return ResolveTechnologyFromL3Rows(nearby);
+        }
+
+        private static string ResolveTechnologyFromL3Rows(IReadOnlyList<DiagnosticL3Row> rows)
+        {
+            if (rows.Count == 0)
+                return "Unknown";
+
+            var text = string.Join(" ", rows.Select(row => row.Text)).ToUpperInvariant();
+            if (HasAny(text, "NR-RRC", "NR RRC", "NR_", "NR ", " 5G", "5G "))
+                return "5G";
+            if (HasAny(text, "LTE IMS", "VOLTE"))
+                return "LTE IMS";
+            if (HasAny(text, "LTE-RRC", "LTE RRC", "E-UTRA", "EUTRA", "LTE", "4G"))
+                return "LTE";
+            if (HasAny(text, "WCDMA", "UMTS", "3G"))
+                return "3G";
+            if (HasAny(text, "GSM", "GERAN", "2G"))
+                return "2G";
+            if (HasAny(text, "IMS"))
+                return "LTE IMS";
             return "Unknown";
         }
 
