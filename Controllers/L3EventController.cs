@@ -1523,10 +1523,15 @@ namespace SignalTracker.Controllers
             if (string.IsNullOrWhiteSpace(value))
                 return value;
 
-            return Regex.Replace(
+            var normalized = Regex.Replace(
                 value,
                 @"\bNR\s*ARFCN\s*:\s*-1\b",
                 "NR ARFCN: NA",
+                RegexOptions.IgnoreCase);
+            return Regex.Replace(
+                normalized,
+                @"\bNR\s*PCI\s*:\s*-1\b",
+                "NR PCI: NA",
                 RegexOptions.IgnoreCase);
         }
 
