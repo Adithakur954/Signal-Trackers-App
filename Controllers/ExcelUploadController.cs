@@ -614,6 +614,7 @@ namespace SignalTracker.Controllers
     where h.file_type == fileType
     && (targetCompanyId == 0 || (u != null && u.company_id == targetCompanyId))
     && (s == null || s.type != "l3_event")
+    && (h.remarks == null || !h.remarks.StartsWith("L3/Event"))
 
     select new
     {
