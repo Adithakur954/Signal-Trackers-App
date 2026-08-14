@@ -2609,11 +2609,11 @@ public async Task<IActionResult> DeleteAvailablePolygon(
             int? uploadId = null,
             CancellationToken cancellationToken = default)
         {
-            if (sessionId <= 0 || l3EventHistoryId <= 0)
+            if (l3EventHistoryId <= 0 || (sessionId <= 0 && !uploadId.HasValue))
                 return;
 
             var conn = await OpenDiagnosticConnectionAsync();
-            var sessionIds = new List<int> { sessionId };
+            var sessionIds = sessionId > 0 ? new List<int> { sessionId } : new List<int>();
             var transaction = db.Database.CurrentTransaction?.GetDbTransaction();
             var events = await LoadDiagnosticEventRowsAsync(conn, sessionIds, uploadId, 50000, transaction);
             var l3Rows = await LoadDiagnosticL3RowsAsync(conn, sessionIds, uploadId, 50000, transaction);
@@ -2639,7 +2639,7 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                         (@historyId, @sessionId, @callId, @startTime, @alertingTime, @connectedTime,
                          @endTime, @callStatus, @technology, @setupTime, @duration, @reason, @analysisVersion);";
                 AddParam(insertCmd, "@historyId", l3EventHistoryId);
-                AddParam(insertCmd, "@sessionId", sessionId);
+                AddParam(insertCmd, "@sessionId", sessionId > 0 ? sessionId : DBNull.Value);
                 AddParam(insertCmd, "@callId", call.FrontendId);
                 AddParam(insertCmd, "@startTime", ToDiagnosticIsoTimestamp(call.StartSeconds));
                 AddParam(insertCmd, "@alertingTime", call.Alerting);
