@@ -922,7 +922,7 @@ public IActionResult UploadSitePrediction(
 	                                    continue;
 	                                }
 
-	                                if (isZipFile && !uploadCsvName.StartsWith("NetworkLog", StringComparison.OrdinalIgnoreCase))
+	                                if (isZipFile && !IsNetworkLogCsv(uploadCsvName))
 	                                {
 	                                    continue;
 	                                }
@@ -944,11 +944,20 @@ public IActionResult UploadSitePrediction(
                             if (fileType == 1)
                             {
                                 // For large network-log uploads, keep the created session and
-                                // commit valid rows even if some rows had validation errors.
-                                if (sessionId > 0 && IsValidSheet)
+                                // commit valid rows even if another bundled file had validation
+                                // errors. Otherwise one bad CSV in the ZIP rolls back all valid
+                                // L3/Event/Network rows and the UI shows "Failed" with no data.
+                                var hasPersistedRows = sessionId > 0 && HasSessionUploadRows(sessionId, excelID);
+                                if (sessionId > 0 && (IsValidSheet || hasPersistedRows))
+                                {
                                     outerTx.Commit();
+                                    if (hasPersistedRows)
+                                        IsValidSheet = true;
+                                }
                                 else
+                                {
                                     outerTx.Rollback();
+                                }
                             }
                             else
                             {
@@ -1212,11 +1221,6 @@ public IActionResult UploadSitePrediction(
             {
                 var extension = Path.GetExtension(file);
                 if (string.Equals(extension, ".csv", StringComparison.OrdinalIgnoreCase))
-                {
-                    csvFiles.Add(file);
-                }
-                else if (string.Equals(extension, ".txt", StringComparison.OrdinalIgnoreCase) &&
-                         Path.GetFileName(file).StartsWith("L3", StringComparison.OrdinalIgnoreCase))
                 {
                     csvFiles.Add(file);
                 }
@@ -1642,6 +1646,35 @@ public IActionResult UploadSitePrediction(
                    name.StartsWith("L3.", StringComparison.OrdinalIgnoreCase);
         }
 
+        private static bool IsNetworkLogCsv(string? fileName)
+        {
+            var name = Path.GetFileName(fileName ?? string.Empty);
+            return name.EndsWith(".csv", StringComparison.OrdinalIgnoreCase) &&
+                   (name.StartsWith("NetworkLog_", StringComparison.OrdinalIgnoreCase) ||
+                    name.StartsWith("NetworkLogUnsent_", StringComparison.OrdinalIgnoreCase));
+        }
+
+        private bool HasSessionUploadRows(int sessionId, int uploadId)
+        {
+            if (sessionId <= 0)
+                return false;
+
+            using var cmd = db.Database.GetDbConnection().CreateCommand();
+            cmd.Transaction = db.Database.CurrentTransaction?.GetDbTransaction();
+            cmd.CommandText = @"
+                SELECT
+                    EXISTS(SELECT 1 FROM tbl_network_log WHERE session_id = @sessionId LIMIT 1)
+                    OR EXISTS(SELECT 1 FROM tbl_network_log_neighbour WHERE session_id = @sessionId LIMIT 1)
+                    OR EXISTS(SELECT 1 FROM tbl_event_log WHERE session_id = @sessionId AND tbl_upload_id = @uploadId LIMIT 1)
+                    OR EXISTS(SELECT 1 FROM tbl_l3_log WHERE session_id = @sessionId AND tbl_upload_id = @uploadId LIMIT 1);";
+            AddDiagnosticParam(cmd, "@sessionId", sessionId);
+            AddDiagnosticParam(cmd, "@uploadId", uploadId);
+            var result = cmd.ExecuteScalar();
+            return result != null
+                && result != DBNull.Value
+                && Convert.ToInt32(result, CultureInfo.InvariantCulture) != 0;
+        }
+
         private static string? GetDiagnosticValue(IDictionary<string, object?> row, params string[] names)
         {
             foreach (var name in names)
@@ -1728,12 +1761,7 @@ public IActionResult UploadSitePrediction(
             {
                 if (string.Equals(Path.GetExtension(filePath), ".txt", StringComparison.OrdinalIgnoreCase))
                 {
-                    foreach (var row in ReadL3MessageTextRecords(filePath))
-                    {
-                        InsertL3DiagnosticRow(sessionId, excelId, fileName, row.RowNo, "txt", row.Values, row.RawText);
-                        rowInserted++;
-                    }
-
+                    // L3 message text dumps are very large and are intentionally not stored.
                     return true;
                 }
 
@@ -1840,7 +1868,7 @@ public IActionResult UploadSitePrediction(
             AddDiagnosticParam(cmd, "@detail", GetDiagnosticValue(row, "detail", "description"));
             AddDiagnosticParam(cmd, "@source", GetDiagnosticValue(row, "source"));
             AddDiagnosticParam(cmd, "@severity", GetDiagnosticValue(row, "severity", "level"));
-            AddDiagnosticParam(cmd, "@rawJson", System.Text.Json.JsonSerializer.Serialize(row));
+            AddDiagnosticParam(cmd, "@rawJson", DBNull.Value);
             cmd.ExecuteNonQuery();
         }
 
@@ -1876,7 +1904,7 @@ public IActionResult UploadSitePrediction(
             AddDiagnosticParam(cmd, "@source", GetDiagnosticValue(row, "source"));
             AddDiagnosticParam(cmd, "@severity", GetDiagnosticValue(row, "severity", "level"));
             AddDiagnosticParam(cmd, "@rawText", storedRawText);
-            AddDiagnosticParam(cmd, "@rawJson", System.Text.Json.JsonSerializer.Serialize(row));
+            AddDiagnosticParam(cmd, "@rawJson", DBNull.Value);
             cmd.ExecuteNonQuery();
         }
 

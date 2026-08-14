@@ -11,6 +11,7 @@ using SignalTracker.Services;
 using System.Data;
 using System.Globalization;
 using System.IO.Compression;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
@@ -27,6 +28,7 @@ namespace SignalTracker.Controllers
         private readonly RedisService _redis;
         private readonly UserScopeService _userScope;
         private readonly IDbConnectionProvider _connectionProvider;
+        private const int DiagnosticInsertBatchSize = 200;
 
         public L3EventController(
             ApplicationDbContext context,
@@ -745,8 +747,7 @@ namespace SignalTracker.Controllers
         {
             return new MapViewController(_context, _httpContextAccessor, _env, _redis, _userScope, _connectionProvider)
             {
-                ControllerContext = ControllerContext,
-                Url = Url
+                ControllerContext = ControllerContext
             };
         }
 
@@ -974,6 +975,7 @@ namespace SignalTracker.Controllers
         private async Task<int> ImportEventFileAsync(int sessionId, int uploadId, string filePath, string originalFileName, CancellationToken cancellationToken)
         {
             var inserted = 0;
+            var batch = new List<EventDiagnosticInsertRow>(DiagnosticInsertBatchSize);
             using var reader = new StreamReader(filePath);
             using var csv = new CsvReader(reader, new CsvConfiguration(CultureInfo.InvariantCulture)
             {
@@ -988,9 +990,17 @@ namespace SignalTracker.Controllers
             {
                 rowNo++;
                 var row = NormalizeDiagnosticRow((IDictionary<string, object?>)record);
-                await InsertEventDiagnosticRowAsync(sessionId, uploadId, originalFileName, rowNo, row, cancellationToken);
+                batch.Add(BuildEventDiagnosticInsertRow(sessionId, uploadId, originalFileName, rowNo, row));
                 inserted++;
+                if (batch.Count >= DiagnosticInsertBatchSize)
+                {
+                    await InsertEventDiagnosticRowsAsync(batch, cancellationToken);
+                    batch.Clear();
+                }
             }
+
+            if (batch.Count > 0)
+                await InsertEventDiagnosticRowsAsync(batch, cancellationToken);
 
             return inserted;
         }
@@ -998,6 +1008,7 @@ namespace SignalTracker.Controllers
         private async Task<int> ImportL3FileAsync(int sessionId, int uploadId, string filePath, string originalFileName, CancellationToken cancellationToken)
         {
             var inserted = 0;
+            var batch = new List<L3DiagnosticInsertRow>(DiagnosticInsertBatchSize);
             if (string.Equals(Path.GetExtension(filePath), ".txt", StringComparison.OrdinalIgnoreCase))
             {
                 throw new InvalidDataException("L3 .txt files are not allowed. Upload L3 as .csv.");
@@ -1017,72 +1028,98 @@ namespace SignalTracker.Controllers
             {
                 rowNo++;
                 var row = NormalizeDiagnosticRow((IDictionary<string, object?>)record);
-                await InsertL3DiagnosticRowAsync(sessionId, uploadId, originalFileName, rowNo, "csv", row, null, cancellationToken);
+                batch.Add(BuildL3DiagnosticInsertRow(sessionId, uploadId, originalFileName, rowNo, "csv", row, null));
                 inserted++;
+                if (batch.Count >= DiagnosticInsertBatchSize)
+                {
+                    await InsertL3DiagnosticRowsAsync(batch, cancellationToken);
+                    batch.Clear();
+                }
             }
+
+            if (batch.Count > 0)
+                await InsertL3DiagnosticRowsAsync(batch, cancellationToken);
 
             return inserted;
         }
 
-        private async Task InsertEventDiagnosticRowAsync(
+        private static EventDiagnosticInsertRow BuildEventDiagnosticInsertRow(
             int sessionId,
             int uploadId,
             string fileName,
             int rowNo,
-            Dictionary<string, object?> row,
+            Dictionary<string, object?> row)
+        {
+            return new EventDiagnosticInsertRow(
+                uploadId,
+                sessionId > 0 ? sessionId : null,
+                Path.GetFileName(fileName),
+                rowNo,
+                GetDiagnosticValue(row, "timestamp", "time_stamp", "datetime", "date_time", "time", "date"),
+                ParseDiagnosticDouble(GetDiagnosticValue(row, "latitude", "lat", "y")),
+                ParseDiagnosticDouble(GetDiagnosticValue(row, "longitude", "long", "lon", "lng", "x")),
+                GetDiagnosticValue(row, "category", "event_category", "class", "group"),
+                GetDiagnosticValue(row, "event_name", "eventname", "event_type", "eventtype", "event", "name", "type", "message"),
+                GetDiagnosticValue(row, "value", "detail", "details", "description", "info", "message", "data"),
+                GetDiagnosticValue(row, "source", "origin", "producer"),
+                GetDiagnosticValue(row, "severity", "level", "priority"),
+                null);
+        }
+
+        private async Task InsertEventDiagnosticRowsAsync(
+            IReadOnlyList<EventDiagnosticInsertRow> rows,
             CancellationToken cancellationToken)
         {
+            if (rows.Count == 0)
+                return;
+
             var conn = _context.Database.GetDbConnection();
             await using var cmd = conn.CreateCommand();
             cmd.Transaction = _context.Database.CurrentTransaction?.GetDbTransaction();
-            cmd.CommandText = @"
+            cmd.CommandTimeout = 180;
+            var sql = new StringBuilder(@"
                 INSERT INTO tbl_event_log
                     (tbl_upload_id, session_id, source_file_name, row_no, timestamp_text, latitude, longitude,
                      category, event_name, detail, source, severity, raw_json)
-                VALUES
-                    (@uploadId, @sessionId, @fileName, @rowNo, @timestampText, @latitude, @longitude,
-                     @category, @eventName, @detail, @source, @severity, @rawJson);";
-            AddParam(cmd, "@uploadId", uploadId);
-            AddParam(cmd, "@sessionId", sessionId > 0 ? sessionId : DBNull.Value);
-            AddParam(cmd, "@fileName", Path.GetFileName(fileName));
-            AddParam(cmd, "@rowNo", rowNo);
-            AddParam(cmd, "@timestampText", GetDiagnosticValue(row, "timestamp", "time_stamp", "datetime", "date_time", "time", "date"));
-            AddParam(cmd, "@latitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "latitude", "lat", "y")));
-            AddParam(cmd, "@longitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "longitude", "long", "lon", "lng", "x")));
-            AddParam(cmd, "@category", GetDiagnosticValue(row, "category", "event_category", "class", "group"));
-            AddParam(cmd, "@eventName", GetDiagnosticValue(row, "event_name", "eventname", "event_type", "eventtype", "event", "name", "type", "message"));
-            AddParam(cmd, "@detail", GetDiagnosticValue(row, "value", "detail", "details", "description", "info", "message", "data"));
-            AddParam(cmd, "@source", GetDiagnosticValue(row, "source", "origin", "producer"));
-            AddParam(cmd, "@severity", GetDiagnosticValue(row, "severity", "level", "priority"));
-            AddParam(cmd, "@rawJson", JsonSerializer.Serialize(row));
+                VALUES ");
+            for (var index = 0; index < rows.Count; index++)
+            {
+                if (index > 0)
+                    sql.Append(", ");
+                AppendEventRowSql(sql, index);
+                var row = rows[index];
+                AddParam(cmd, $"@uploadId{index}", row.UploadId);
+                AddParam(cmd, $"@sessionId{index}", row.SessionId ?? (object)DBNull.Value);
+                AddParam(cmd, $"@fileName{index}", row.FileName);
+                AddParam(cmd, $"@rowNo{index}", row.RowNo);
+                AddParam(cmd, $"@timestampText{index}", row.TimestampText);
+                AddParam(cmd, $"@latitude{index}", row.Latitude);
+                AddParam(cmd, $"@longitude{index}", row.Longitude);
+                AddParam(cmd, $"@category{index}", row.Category);
+                AddParam(cmd, $"@eventName{index}", row.EventName);
+                AddParam(cmd, $"@detail{index}", row.Detail);
+                AddParam(cmd, $"@source{index}", row.Source);
+                AddParam(cmd, $"@severity{index}", row.Severity);
+                AddParam(cmd, $"@rawJson{index}", row.RawJson);
+            }
+            cmd.CommandText = sql.Append(';').ToString();
             await cmd.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        private async Task InsertL3DiagnosticRowAsync(
+        private static void AppendEventRowSql(StringBuilder sql, int index)
+        {
+            sql.Append(CultureInfo.InvariantCulture, $"(@uploadId{index}, @sessionId{index}, @fileName{index}, @rowNo{index}, @timestampText{index}, @latitude{index}, @longitude{index}, @category{index}, @eventName{index}, @detail{index}, @source{index}, @severity{index}, @rawJson{index})");
+        }
+
+        private static L3DiagnosticInsertRow BuildL3DiagnosticInsertRow(
             int sessionId,
             int uploadId,
             string fileName,
             int rowNo,
             string sourceFileType,
             Dictionary<string, object?> row,
-            string? rawText,
-            CancellationToken cancellationToken)
+            string? rawText)
         {
-            var conn = _context.Database.GetDbConnection();
-            await using var cmd = conn.CreateCommand();
-            cmd.Transaction = _context.Database.CurrentTransaction?.GetDbTransaction();
-            cmd.CommandText = @"
-                INSERT INTO tbl_l3_log
-                    (tbl_upload_id, session_id, source_file_name, source_file_type, row_no, timestamp_text, latitude, longitude,
-                     category, message, detail, source, severity, raw_text, raw_json)
-                VALUES
-                    (@uploadId, @sessionId, @fileName, @sourceFileType, @rowNo, @timestampText, @latitude, @longitude,
-                     @category, @message, @detail, @source, @severity, @rawText, @rawJson);";
-            AddParam(cmd, "@uploadId", uploadId);
-            AddParam(cmd, "@sessionId", sessionId > 0 ? sessionId : DBNull.Value);
-            AddParam(cmd, "@fileName", Path.GetFileName(fileName));
-            AddParam(cmd, "@sourceFileType", sourceFileType);
-            AddParam(cmd, "@rowNo", rowNo);
             var category = GetDiagnosticValue(row, "category", "layer", "protocol", "stack", "channel");
             var message = GetDiagnosticValue(row, "message_name", "messagename", "msg_name", "message_type", "messagetype", "message", "msg", "name", "event");
             var detail = GetDiagnosticValue(row, "decode", "decoded", "decoded_text", "detail", "details", "text", "content", "info", "description");
@@ -1090,17 +1127,69 @@ namespace SignalTracker.Controllers
             var storedDetail = NormalizeUnavailableNrArfcn(decodedNrRrcSummary ?? detail);
             var storedRawText = NormalizeUnavailableNrArfcn(decodedNrRrcSummary ?? rawText);
 
-            AddParam(cmd, "@timestampText", GetDiagnosticValue(row, "timestamp", "time_stamp", "datetime", "date_time", "time", "date"));
-            AddParam(cmd, "@latitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "latitude", "lat", "y")));
-            AddParam(cmd, "@longitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "longitude", "long", "lon", "lng", "x")));
-            AddParam(cmd, "@category", category);
-            AddParam(cmd, "@message", message);
-            AddParam(cmd, "@detail", storedDetail);
-            AddParam(cmd, "@source", GetDiagnosticValue(row, "source", "origin", "producer"));
-            AddParam(cmd, "@severity", GetDiagnosticValue(row, "severity", "level", "priority"));
-            AddParam(cmd, "@rawText", storedRawText);
-            AddParam(cmd, "@rawJson", JsonSerializer.Serialize(row));
+            return new L3DiagnosticInsertRow(
+                uploadId,
+                sessionId > 0 ? sessionId : null,
+                Path.GetFileName(fileName),
+                sourceFileType,
+                rowNo,
+                GetDiagnosticValue(row, "timestamp", "time_stamp", "datetime", "date_time", "time", "date"),
+                ParseDiagnosticDouble(GetDiagnosticValue(row, "latitude", "lat", "y")),
+                ParseDiagnosticDouble(GetDiagnosticValue(row, "longitude", "long", "lon", "lng", "x")),
+                category,
+                message,
+                storedDetail,
+                GetDiagnosticValue(row, "source", "origin", "producer"),
+                GetDiagnosticValue(row, "severity", "level", "priority"),
+                storedRawText,
+                null);
+        }
+
+        private async Task InsertL3DiagnosticRowsAsync(
+            IReadOnlyList<L3DiagnosticInsertRow> rows,
+            CancellationToken cancellationToken)
+        {
+            if (rows.Count == 0)
+                return;
+
+            var conn = _context.Database.GetDbConnection();
+            await using var cmd = conn.CreateCommand();
+            cmd.Transaction = _context.Database.CurrentTransaction?.GetDbTransaction();
+            cmd.CommandTimeout = 180;
+            var sql = new StringBuilder(@"
+                INSERT INTO tbl_l3_log
+                    (tbl_upload_id, session_id, source_file_name, source_file_type, row_no, timestamp_text, latitude, longitude,
+                     category, message, detail, source, severity, raw_text, raw_json)
+                VALUES ");
+            for (var index = 0; index < rows.Count; index++)
+            {
+                if (index > 0)
+                    sql.Append(", ");
+                AppendL3RowSql(sql, index);
+                var row = rows[index];
+                AddParam(cmd, $"@uploadId{index}", row.UploadId);
+                AddParam(cmd, $"@sessionId{index}", row.SessionId ?? (object)DBNull.Value);
+                AddParam(cmd, $"@fileName{index}", row.FileName);
+                AddParam(cmd, $"@sourceFileType{index}", row.SourceFileType);
+                AddParam(cmd, $"@rowNo{index}", row.RowNo);
+                AddParam(cmd, $"@timestampText{index}", row.TimestampText);
+                AddParam(cmd, $"@latitude{index}", row.Latitude);
+                AddParam(cmd, $"@longitude{index}", row.Longitude);
+                AddParam(cmd, $"@category{index}", row.Category);
+                AddParam(cmd, $"@message{index}", row.Message);
+                AddParam(cmd, $"@detail{index}", row.Detail);
+                AddParam(cmd, $"@source{index}", row.Source);
+                AddParam(cmd, $"@severity{index}", row.Severity);
+                AddParam(cmd, $"@rawText{index}", row.RawText);
+                AddParam(cmd, $"@rawJson{index}", row.RawJson);
+            }
+            cmd.CommandText = sql.Append(';').ToString();
             await cmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        private static void AppendL3RowSql(StringBuilder sql, int index)
+        {
+            sql.Append(CultureInfo.InvariantCulture, $"(@uploadId{index}, @sessionId{index}, @fileName{index}, @sourceFileType{index}, @rowNo{index}, @timestampText{index}, @latitude{index}, @longitude{index}, @category{index}, @message{index}, @detail{index}, @source{index}, @severity{index}, @rawText{index}, @rawJson{index})");
         }
 
         private async Task UpdateSessionL3EventFlagsAsync(int sessionId, bool hasL3, bool hasEvent, CancellationToken cancellationToken)
@@ -1953,6 +2042,36 @@ namespace SignalTracker.Controllers
 
         private sealed record ProjectInfo(int Id, int? CompanyId, string? RefSessionId);
         private sealed record PreparedDiagnosticFile(string FilePath, string FileName, long Length);
+        private sealed record EventDiagnosticInsertRow(
+            int UploadId,
+            int? SessionId,
+            string FileName,
+            int RowNo,
+            string? TimestampText,
+            double? Latitude,
+            double? Longitude,
+            string? Category,
+            string? EventName,
+            string? Detail,
+            string? Source,
+            string? Severity,
+            string? RawJson);
+        private sealed record L3DiagnosticInsertRow(
+            int UploadId,
+            int? SessionId,
+            string FileName,
+            string SourceFileType,
+            int RowNo,
+            string? TimestampText,
+            double? Latitude,
+            double? Longitude,
+            string? Category,
+            string? Message,
+            string? Detail,
+            string? Source,
+            string? Severity,
+            string? RawText,
+            string? RawJson);
         private sealed record ExistingL3EventHistory(
             long Id,
             int? ProjectId,

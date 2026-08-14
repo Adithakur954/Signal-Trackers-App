@@ -366,6 +366,7 @@ namespace SignalTracker.Controllers
             }
             catch (Exception ex)
             {
+                Console.Error.WriteLine($"Network-log background upload {uploadHistoryId} failed: {ex}");
                 try
                 {
                     using var scope = _scopeFactory.CreateScope();
