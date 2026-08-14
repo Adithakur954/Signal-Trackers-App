@@ -1817,14 +1817,40 @@ namespace SignalTracker.Controllers
 
             var normalized = Regex.Replace(
                 value,
-                @"\bNR\s*ARFCN\s*:\s*-1\b",
-                "NR ARFCN: NA",
+                @"\bNR\s*ARFCN\s*:\s*(?<value>-?\d+)\b",
+                match => IsValidNrArfcn(match.Groups["value"].Value) ? match.Value : "NR ARFCN: NA",
+                RegexOptions.IgnoreCase);
+            normalized = Regex.Replace(
+                normalized,
+                @"\bNR\s*PCI\s*:\s*(?<value>-?\d+)\b",
+                match => IsValidNrPci(match.Groups["value"].Value) ? match.Value : "NR PCI: NA",
                 RegexOptions.IgnoreCase);
             return Regex.Replace(
                 normalized,
-                @"\bNR\s*PCI\s*:\s*-1\b",
-                "NR PCI: NA",
+                @"\bNR\s*Frequency\s*:\s*(?<value>-?\d+(?:\.\d+)?)\s*MHz\b",
+                match => IsValidNrFrequencyMhz(match.Groups["value"].Value) ? match.Value : "NR Frequency: NA",
                 RegexOptions.IgnoreCase);
+        }
+
+        private static bool IsValidNrPci(string value)
+        {
+            return int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)
+                && parsed >= 0
+                && parsed <= 1007;
+        }
+
+        private static bool IsValidNrArfcn(string value)
+        {
+            return int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)
+                && parsed >= 0
+                && parsed <= 3279165;
+        }
+
+        private static bool IsValidNrFrequencyMhz(string value)
+        {
+            return double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)
+                && parsed >= 0
+                && parsed <= 100000;
         }
 
         private static double? ParseDiagnosticDouble(string? value)

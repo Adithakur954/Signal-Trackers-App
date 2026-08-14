@@ -5,6 +5,9 @@ namespace SignalTracker.Services
 {
     public static class NrRrcOtaDecoder
     {
+        private const int MaxNrPci = 1007;
+        private const int MaxNrArfcn = 3279165;
+
         public static string? TryDecodeSummary(params string?[] values)
         {
             var text = string.Join(" ", values.Where(value => !string.IsNullOrWhiteSpace(value)));
@@ -32,14 +35,15 @@ namespace SignalTracker.Services
 
             var pci = ReadUIntLittleEndian(bytes, 7, 2);
             var arfcn = ReadUIntLittleEndian(bytes, 17, 4);
-            var hasValidArfcn = arfcn.HasValue && arfcn.Value >= 0;
+            var hasValidPci = pci.HasValue && pci.Value >= 0 && pci.Value <= MaxNrPci;
+            var hasValidArfcn = arfcn.HasValue && arfcn.Value >= 0 && arfcn.Value <= MaxNrArfcn;
             var frequencyMhz = hasValidArfcn ? NrArfcnToMhz(arfcn!.Value) : null;
             var band = hasValidArfcn ? InferNrBand(arfcn!.Value) : null;
             var parts = new List<string>();
 
-            if (pci.HasValue) parts.Add(pci.Value < 0 ? "NR PCI: NA" : $"NR PCI: {pci.Value}");
-            if (arfcn.HasValue) parts.Add(arfcn.Value < 0 ? "NR ARFCN: NA" : $"NR ARFCN: {arfcn.Value}");
-            if (frequencyMhz.HasValue) parts.Add($"NR Frequency: {frequencyMhz.Value.ToString("0.000", CultureInfo.InvariantCulture)} MHz");
+            if (pci.HasValue) parts.Add(hasValidPci ? $"NR PCI: {pci.Value}" : "NR PCI: NA");
+            if (arfcn.HasValue) parts.Add(hasValidArfcn ? $"NR ARFCN: {arfcn.Value}" : "NR ARFCN: NA");
+            if (arfcn.HasValue) parts.Add(frequencyMhz.HasValue ? $"NR Frequency: {frequencyMhz.Value.ToString("0.000", CultureInfo.InvariantCulture)} MHz" : "NR Frequency: NA");
             if (!string.IsNullOrWhiteSpace(band) && !string.Equals(band, "Unknown", StringComparison.OrdinalIgnoreCase)) parts.Add($"NR Band: {band}");
 
             return parts.Count == 0 ? null : string.Join(" | ", parts);
