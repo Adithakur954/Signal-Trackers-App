@@ -658,14 +658,11 @@ namespace SignalTracker.Controllers
                 originalFileName,
                 uploadedOn,
                 cancellationToken);
-            if (!uploadId.HasValue)
-            {
-                return Conflict(new
-                {
-                    status = 0,
-                    message = "The related upload could not be identified safely. No data was deleted."
-                });
-            }
+            var uploadIdsToDelete = new HashSet<int>();
+            if (uploadId.GetValueOrDefault() > 0)
+                uploadIdsToDelete.Add(uploadId.Value);
+            if (historyId <= int.MaxValue)
+                uploadIdsToDelete.Add(checked((int)historyId));
 
             var strategy = _context.Database.CreateExecutionStrategy();
             return await strategy.ExecuteAsync(async () =>
@@ -677,14 +674,19 @@ namespace SignalTracker.Controllers
                         "DELETE FROM tbl_l3_event_call_summary WHERE tbl_l3_event_history_id = @historyId;",
                         cancellationToken,
                         ("@historyId", historyId));
-                    var deletedL3Rows = await ExecuteDeleteAsync(
-                        "DELETE FROM tbl_l3_log WHERE tbl_upload_id = @uploadId;",
-                        cancellationToken,
-                        ("@uploadId", uploadId.Value));
-                    var deletedEventRows = await ExecuteDeleteAsync(
-                        "DELETE FROM tbl_event_log WHERE tbl_upload_id = @uploadId;",
-                        cancellationToken,
-                        ("@uploadId", uploadId.Value));
+                    var deletedL3Rows = 0;
+                    var deletedEventRows = 0;
+                    foreach (var deleteUploadId in uploadIdsToDelete)
+                    {
+                        deletedL3Rows += await ExecuteDeleteAsync(
+                            "DELETE FROM tbl_l3_log WHERE tbl_upload_id = @uploadId;",
+                            cancellationToken,
+                            ("@uploadId", deleteUploadId));
+                        deletedEventRows += await ExecuteDeleteAsync(
+                            "DELETE FROM tbl_event_log WHERE tbl_upload_id = @uploadId;",
+                            cancellationToken,
+                            ("@uploadId", deleteUploadId));
+                    }
                     await ExecuteDeleteAsync(
                         "DELETE FROM tbl_l3_event_history WHERE id = @historyId;",
                         cancellationToken,
@@ -727,7 +729,7 @@ namespace SignalTracker.Controllers
                         message = "L3/Event upload data deleted successfully.",
                         historyId,
                         sessionId,
-                        uploadId,
+                        uploadId = uploadId.GetValueOrDefault() > 0 ? uploadId : null,
                         deleted = new { calls = deletedCalls, l3Rows = deletedL3Rows, eventRows = deletedEventRows }
                     });
                 }
