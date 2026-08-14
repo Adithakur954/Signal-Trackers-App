@@ -223,10 +223,15 @@ namespace SignalTracker.Controllers
                         FileShare.Read, bufferSize: 128 * 1024, useAsync: true);
                     using var archive = new ZipArchive(zipStream, ZipArchiveMode.Read, leaveOpen: true);
 
-                    // Extract map images (last zip wins for same key)
+                    // Extract map images (preserve session-specific keys)
                     var mapImages = ExtractMapImagesFromZip(archive, out var detectedSessionId);
                     foreach (var kvp in mapImages)
-                        mergedImages[kvp.Key] = kvp.Value;
+                    {
+                        if (!mergedImages.ContainsKey(kvp.Key) || kvp.Key.Contains("_"))
+                        {
+                            mergedImages[kvp.Key] = kvp.Value;
+                        }
+                    }
 
                     var sid = (int)(request.SessionIdOverride ?? detectedSessionId ?? 0);
                     if (sid > 0 && !sessionIds.Contains(sid)) sessionIds.Add(sid);
@@ -288,12 +293,12 @@ namespace SignalTracker.Controllers
                         });
                 }
 
-                // Build project name: join all file names when multiple zips
+                // Build project name: default to "Walk Test" when multiple zips and no custom name
                 var projectName = !string.IsNullOrWhiteSpace(request.ProjectName)
                     ? request.ProjectName
                     : fileNames.Count == 1
                         ? fileNames[0]
-                        : string.Join(" + ", fileNames);
+                        : "Walk Test";
 
                 if (selectedBands.Count > 0)
                     projectName += $" ({(selectedBands.Count == 1 ? "Band" : "Bands")}: {string.Join(", ", selectedBands)})";
@@ -462,17 +467,7 @@ namespace SignalTracker.Controllers
 
             foreach (var kvp in mapImages)
             {
-                var header = kvp.Key.ToUpperInvariant();
-                result[header] = kvp.Value;
-
-                foreach (var sid in sessionIds)
-                {
-                    var url = BuildImageUrl(sid, header);
-                    result[url] = kvp.Value;
-                }
-
-                var fallbackUrl = BuildImageUrl(0, header);
-                result[fallbackUrl] = kvp.Value;
+                result[kvp.Key] = kvp.Value;
             }
 
             return result;
@@ -2348,6 +2343,7 @@ namespace SignalTracker.Controllers
 
             var candidateKeys = new List<string>();
 
+            // 1. Session-specific candidate keys
             if (primarySessionId > 0)
             {
                 candidateKeys.Add($"{primarySessionId}_{headerUpper}");
@@ -2357,17 +2353,12 @@ namespace SignalTracker.Controllers
                 candidateKeys.Add($"{ImageBaseUrl}/{primarySessionId}_{headerLower}.png");
             }
 
+            // 2. Band-specific candidate keys
             if (!string.IsNullOrWhiteSpace(bandUpper))
             {
                 candidateKeys.Add($"{bandUpper}_{headerUpper}");
                 candidateKeys.Add($"{bandUpper}_{headerLower}");
             }
-
-            candidateKeys.Add(headerUpper);
-            candidateKeys.Add(headerLower);
-            candidateKeys.Add($"MAP_{headerUpper}");
-            candidateKeys.Add($"MAP_{headerLower}");
-            candidateKeys.Add(BuildImageUrl(0, header));
 
             foreach (var key in candidateKeys)
             {
@@ -2375,6 +2366,7 @@ namespace SignalTracker.Controllers
                     return b;
             }
 
+            // 3. Alt header candidate keys (e.g. CI <-> CELL_ID) for this session/band
             var altHeader = headerUpper switch
             {
                 "CI" => "CELL_ID",
@@ -2384,15 +2376,18 @@ namespace SignalTracker.Controllers
 
             if (altHeader != null)
             {
-                var altKeys = new[]
+                var altKeys = new List<string>();
+                if (primarySessionId > 0)
                 {
-                    BuildImageUrl(primarySessionId, altHeader),
-                    $"{ImageBaseUrl}/{primarySessionId}_{altHeader}.png",
-                    $"{ImageBaseUrl}/0_{altHeader}.png",
-                    BuildImageUrl(0, altHeader),
-                    altHeader,
-                    $"MAP_{altHeader}"
-                };
+                    altKeys.Add($"{primarySessionId}_{altHeader}");
+                    altKeys.Add(BuildImageUrl(primarySessionId, altHeader));
+                    altKeys.Add($"{ImageBaseUrl}/{primarySessionId}_{altHeader}.png");
+                }
+                if (!string.IsNullOrWhiteSpace(bandUpper))
+                {
+                    altKeys.Add($"{bandUpper}_{altHeader}");
+                }
+
                 foreach (var key in altKeys)
                 {
                     if (imageBytesByUrl.TryGetValue(key, out var b) && b != null && b.Length > 0)
@@ -2400,25 +2395,26 @@ namespace SignalTracker.Controllers
                 }
             }
 
-            foreach (var kvp in imageBytesByUrl)
+            // 4. Global header candidate keys (only if no primarySessionId specified, e.g. single zip without session id)
+            if (primarySessionId <= 0)
             {
-                if (kvp.Value == null || kvp.Value.Length == 0) continue;
-                if (kvp.Key.Contains("legend", StringComparison.OrdinalIgnoreCase)) continue;
-
-                if (kvp.Key.Equals(headerUpper, StringComparison.OrdinalIgnoreCase) ||
-                    kvp.Key.EndsWith($"_{headerUpper}.png", StringComparison.OrdinalIgnoreCase) ||
-                    kvp.Key.EndsWith($"_{headerUpper}", StringComparison.OrdinalIgnoreCase) ||
-                    kvp.Key.EndsWith($"/{headerUpper}.png", StringComparison.OrdinalIgnoreCase) ||
-                    (altHeader != null && (
-                        kvp.Key.Equals(altHeader, StringComparison.OrdinalIgnoreCase) ||
-                        kvp.Key.EndsWith($"_{altHeader}.png", StringComparison.OrdinalIgnoreCase) ||
-                        kvp.Key.EndsWith($"_{altHeader}", StringComparison.OrdinalIgnoreCase) ||
-                        kvp.Key.EndsWith($"/{altHeader}.png", StringComparison.OrdinalIgnoreCase))))
+                var globalKeys = new[]
                 {
-                    return kvp.Value;
+                    headerUpper,
+                    headerLower,
+                    $"MAP_{headerUpper}",
+                    $"MAP_{headerLower}",
+                    BuildImageUrl(0, header)
+                };
+
+                foreach (var key in globalKeys)
+                {
+                    if (imageBytesByUrl.TryGetValue(key, out var b) && b != null && b.Length > 0)
+                        return b;
                 }
             }
 
+            // Strict session isolation: do NOT fall back to matching other session IDs' images
             return null;
         }
 
