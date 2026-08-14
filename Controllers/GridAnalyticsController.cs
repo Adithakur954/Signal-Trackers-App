@@ -138,7 +138,8 @@ namespace SignalTracker.Controllers
             [FromQuery] double? gridSize = null,
             [FromQuery] int? regionId = null,
             [FromQuery] int? company_id = null,
-            [FromQuery] int? scenario_id = null)
+            [FromQuery] int? scenario_id = null,
+            [FromQuery] string? technology = null)
         {
             if (!await CanUseGridFeatureAsync())
                 return StatusCode(403, new { Status = 0, Message = "Feature disabled in license: grid_fetch", Code = "FEATURE_NOT_ENABLED" });
@@ -172,6 +173,7 @@ namespace SignalTracker.Controllers
                             region_id INT,
                             scenario_id INT NULL,
                             public_scenario_id INT NULL,
+                            technology VARCHAR(20) NULL,
                             grid_size_meters DOUBLE NOT NULL,
                             grid_id VARCHAR(50) NOT NULL,
                             center_lat DOUBLE NOT NULL,
@@ -231,6 +233,7 @@ namespace SignalTracker.Controllers
                         ["optimized_best_operator_max"] = "VARCHAR(100)",
                         ["scenario_id"] = "INT NULL",
                         ["public_scenario_id"] = "INT NULL",
+                        ["technology"] = "VARCHAR(20) NULL",
                     };
 
                     var existingColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -306,19 +309,31 @@ namespace SignalTracker.Controllers
                     // Baseline rows are included only when there is no matching optimized row
                     // across stable identifiers (nodeb_id_cell_id, node_b_id+cell_id, site_id+cell_id)
                     // with lat/lon + cell_id fallback matching.
-var resolvedScenarioId = await ResolveScenarioIdAsync(conn, projectId, scenario_id);
+                    var resolvedScenarioId = scenario_id.HasValue && scenario_id.Value > 0
+                        ? scenario_id.Value
+                        : (int?)null;
+                    var normalizedTechnology = NormalizeGridTechnologyScope(technology);
                     var baselinePts = await FetchPredictionData(conn, "lte_prediction_baseline_results", projectId);
-                    var optimizedRawPts = await FetchPredictionData(
-                        conn,
-                        "lte_prediction_optimised_results",
-                        projectId,
-                        resolvedScenarioId
-                    );
-                    var optimizedSelectionKeys = await FetchOptimizedSelectionKeys(conn, projectId);
-                    var optimizedPts = BuildStatusAwareOptimizedPoints(
-                        baselinePts,
-                        optimizedRawPts,
-                        optimizedSelectionKeys);
+                    var optimizedRawPts = resolvedScenarioId.HasValue
+                        ? await FetchPredictionData(
+                            conn,
+                            "lte_prediction_optimised_results",
+                            projectId,
+                            resolvedScenarioId)
+                        : new List<PredPoint>();
+                    var optimizedSelectionKeys = resolvedScenarioId.HasValue
+                        ? await FetchOptimizedSelectionKeys(conn, projectId, resolvedScenarioId)
+                        : new OptimizedSelectionKeys();
+                    var optimizedPts = resolvedScenarioId.HasValue
+                        ? BuildStatusAwareOptimizedPoints(
+                            baselinePts,
+                            optimizedRawPts,
+                            optimizedSelectionKeys)
+                        : baselinePts.ToList();
+
+                    baselinePts = FilterPointsByTechnology(baselinePts, normalizedTechnology);
+                    optimizedPts = FilterPointsByTechnology(optimizedPts, normalizedTechnology);
+                    optimizedRawPts = FilterPointsByTechnology(optimizedRawPts, normalizedTechnology);
                     var allPredictionPts = baselinePts.Concat(optimizedPts).ToList();
                     if (allPredictionPts.Count == 0)
                     {
@@ -448,12 +463,11 @@ var resolvedScenarioId = await ResolveScenarioIdAsync(conn, projectId, scenario_
                         var baselineBestOperators = ComputeBestOperators(bData);
                         var optimizedBestOperators = ComputeBestOperators(oData);
 
-                        resultsList.Add(new grid_analytics_results
+                        var gridResult = new grid_analytics_results
                         {
                             project_id = projectId,
                             region_id = regionId,
-                            scenario_id = resolvedScenarioId,
-                            public_scenario_id = resolvedScenarioId,
+                            technology = normalizedTechnology,
                             grid_size_meters = gridSizeMeters,
                             grid_id = cell.GridId,
                             center_lat = cell.CenterLat, center_lon = cell.CenterLon,
@@ -487,7 +501,15 @@ var resolvedScenarioId = await ResolveScenarioIdAsync(conn, projectId, scenario_
                             diff_max_rsrp = diff.diff_max_rsrp, diff_max_rsrq = diff.diff_max_rsrq, diff_max_sinr = diff.diff_max_sinr,
                             diff_mode_rsrp = diff.diff_mode_rsrp, diff_mode_rsrq = diff.diff_mode_rsrq, diff_mode_sinr = diff.diff_mode_sinr,
                             created_at = DateTime.UtcNow
-                        });
+                        };
+
+                        if (resolvedScenarioId.HasValue)
+                        {
+                            gridResult.scenario_id = resolvedScenarioId.Value;
+                            gridResult.public_scenario_id = resolvedScenarioId.Value;
+                        }
+
+                        resultsList.Add(gridResult);
                     }
 
                     // â”€â”€ 9. REMOVE EXISTING AND STORE TO DATABASE â”€â”€
@@ -502,10 +524,12 @@ var resolvedScenarioId = await ResolveScenarioIdAsync(conn, projectId, scenario_
                                   AND (
                                       (@sid IS NULL AND COALESCE(public_scenario_id, scenario_id) IS NULL)
                                       OR COALESCE(public_scenario_id, scenario_id) = @sid
-                                  )";
+                                  )
+                                  AND COALESCE(technology, 'ALL') = @technology";
                             AddParam(cmdDel, "@rid", regionId.Value);
                             AddParam(cmdDel, "@pid", projectId);
                             AddParam(cmdDel, "@sid", resolvedScenarioId.HasValue ? resolvedScenarioId.Value : DBNull.Value);
+                            AddParam(cmdDel, "@technology", normalizedTechnology);
                         }
                         else
                         {
@@ -516,9 +540,11 @@ var resolvedScenarioId = await ResolveScenarioIdAsync(conn, projectId, scenario_
                                   AND (
                                       (@sid IS NULL AND COALESCE(public_scenario_id, scenario_id) IS NULL)
                                       OR COALESCE(public_scenario_id, scenario_id) = @sid
-                                  )";
+                                  )
+                                  AND COALESCE(technology, 'ALL') = @technology";
                             AddParam(cmdDel, "@pid", projectId);
                             AddParam(cmdDel, "@sid", resolvedScenarioId.HasValue ? resolvedScenarioId.Value : DBNull.Value);
+                            AddParam(cmdDel, "@technology", normalizedTechnology);
                         }
                         await cmdDel.ExecuteNonQueryAsync();
                     }
@@ -539,7 +565,7 @@ var resolvedScenarioId = await ResolveScenarioIdAsync(conn, projectId, scenario_
                     var response = new GridAnalyticsResponse
                     {
                         Status = 1,
-                        Message = $"Grid analytics computed and stored. boundary={boundarySource}; baselinePts={baselinePts.Count}; optimizedPts={optimizedPts.Count}; optimizedRawPts={optimizedRawPts.Count}; optimizedKeySites={optimizedSelectionKeys.SiteIds.Count}; optimizedKeyCells={optimizedSelectionKeys.CellIds.Count}; baselineMapped={baselineMappedPoints}; optimizedMapped={optimizedMappedPoints}; totalGrids={gridCells.Count}; gridsWithData={resultsList.Count}.",
+                        Message = $"Grid analytics computed and stored. technology={normalizedTechnology}; boundary={boundarySource}; baselinePts={baselinePts.Count}; optimizedPts={optimizedPts.Count}; optimizedRawPts={optimizedRawPts.Count}; optimizedKeySites={optimizedSelectionKeys.SiteIds.Count}; optimizedKeyCells={optimizedSelectionKeys.CellIds.Count}; baselineMapped={baselineMappedPoints}; optimizedMapped={optimizedMappedPoints}; totalGrids={gridCells.Count}; gridsWithData={resultsList.Count}.",
                         Data = new GridAnalyticsData
                         {
                             project_id = projectId, grid_size_meters = gridSizeMeters,
@@ -667,7 +693,8 @@ var resolvedScenarioId = await ResolveScenarioIdAsync(conn, projectId, scenario_
             [FromQuery] int? regionId = null,
             [FromQuery] int? company_id = null,
             [FromQuery] string? version = null,
-            [FromQuery] int? scenario_id = null)
+            [FromQuery] int? scenario_id = null,
+            [FromQuery] string? technology = null)
         {
             var bridgeAuthorized = IsPythonBridgeAuthorized();
             var userAuthenticated = User?.Identity?.IsAuthenticated == true;
@@ -708,7 +735,8 @@ var resolvedScenarioId = await ResolveScenarioIdAsync(conn, projectId, scenario_
                 var effectiveScenarioId = isScenarioGridVersion
                     ? await ResolveScenarioIdAsync(conn, projectId, scenario_id)
                     : null;
-                string cacheKey = $"gridanalytics:v2:{GetCurrentCountryScope()}:{projectId}:{regionId ?? 0}:{normalizedVersion}:{effectiveScenarioId?.ToString() ?? "none"}";
+                var normalizedTechnology = NormalizeGridTechnologyScope(technology);
+                string cacheKey = $"gridanalytics:v2:{GetCurrentCountryScope()}:{projectId}:{regionId ?? 0}:{normalizedVersion}:{effectiveScenarioId?.ToString() ?? "none"}:{normalizedTechnology}";
                 if (_redis != null && _redis.IsConnected)
                 {
                     try
@@ -756,6 +784,15 @@ var resolvedScenarioId = await ResolveScenarioIdAsync(conn, projectId, scenario_
                     cmdAlterPublicScenarioCol.CommandText =
                         "ALTER TABLE grid_analytics_results ADD COLUMN public_scenario_id INT NULL AFTER scenario_id;";
                     await cmdAlterPublicScenarioCol.ExecuteNonQueryAsync();
+                    gridScenarioColumns.Add("public_scenario_id");
+                }
+
+                if (!gridScenarioColumns.Contains("technology"))
+                {
+                    await using var cmdAlterTechnologyCol = conn.CreateCommand();
+                    cmdAlterTechnologyCol.CommandText =
+                        "ALTER TABLE grid_analytics_results ADD COLUMN technology VARCHAR(20) NULL AFTER public_scenario_id;";
+                    await cmdAlterTechnologyCol.ExecuteNonQueryAsync();
                 }
 
                 // Fetch directly from DB using EF
@@ -775,6 +812,15 @@ var resolvedScenarioId = await ResolveScenarioIdAsync(conn, projectId, scenario_
                     else
                         query = query.Where(g => g.public_scenario_id == null && g.scenario_id == null);
                 }
+                else
+                {
+                    query = query.Where(g => g.public_scenario_id == null && g.scenario_id == null);
+                }
+
+                if (normalizedTechnology == "ALL")
+                    query = query.Where(g => g.technology == null || g.technology == "ALL");
+                else
+                    query = query.Where(g => g.technology == normalizedTechnology);
 
                 storedResults = await query.ToListAsync();
                 storedResults = SelectLatestGridGeneration(storedResults);
@@ -1438,20 +1484,69 @@ var resolvedScenarioId = await ResolveScenarioIdAsync(conn, projectId, scenario_
             return parsed > 0 ? parsed : null;
         }
 
+        private static string NormalizeGridTechnologyScope(string? technology)
+        {
+            var raw = (technology ?? "ALL").Trim();
+            if (string.IsNullOrWhiteSpace(raw))
+                return "ALL";
+
+            var upper = raw.ToUpperInvariant();
+            if (upper == "ALL" || upper == "ANY" || upper == "BOTH")
+                return "ALL";
+            if (upper.Contains("5G") || upper.Contains("NR"))
+                return "5G";
+            if (upper.Contains("4G") || upper.Contains("LTE"))
+                return "4G";
+            return upper;
+        }
+
+        private static string NormalizePredictionTechnology(PredPoint point)
+        {
+            var raw = (point.Technology ?? "").Trim().ToUpperInvariant();
+            if (raw.Contains("5G") || raw.Contains("NR"))
+                return "5G";
+            if (raw.Contains("4G") || raw.Contains("LTE"))
+                return "4G";
+
+            var band = (point.Band ?? "").Trim().ToUpperInvariant();
+            if (band == "78" || band == "N78" || band == "3300" || band == "3500")
+                return "5G";
+            return "4G";
+        }
+
+        private static List<PredPoint> FilterPointsByTechnology(List<PredPoint> points, string technology)
+        {
+            var normalized = NormalizeGridTechnologyScope(technology);
+            if (normalized == "ALL")
+                return points ?? new List<PredPoint>();
+
+            return (points ?? new List<PredPoint>())
+                .Where(point => NormalizePredictionTechnology(point) == normalized)
+                .ToList();
+        }
+
         private async Task<List<PredPoint>> FetchPredictionData(DbConnection conn, string table, int projectId, int? scenarioId = null)
         {
             var pts = new List<PredPoint>();
             await using var cmd = conn.CreateCommand();
             var isOptimizedTable = string.Equals(table, "lte_prediction_optimised_results", StringComparison.OrdinalIgnoreCase);
+            var columns = await GetTableColumnSetAsync(conn, table);
             var scenarioFilterColumn = "scenario_id";
             if (isOptimizedTable)
             {
-                var columns = await GetTableColumnSetAsync(conn, table);
                 if (columns.Contains("public_scenario_id"))
                 {
                     scenarioFilterColumn = "public_scenario_id";
                 }
             }
+            var technologySelect = columns.Contains("Technology")
+                ? "Technology"
+                : columns.Contains("technology")
+                    ? "technology AS Technology"
+                    : "NULL AS Technology";
+            var bandSelect = columns.Contains("band")
+                ? "band"
+                : "NULL AS band";
             var scenarioFilterClause = isOptimizedTable && scenarioId.HasValue
                 ? $" AND `{scenarioFilterColumn}` = @sid"
                 : "";
@@ -1467,6 +1562,8 @@ SELECT
     site_id,
     nodeb_id_cell_id,
     operator,
+    {bandSelect},
+    {technologySelect},
     created_at
 FROM `{table}`
 WHERE project_id = @pid{scenarioFilterClause}";
@@ -1502,7 +1599,9 @@ SELECT
     cell_id,
     site_id,
     nodeb_id_cell_id,
-    operator
+    operator,
+    band,
+    Technology
 FROM optimized_ranked
 WHERE rn = 1";
             }
@@ -1547,6 +1646,8 @@ WHERE rn = 1";
                     SiteId = rdr.IsDBNull(7) ? null : rdr.GetValue(7)?.ToString(),
                     NodebIdCellId = rdr.IsDBNull(8) ? null : rdr.GetValue(8)?.ToString(),
                     Operator = rdr.IsDBNull(9) ? null : rdr.GetValue(9)?.ToString(),
+                    Band = rdr.IsDBNull(10) ? null : rdr.GetValue(10)?.ToString(),
+                    Technology = rdr.IsDBNull(11) ? null : rdr.GetValue(11)?.ToString(),
                 });
             }
 
@@ -1555,12 +1656,14 @@ WHERE rn = 1";
 
         private async Task<OptimizedSelectionKeys> FetchOptimizedSelectionKeys(
             DbConnection conn,
-            int projectId)
+            int projectId,
+            int? scenarioId = null)
         {
             var keys = new OptimizedSelectionKeys();
 
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = @"
+            var scenarioFilterClause = scenarioId.HasValue ? " AND spo.scenario = @scenario" : "";
+            cmd.CommandText = $@"
 SELECT
     COALESCE(
         NULLIF(TRIM(CAST(spo.site AS CHAR)), ''),
@@ -1574,8 +1677,10 @@ SELECT
 FROM site_prediction_optimized spo
 LEFT JOIN site_prediction sp
     ON sp.id = spo.site_prediction_id
-WHERE spo.tbl_project_id = @pid;";
+WHERE spo.tbl_project_id = @pid{scenarioFilterClause};";
             AddParam(cmd, "@pid", projectId);
+            if (scenarioId.HasValue)
+                AddParam(cmd, "@scenario", scenarioId.Value);
 
             await using var reader = await cmd.ExecuteReaderAsync();
             while (await reader.ReadAsync())
@@ -1905,6 +2010,7 @@ WHERE spo.tbl_project_id = @pid;";
                 res.Add(new GridCellResult
                 {
                     grid_id = s.grid_id,
+                    technology = s.technology ?? "ALL",
                     center_lat = s.center_lat,
                     center_lon = s.center_lon,
                     min_lat = s.min_lat,
@@ -1957,7 +2063,8 @@ WHERE spo.tbl_project_id = @pid;";
                 .GroupBy(s => new
                 {
                     ScenarioId = s.public_scenario_id ?? s.scenario_id,
-                    GridSize = Math.Round(s.grid_size_meters, 3)
+                    GridSize = Math.Round(s.grid_size_meters, 3),
+                    Technology = s.technology ?? "ALL"
                 })
                 .OrderByDescending(g => g.Max(s => s.created_at ?? DateTime.MinValue))
                 .ThenByDescending(g => g.Count())
@@ -2030,6 +2137,8 @@ WHERE spo.tbl_project_id = @pid;";
             public string? SiteId { get; set; }
             public string? NodebIdCellId { get; set; }
             public string? Operator { get; set; }
+            public string? Band { get; set; }
+            public string? Technology { get; set; }
         }
 
         private class GridCell
@@ -2067,6 +2176,7 @@ WHERE spo.tbl_project_id = @pid;";
         public class GridCellResult
         {
             public string grid_id { get; set; } = "";
+            public string technology { get; set; } = "ALL";
             public double center_lat { get; set; }
             public double center_lon { get; set; }
             public double min_lat { get; set; }

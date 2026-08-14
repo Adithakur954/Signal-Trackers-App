@@ -16766,6 +16766,7 @@ public async Task<IActionResult> GetLtePredictionLocationStatsRefined(
 public async Task<IActionResult> GetSitePredictionBase(
     [FromQuery(Name = "project_id")] int? projectId = null,
     [FromQuery(Name = "node_b_id")] string? nodeBId = null,
+    [FromQuery(Name = "site_id")] string? siteId = null,
     [FromQuery(Name = "cell_id")] string? cellId = null,
     [FromQuery(Name = "sector")] string? sector = null,
     [FromQuery(Name = "sector_id")] string? sectorId = null,
@@ -16773,6 +16774,7 @@ public async Task<IActionResult> GetSitePredictionBase(
     [FromQuery(Name = "polygon_ids")] string? polygonIdsCsv = null)
 {
     var trimmedNodeBId = string.IsNullOrWhiteSpace(nodeBId) ? null : nodeBId.Trim();
+    var trimmedSiteId = string.IsNullOrWhiteSpace(siteId) ? null : siteId.Trim();
     var trimmedCellId = string.IsNullOrWhiteSpace(cellId) ? null : cellId.Trim();
     var trimmedSector = string.IsNullOrWhiteSpace(sector) ? null : sector.Trim();
     var trimmedSectorId = string.IsNullOrWhiteSpace(sectorId) ? null : sectorId.Trim();
@@ -16780,6 +16782,7 @@ public async Task<IActionResult> GetSitePredictionBase(
     var lookupSector = trimmedSectorId ?? trimmedSector;
     var polygonIds = projectId.HasValue ? ParsePolygonIds(polygonIdsCsv) : new List<int>();
     var polygonFilter = BuildPolygonFilterClause(polygonIds, "b.lat", "b.lon");
+    var lookupSiteIds = new List<string>();
     var lookupNodeBIds = new List<string>();
     var lookupCellIds = new List<string>();
     var lookupNodeBCellIds = new List<string>();
@@ -16850,6 +16853,7 @@ public async Task<IActionResult> GetSitePredictionBase(
                 : null);
 
     AddNodeBLookupValue(trimmedNodeBId);
+    AddLookupValue(lookupSiteIds, trimmedSiteId);
     AddLookupValue(lookupCellIds, trimmedCellId);
     AddLookupValue(lookupNodeBCellIds, combinedNodeBCellId);
     AddNodeBCellLookupValues(trimmedNodeBId, trimmedCellId);
@@ -16880,13 +16884,14 @@ public async Task<IActionResult> GetSitePredictionBase(
     }
 
     if (string.IsNullOrWhiteSpace(trimmedNodeBId) &&
+        string.IsNullOrWhiteSpace(trimmedSiteId) &&
         string.IsNullOrWhiteSpace(trimmedCellId) &&
         string.IsNullOrWhiteSpace(lookupSector))
     {
         return BadRequest(new
         {
             Status = 0,
-            Message = "At least one lookup key is required (node_b_id, cell_id, sector, or sector_id)."
+            Message = "At least one lookup key is required (node_b_id, site_id, cell_id, sector, or sector_id)."
         });
     }
 
@@ -16942,6 +16947,7 @@ public async Task<IActionResult> GetSitePredictionBase(
 
         var lookupClauses = new List<string>();
         var hasNodeLookup = !string.IsNullOrWhiteSpace(trimmedNodeBId);
+        var hasSiteLookup = !string.IsNullOrWhiteSpace(trimmedSiteId);
         var hasCellLookup = !string.IsNullOrWhiteSpace(trimmedCellId);
 
         if (hasNodeLookup && hasCellLookup)
@@ -16973,16 +16979,26 @@ public async Task<IActionResult> GetSitePredictionBase(
             }
         }
 
+        // site_id is a distinct identifier from node_b_id and is looked up independently
+        // (OR'd in) so a row with a NULL node_b_id can still be found via its real site_id.
+        if (hasSiteLookup && baselineColumns.Contains("site_id") && lookupSiteIds.Count > 0)
+        {
+            if (hasCellLookup && baselineColumns.Contains("cell_id") && lookupCellIds.Count > 0)
+                lookupClauses.Add($"({InLookup("b", "site_id", "site_id", lookupSiteIds)} AND {InLookup("b", "cell_id", "cell_id", lookupCellIds)})");
+            else if (!hasCellLookup)
+                lookupClauses.Add(InLookup("b", "site_id", "site_id", lookupSiteIds));
+        }
+
         if (!string.IsNullOrWhiteSpace(lookupSector))
         {
             if (!string.IsNullOrWhiteSpace(sectorColumn))
             {
-                if (hasNodeLookup || hasCellLookup)
+                if (hasNodeLookup || hasSiteLookup || hasCellLookup)
                     andClauses.Add(Eq("b", sectorColumn, "sector_lookup"));
                 else
                     lookupClauses.Add(Eq("b", sectorColumn, "sector_lookup"));
             }
-            else if (!hasNodeLookup && !hasCellLookup)
+            else if (!hasNodeLookup && !hasSiteLookup && !hasCellLookup)
             {
                 if (baselineColumns.Contains("cell_id")) lookupClauses.Add(Eq("b", "cell_id", "sector_lookup"));
             }
@@ -17041,6 +17057,7 @@ ORDER BY b.id DESC;";
         if (polygonIds.Count > 0) Add(cmd, "@pid", projectId!.Value);
         AddPolygonIdsParameters(cmd, polygonIds);
         for (var i = 0; i < lookupNodeBIds.Count; i++) Add(cmd, $"@node_b_id_{i}", lookupNodeBIds[i]);
+        for (var i = 0; i < lookupSiteIds.Count; i++) Add(cmd, $"@site_id_{i}", lookupSiteIds[i]);
         for (var i = 0; i < lookupCellIds.Count; i++) Add(cmd, $"@cell_id_{i}", lookupCellIds[i]);
         for (var i = 0; i < lookupNodeBCellIds.Count; i++) Add(cmd, $"@node_b_cell_id_{i}", lookupNodeBCellIds[i]);
         if (!string.IsNullOrWhiteSpace(lookupSector)) Add(cmd, "@sector_lookup", lookupSector);
@@ -17085,6 +17102,7 @@ ORDER BY b.id DESC;";
 public async Task<IActionResult> GetSitePredictionOptimised(
     [FromQuery(Name = "project_id")] int? projectId = null,
     [FromQuery(Name = "node_b_id")] string? nodeBId = null,
+    [FromQuery(Name = "site_id")] string? siteId = null,
     [FromQuery(Name = "cell_id")] string? cellId = null,
     [FromQuery(Name = "sector")] string? sector = null,
     [FromQuery(Name = "sector_id")] string? sectorId = null,

@@ -22,6 +22,10 @@ namespace SignalTracker.Models
         [Column("public_scenario_id")]
         public int? public_scenario_id { get; set; }
 
+        [Column("technology")]
+        [StringLength(20)]
+        public string? technology { get; set; }
+
         [Column("grid_size_meters")]
         public double grid_size_meters { get; set; }
 
