@@ -180,14 +180,10 @@ namespace SignalTracker.Controllers
             var projectId = GetJsonInt(payload, "project_id", "projectId");
             var sessionId = GetJsonInt(payload, "session_id", "sessionId");
             var uploadId = GetJsonInt(payload, "tbl_upload_id", "upload_id", "uploadId");
-            var l3Rows = Math.Max(0, GetJsonInt(payload, "l3_rows", "l3Rows", "l3_rows_imported") ?? 0);
-            var eventRows = Math.Max(0, GetJsonInt(payload, "events_rows", "eventRows", "event_rows", "eventRowsImported") ?? 0);
-            var uploadedBy = GetJsonInt(payload, "uploaded_by", "uploadedBy") ?? userId;
-            var status = (short)Math.Clamp(GetJsonInt(payload, "status") ?? 1, 0, short.MaxValue);
-            var originalFileName = FirstNonBlank(
-                GetJsonString(payload, "original_file_name", "originalFileName"),
-                GetJsonString(payload, "file_name", "fileName"),
-                "L3/Event history");
+            const string originalFileName = "L3/Event history";
+            const int l3Rows = 0;
+            const int eventRows = 0;
+            const short status = 1;
 
             if (projectId.GetValueOrDefault() > 0)
             {
@@ -210,12 +206,9 @@ namespace SignalTracker.Controllers
                 originalFileName!,
                 l3Rows,
                 eventRows,
-                uploadedBy,
+                userId,
                 status,
                 cancellationToken);
-
-            if (projectId.GetValueOrDefault() > 0)
-                await UpdateProjectL3EventFlagsAsync(projectId!.Value, l3Rows > 0, eventRows > 0, cancellationToken);
 
             return Ok(new
             {
@@ -226,10 +219,7 @@ namespace SignalTracker.Controllers
                     id = historyId,
                     projectId,
                     sessionId,
-                    uploadId,
-                    originalFileName,
-                    l3Rows,
-                    eventsRows = eventRows
+                    uploadId
                 }
             });
         }
