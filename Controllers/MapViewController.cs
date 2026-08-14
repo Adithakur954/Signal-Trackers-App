@@ -3668,6 +3668,9 @@ public class AvailablePolygonsResponse
             {
                 var text = x.Text;
                 var time = x.EventTime;
+                var nrRrcSummary = NrRrcOtaDecoder.TryDecodeSummary(text);
+                var rawMessage = FirstNonEmpty(nrRrcSummary, x.RawText, x.Detail, x.Message, string.Empty);
+                var summary = FirstNonEmpty(nrRrcSummary, x.Detail, x.RawText, x.Message, string.Empty);
                 return new DiagnosticTimelineRow
                 {
                     Id = $"l3-{x.Id}",
@@ -3687,8 +3690,8 @@ public class AvailablePolygonsResponse
                     Title = FirstNonEmpty(x.Message, x.Category, "L3 Message"),
                     OfficialName = FirstNonEmpty(x.Message, x.Category, "L3 Message"),
                     Message = FirstNonEmpty(x.Message, x.Category, "L3 Message"),
-                    Summary = FirstNonEmpty(x.Detail, x.RawText, x.Message, string.Empty),
-                    RawMessage = FirstNonEmpty(x.RawText, x.Detail, x.Message, string.Empty),
+                    Summary = summary,
+                    RawMessage = rawMessage,
                     OriginSource = x.Source,
                     Severity = NormalizeDiagnosticSeverity(x.Severity, text),
                     Technology = ResolveDiagnosticTechnology(text, l3Rows, x.SessionId, time),

@@ -823,15 +823,22 @@ namespace SignalTracker.Controllers
             AddParam(cmd, "@fileName", Path.GetFileName(fileName));
             AddParam(cmd, "@sourceFileType", sourceFileType);
             AddParam(cmd, "@rowNo", rowNo);
+            var category = GetDiagnosticValue(row, "category", "layer", "protocol", "stack", "channel");
+            var message = GetDiagnosticValue(row, "message_name", "messagename", "msg_name", "message_type", "messagetype", "message", "msg", "name", "event");
+            var detail = GetDiagnosticValue(row, "decode", "decoded", "decoded_text", "detail", "details", "text", "content", "info", "description");
+            var decodedNrRrcSummary = NrRrcOtaDecoder.TryDecodeSummary(category, message, detail, rawText, sourceFileType);
+            var storedDetail = decodedNrRrcSummary ?? detail;
+            var storedRawText = decodedNrRrcSummary ?? rawText;
+
             AddParam(cmd, "@timestampText", GetDiagnosticValue(row, "timestamp", "time_stamp", "datetime", "date_time", "time", "date"));
             AddParam(cmd, "@latitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "latitude", "lat", "y")));
             AddParam(cmd, "@longitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "longitude", "long", "lon", "lng", "x")));
-            AddParam(cmd, "@category", GetDiagnosticValue(row, "category", "layer", "protocol", "stack", "channel"));
-            AddParam(cmd, "@message", GetDiagnosticValue(row, "message_name", "messagename", "msg_name", "message_type", "messagetype", "message", "msg", "name", "event"));
-            AddParam(cmd, "@detail", GetDiagnosticValue(row, "decode", "decoded", "decoded_text", "detail", "details", "text", "content", "info", "description"));
+            AddParam(cmd, "@category", category);
+            AddParam(cmd, "@message", message);
+            AddParam(cmd, "@detail", storedDetail);
             AddParam(cmd, "@source", GetDiagnosticValue(row, "source", "origin", "producer"));
             AddParam(cmd, "@severity", GetDiagnosticValue(row, "severity", "level", "priority"));
-            AddParam(cmd, "@rawText", rawText);
+            AddParam(cmd, "@rawText", storedRawText);
             AddParam(cmd, "@rawJson", JsonSerializer.Serialize(row));
             await cmd.ExecuteNonQueryAsync(cancellationToken);
         }

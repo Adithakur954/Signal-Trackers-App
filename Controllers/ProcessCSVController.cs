@@ -1860,15 +1860,22 @@ public IActionResult UploadSitePrediction(
             AddDiagnosticParam(cmd, "@fileName", fileName);
             AddDiagnosticParam(cmd, "@sourceFileType", sourceFileType);
             AddDiagnosticParam(cmd, "@rowNo", rowNo);
+            var category = GetDiagnosticValue(row, "category");
+            var message = GetDiagnosticValue(row, "message", "event", "message_name");
+            var detail = GetDiagnosticValue(row, "detail", "description");
+            var decodedNrRrcSummary = NrRrcOtaDecoder.TryDecodeSummary(category, message, detail, rawText, sourceFileType);
+            var storedDetail = decodedNrRrcSummary ?? detail;
+            var storedRawText = decodedNrRrcSummary ?? rawText;
+
             AddDiagnosticParam(cmd, "@timestampText", GetDiagnosticValue(row, "timestamp", "time"));
             AddDiagnosticParam(cmd, "@latitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "latitude", "lat")));
             AddDiagnosticParam(cmd, "@longitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "longitude", "lon", "lng")));
-            AddDiagnosticParam(cmd, "@category", GetDiagnosticValue(row, "category"));
-            AddDiagnosticParam(cmd, "@message", GetDiagnosticValue(row, "message", "event", "message_name"));
-            AddDiagnosticParam(cmd, "@detail", GetDiagnosticValue(row, "detail", "description"));
+            AddDiagnosticParam(cmd, "@category", category);
+            AddDiagnosticParam(cmd, "@message", message);
+            AddDiagnosticParam(cmd, "@detail", storedDetail);
             AddDiagnosticParam(cmd, "@source", GetDiagnosticValue(row, "source"));
             AddDiagnosticParam(cmd, "@severity", GetDiagnosticValue(row, "severity", "level"));
-            AddDiagnosticParam(cmd, "@rawText", rawText);
+            AddDiagnosticParam(cmd, "@rawText", storedRawText);
             AddDiagnosticParam(cmd, "@rawJson", System.Text.Json.JsonSerializer.Serialize(row));
             cmd.ExecuteNonQuery();
         }
