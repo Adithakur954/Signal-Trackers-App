@@ -5737,6 +5737,8 @@ public class AvailablePolygonsResponse
             public DateTime? ToDate { get; set; }
             public List<int>? PolygonIds { get; set; }
             public List<int>? SessionIds { get; set; }
+            public string? GridSize { get; set; }
+            public string? grid_size { get; set; }
             public string? LogGrid { get; set; }
             public string? log_grid { get; set; }
             public int? company_id { get; set; }
@@ -5859,6 +5861,7 @@ public async Task<JsonResult> CreateProjectWithPolygons([FromBody] CreateProject
                 await db.SaveChangesAsync();
 
                 newProjectId = newProj.id; 
+                await TryUpdateProjectGridSizeAsync(newProjectId, model.GridSize ?? model.grid_size);
                 await TryUpdateProjectLogGridAsync(newProjectId, model.LogGrid ?? model.log_grid);
                 await TryUpdateProjectSiteSizeAsync(newProjectId, 1m);
 
@@ -7824,6 +7827,7 @@ public async Task<IActionResult> UpdateProjectSessions([FromBody] UpdateProjectS
                 project.band,
                 project.earfcn,
                 project.apps,
+                project.grid_size,
                 project.log_grid,
                 project.created_on,
                 project.status
@@ -10496,6 +10500,51 @@ public async Task<IActionResult> GetLogsByDateRange(
             return int.TryParse(value, out var parsed) ? parsed : null;
         }
 
+        private async Task TryUpdateProjectGridSizeAsync(int projectId, string? gridSize)
+        {
+            if (projectId <= 0 || string.IsNullOrWhiteSpace(gridSize))
+                return;
+
+            var conn = db.Database.GetDbConnection();
+            var shouldClose = false;
+            try
+            {
+                if (conn.State != ConnectionState.Open)
+                {
+                    await conn.OpenAsync();
+                    shouldClose = true;
+                }
+
+                var projectColumns = await GetTableColumnSetAsync(conn, "tbl_project");
+                if (!projectColumns.Contains("grid_size"))
+                {
+                    await using var alter = conn.CreateCommand();
+                    alter.CommandText = "ALTER TABLE tbl_project ADD COLUMN grid_size VARCHAR(50) NULL;";
+                    if (db.Database.CurrentTransaction != null)
+                        alter.Transaction = db.Database.CurrentTransaction.GetDbTransaction();
+                    await alter.ExecuteNonQueryAsync();
+                }
+
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = "UPDATE tbl_project SET grid_size = @gridSize WHERE id = @projectId;";
+                if (db.Database.CurrentTransaction != null)
+                    cmd.Transaction = db.Database.CurrentTransaction.GetDbTransaction();
+
+                AddParam(cmd, "@gridSize", gridSize);
+                AddParam(cmd, "@projectId", projectId);
+                await cmd.ExecuteNonQueryAsync();
+            }
+            catch
+            {
+                // Older deployments may not allow this optional column update; project creation should still succeed.
+            }
+            finally
+            {
+                if (shouldClose && conn.State == ConnectionState.Open)
+                    await conn.CloseAsync();
+            }
+        }
+
         private async Task TryUpdateProjectLogGridAsync(int projectId, string? logGrid)
         {
             if (projectId <= 0 || string.IsNullOrWhiteSpace(logGrid))
@@ -10513,7 +10562,13 @@ public async Task<IActionResult> GetLogsByDateRange(
 
                 var projectColumns = await GetTableColumnSetAsync(conn, "tbl_project");
                 if (!projectColumns.Contains("log_grid"))
-                    return;
+                {
+                    await using var alter = conn.CreateCommand();
+                    alter.CommandText = "ALTER TABLE tbl_project ADD COLUMN log_grid VARCHAR(50) NULL;";
+                    if (db.Database.CurrentTransaction != null)
+                        alter.Transaction = db.Database.CurrentTransaction.GetDbTransaction();
+                    await alter.ExecuteNonQueryAsync();
+                }
 
                 await using var cmd = conn.CreateCommand();
                 cmd.CommandText = "UPDATE tbl_project SET log_grid = @logGrid WHERE id = @projectId;";
@@ -10526,7 +10581,7 @@ public async Task<IActionResult> GetLogsByDateRange(
             }
             catch
             {
-                // Older deployments may not have log_grid; project creation should still succeed.
+                // Optional preference column; project creation should still succeed.
             }
             finally
             {
@@ -15072,6 +15127,7 @@ public async Task<IActionResult> CreateSimpleProject([FromBody] CreateProjectMod
         // 4. Save to Database
         db.tbl_project.Add(newProject);
         await db.SaveChangesAsync();
+        await TryUpdateProjectGridSizeAsync(newProject.id, model.GridSize ?? model.grid_size);
         await TryUpdateProjectLogGridAsync(newProject.id, model.LogGrid ?? model.log_grid);
         await TryUpdateProjectSiteSizeAsync(newProject.id, 1m);
         await InvalidateProjectListCachesAsync();
@@ -16003,7 +16059,9 @@ private async Task<List<object>> GetProjectsFromRawSqlAsync(
     using var conn = new MySqlConnection(connString);
     await conn.OpenAsync();
     var projectColumns = await GetTableColumnSetAsync(conn, "tbl_project");
-    var gridSizeSelect = "NULL AS grid_size";
+    var gridSizeSelect = projectColumns.Contains("grid_size")
+        ? "p.grid_size"
+        : "NULL AS grid_size";
     var logGridSelect = projectColumns.Contains("log_grid")
         ? "p.log_grid"
         : "NULL AS log_grid";
@@ -16094,6 +16152,7 @@ private async Task<List<object>> GetProjectsFromRawSqlAsync(
             band = ReadDb("band"),
             earfcn = ReadDb("earfcn"),
             apps = ReadDb("apps"),
+            grid_size = ReadDb("grid_size"),
             log_grid = ReadDb("log_grid"),
             sitesize = ReadDb("sitesize"),
             l3 = Convert.ToBoolean(ReadDb("l3") ?? false, CultureInfo.InvariantCulture),
@@ -16123,7 +16182,9 @@ private async Task<List<object>> GetProjectsFallbackAsync(
     await conn.OpenAsync();
 
     var projectColumns = await GetTableColumnSetAsync(conn, "tbl_project");
-    var gridSizeSelect = "NULL AS grid_size";
+    var gridSizeSelect = projectColumns.Contains("grid_size")
+        ? "p.grid_size"
+        : "NULL AS grid_size";
     var logGridSelect = projectColumns.Contains("log_grid")
         ? "p.log_grid"
         : "NULL AS log_grid";
@@ -16194,6 +16255,7 @@ private async Task<List<object>> GetProjectsFallbackAsync(
             band = ReadDb("band"),
             earfcn = ReadDb("earfcn"),
             apps = ReadDb("apps"),
+            grid_size = ReadDb("grid_size"),
             log_grid = ReadDb("log_grid"),
             sitesize = ReadDb("sitesize"),
             l3 = Convert.ToBoolean(ReadDb("l3") ?? false, CultureInfo.InvariantCulture),

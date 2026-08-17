@@ -590,8 +590,103 @@ namespace SignalTracker.Controllers
         }
 
         // =====================================================================
+        // POST api/GridAnalytics/SetProjectGridSize
+        // Saves the Unified Map grid size preference to tbl_project.grid_size
+        // =====================================================================
+        [HttpPost("SetProjectGridSize")]
+        public async Task<IActionResult> SetProjectGridSize(
+            [FromQuery] int projectId,
+            [FromQuery] double gridSize,
+            [FromQuery] int? company_id = null)
+        {
+            int targetCompanyId = _userScope.GetTargetCompanyId(User, company_id);
+            bool isSuperAdmin = _userScope.IsSuperAdmin(User);
+            if (!isSuperAdmin && targetCompanyId == 0)
+                return Unauthorized(new { Status = 0, Message = "Unauthorized. Unable to resolve company context." });
+
+            if (projectId <= 0)
+                return BadRequest(new { Status = 0, Message = "Invalid projectId." });
+
+            if (double.IsNaN(gridSize) || double.IsInfinity(gridSize) || gridSize <= 0)
+                return BadRequest(new { Status = 0, Message = "gridSize must be a positive number." });
+
+            try
+            {
+                var conn = _db.Database.GetDbConnection();
+                bool shouldClose = false;
+                if (conn.State != ConnectionState.Open)
+                {
+                    await conn.OpenAsync();
+                    shouldClose = true;
+                }
+
+                try
+                {
+                    // Ensure the grid_size column exists (safe for older deployments).
+                    await using (var cmdCheck = conn.CreateCommand())
+                    {
+                        cmdCheck.CommandText = @"
+                            SELECT COUNT(1)
+                            FROM information_schema.columns
+                            WHERE table_schema = DATABASE()
+                              AND table_name   = 'tbl_project'
+                              AND column_name  = 'grid_size';";
+                        var exists = Convert.ToInt32(await cmdCheck.ExecuteScalarAsync() ?? 0);
+                        if (exists == 0)
+                        {
+                            await using var cmdAlter = conn.CreateCommand();
+                            cmdAlter.CommandText = "ALTER TABLE tbl_project ADD COLUMN grid_size VARCHAR(50) NULL;";
+                            await cmdAlter.ExecuteNonQueryAsync();
+                        }
+                    }
+
+                    // Security: verify project belongs to company.
+                    if (targetCompanyId > 0)
+                    {
+                        await using var cmdAcc = conn.CreateCommand();
+                        cmdAcc.CommandText = "SELECT COUNT(1) FROM tbl_project WHERE id = @pid AND company_id = @cid";
+                        AddParam(cmdAcc, "@pid", projectId);
+                        AddParam(cmdAcc, "@cid", targetCompanyId);
+                        var accRes = await cmdAcc.ExecuteScalarAsync();
+                        if (accRes == null || Convert.ToInt32(accRes) == 0)
+                            return Unauthorized(new { Status = 0, Message = "Project does not belong to your company." });
+                    }
+
+                    // Update tbl_project.grid_size.
+                    await using (var cmdUpdate = conn.CreateCommand())
+                    {
+                        cmdUpdate.CommandText = "UPDATE tbl_project SET grid_size = @val WHERE id = @pid";
+                        AddParam(cmdUpdate, "@val", gridSize.ToString(CultureInfo.InvariantCulture));
+                        AddParam(cmdUpdate, "@pid", projectId);
+                        await cmdUpdate.ExecuteNonQueryAsync();
+                    }
+                }
+                finally
+                {
+                    if (shouldClose && conn.State == ConnectionState.Open)
+                        await conn.CloseAsync();
+                }
+
+                return Ok(new
+                {
+                    Status = 1,
+                    Message = "Project grid size updated.",
+                    Data = new
+                    {
+                        project_id = projectId,
+                        grid_size_meters = gridSize
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { Status = 0, Message = "Error: " + SafeException.Get(ex) });
+            }
+        }
+
+        // =====================================================================
         // POST api/GridAnalytics/SetProjectLogGrid
-        // Saves the log (drive-test) grid size preference to tbl_project.log_grid
+        // Saves the log Grid View size preference to tbl_project.log_grid
         // =====================================================================
         [HttpPost("SetProjectLogGrid")]
         public async Task<IActionResult> SetProjectLogGrid(
@@ -622,7 +717,6 @@ namespace SignalTracker.Controllers
 
                 try
                 {
-                    // Ensure the log_grid column exists (safe for older deployments).
                     await using (var cmdCheck = conn.CreateCommand())
                     {
                         cmdCheck.CommandText = @"
@@ -640,7 +734,6 @@ namespace SignalTracker.Controllers
                         }
                     }
 
-                    // Security: verify project belongs to company.
                     if (targetCompanyId > 0)
                     {
                         await using var cmdAcc = conn.CreateCommand();
@@ -652,7 +745,6 @@ namespace SignalTracker.Controllers
                             return Unauthorized(new { Status = 0, Message = "Project does not belong to your company." });
                     }
 
-                    // Update tbl_project.log_grid.
                     await using (var cmdUpdate = conn.CreateCommand())
                     {
                         cmdUpdate.CommandText = "UPDATE tbl_project SET log_grid = @val WHERE id = @pid";
@@ -2274,6 +2366,3 @@ WHERE spo.tbl_project_id = @pid{scenarioFilterClause};";
         }
     }
 }
-
-
-

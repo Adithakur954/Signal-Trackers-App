@@ -43,48 +43,6 @@ internal class Program
             $"Set 'ConnectionStrings:{name}' in configuration or environment variable 'ConnectionStrings__{name}'.");
     }
 
-    private static void DropProjectGridSizeColumn(WebApplication app)
-    {
-        try
-        {
-            using var scope = app.Services.CreateScope();
-            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
-            var conn = db.Database.GetDbConnection();
-            var shouldClose = conn.State != ConnectionState.Open;
-            if (shouldClose)
-                conn.Open();
-
-            try
-            {
-                using var exists = conn.CreateCommand();
-                exists.CommandText = @"
-                    SELECT COUNT(*)
-                    FROM information_schema.columns
-                    WHERE table_schema = DATABASE()
-                      AND table_name = 'tbl_project'
-                      AND column_name = 'grid_size';";
-
-                var count = Convert.ToInt32(exists.ExecuteScalar());
-                if (count <= 0)
-                    return;
-
-                using var drop = conn.CreateCommand();
-                drop.CommandText = "ALTER TABLE tbl_project DROP COLUMN grid_size;";
-                drop.ExecuteNonQuery();
-                Console.WriteLine("Dropped removed column tbl_project.grid_size.");
-            }
-            finally
-            {
-                if (shouldClose)
-                    conn.Close();
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Could not drop column tbl_project.grid_size: {ex.Message}");
-        }
-    }
-
     private static void EnsureSitePredictionColorColumnExists(WebApplication app)
     {
         try
@@ -464,7 +422,6 @@ internal class Program
         // BUILD APP
         // ----------------------------------------------------
         var app = builder.Build();
-        DropProjectGridSizeColumn(app);
         EnsureSitePredictionColorColumnExists(app);
         EnsureUploadHistoryOriginalFileNameColumnExists(app);
         DropRemovedSitePredictionColumns(app);
