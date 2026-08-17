@@ -338,6 +338,32 @@ namespace SignalTracker.Services
                    normalized.Equals("-1", StringComparison.OrdinalIgnoreCase);
         }
 
+        // Same idea as IsMissingBandValue above, but band never had a PCI
+        // counterpart: tbl_network_log.pci can itself contain the literal
+        // placeholder text "N/A" (device captured no serving-cell PCI for
+        // that sample) rather than a real SQL NULL, and GetDriveTestRows
+        // passed that string straight through unchanged. Every consumer of
+        // this endpoint (the Python report pipeline included) then had no
+        // way to distinguish a genuine PCI reading from this placeholder,
+        // so it rendered as its own fake category (e.g. a PCI map legend
+        // entry "N/A : 6727" sitting next to real PCI numbers). Fixed here,
+        // at the actual source, instead of downstream in each consumer.
+        private static bool IsMissingPciValue(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return true;
+            }
+
+            var normalized = value.Trim();
+            return normalized.Equals("NA", StringComparison.OrdinalIgnoreCase) ||
+                   normalized.Equals("N/A", StringComparison.OrdinalIgnoreCase) ||
+                   normalized.Equals("NULL", StringComparison.OrdinalIgnoreCase) ||
+                   normalized.Equals("UNKNOWN", StringComparison.OrdinalIgnoreCase) ||
+                   normalized.Equals("UNDEFINED", StringComparison.OrdinalIgnoreCase) ||
+                   normalized.Equals("-1", StringComparison.OrdinalIgnoreCase);
+        }
+
         private static string CleanBandValue(string? value)
         {
             var text = (value ?? string.Empty).Trim().Trim('"', '\'');
@@ -472,6 +498,15 @@ namespace SignalTracker.Services
 
                 row["band"] = CleanBandValue(band);
                 row["technology"] = GetDriveTestTechnology(network, band, primaryCellInfo, neighbourCellInfo);
+
+                // Sent as null (not empty string) so it round-trips as a real
+                // missing value on the Python side (pandas NaN), not a fake
+                // "" category -- see IsMissingPciValue's comment above.
+                if (IsMissingPciValue(ReadRowString(row, "pci")))
+                {
+                    row["pci"] = null;
+                }
+
                 row.Remove("__primary_cell_info_1");
                 row.Remove("__all_neigbor_cell_info");
             }
