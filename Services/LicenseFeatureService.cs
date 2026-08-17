@@ -21,6 +21,8 @@ namespace SignalTracker.Services
             FeatureRunPrediction,
             FeatureGridFetch
         };
+        private static readonly SemaphoreSlim EnsureTableGate = new(1, 1);
+        private static volatile bool _tableEnsured;
 
         private static readonly Dictionary<string, string> FeatureAliases = new(StringComparer.OrdinalIgnoreCase)
         {
@@ -309,6 +311,15 @@ LIMIT 1;";
 
         private static async Task EnsureTableAsync(DbConnection conn, CancellationToken ct)
         {
+            if (_tableEnsured)
+                return;
+
+            await EnsureTableGate.WaitAsync(ct);
+            try
+            {
+                if (_tableEnsured)
+                    return;
+
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = @"
 CREATE TABLE IF NOT EXISTS license_feature_access (
@@ -320,6 +331,12 @@ CREATE TABLE IF NOT EXISTS license_feature_access (
     INDEX idx_license_feature_access_license (license_id)
 );";
             await cmd.ExecuteNonQueryAsync(ct);
+                _tableEnsured = true;
+            }
+            finally
+            {
+                EnsureTableGate.Release();
+            }
         }
 
         private sealed class FeatureAccessSnapshot
