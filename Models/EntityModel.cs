@@ -975,6 +975,7 @@ public class IndoorOutdoorLogDto
         public int? created_by_user_id { get; set; }
         public string? created_by_user_name { get; set; }
         public int status { get; set; }
+        [NotMapped]
         public string? grid_size { get; set; }
         public string? log_grid { get; set; }
     }
