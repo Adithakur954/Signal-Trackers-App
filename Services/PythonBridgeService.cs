@@ -22,6 +22,7 @@ namespace SignalTracker.Services
         private readonly ApplicationDbContext _db;
         private readonly IConfiguration _configuration;
         private readonly RedisService _redisService;
+        private readonly NetworkLogDataService _networkLogData;
         private readonly ILogger<PythonBridgeService> _logger;
 
         private sealed class BridgeRowsCacheEntry
@@ -35,11 +36,13 @@ namespace SignalTracker.Services
             ApplicationDbContext db,
             IConfiguration configuration,
             RedisService redisService,
+            NetworkLogDataService networkLogData,
             ILogger<PythonBridgeService> logger)
         {
             _db = db;
             _configuration = configuration;
             _redisService = redisService;
+            _networkLogData = networkLogData;
             _logger = logger;
         }
 
@@ -2857,36 +2860,24 @@ namespace SignalTracker.Services
             }
 
             await using var command = conn.CreateCommand();
-            var inClause = PythonBridgeDbTool.BuildInClause(command, sessionIds, "sid");
-            var whereParts = new List<string>
+            var provider = _networkLogData.NormalizeProvider(request.Provider);
+            var endDate = request.EndDate?.Date;
+            var filter = _networkLogData.BuildNetworkLogSqlWhere(
+                sessionIds,
+                provider,
+                null,
+                request.StartDate,
+                endDate
+            );
+            foreach (var parameter in filter.Params)
             {
-                $"session_id IN ({inClause})",
-                "primary_cell_info_1 IS NOT NULL",
-                "TRIM(primary_cell_info_1) <> ''"
-            };
-
-            if (!string.IsNullOrWhiteSpace(request.Provider))
-            {
-                whereParts.Add("COALESCE(NULLIF(TRIM(m_alpha_short), ''), NULLIF(TRIM(m_alpha_long), '')) LIKE @provider");
-                PythonBridgeDbTool.AddParam(command, "@provider", $"%{request.Provider.Trim()}%");
-            }
-
-            if (request.StartDate.HasValue)
-            {
-                whereParts.Add("timestamp >= @startDate");
-                PythonBridgeDbTool.AddParam(command, "@startDate", request.StartDate.Value);
-            }
-
-            if (request.EndDate.HasValue)
-            {
-                whereParts.Add("timestamp < @endDate");
-                PythonBridgeDbTool.AddParam(command, "@endDate", request.EndDate.Value.Date.AddDays(1));
+                _networkLogData.Add(command, parameter.Key, parameter.Value);
             }
 
             command.CommandText = $@"
                 SELECT *
                 FROM tbl_network_log
-                WHERE {string.Join(" AND ", whereParts)}
+                WHERE {filter.Clause}
                 ORDER BY session_id, timestamp, id
                 LIMIT @lim OFFSET @off;";
             PythonBridgeDbTool.AddParam(command, "@lim", limit);
