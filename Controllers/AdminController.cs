@@ -57,6 +57,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
 
         // common timeout for heavy LINQ queries (AvgRsrpV2, AvgRsrqV2, etc.)
         private const int HeavyQueryTimeoutSeconds = 180;
+        private const int DashboardCacheTtlSeconds = 86400;
 
         public AdminController(ApplicationDbContext context, IHttpContextAccessor httpContextAccessor, IMemoryCache cache, RedisService redis, UserScopeService userScope)
 
@@ -4395,7 +4396,7 @@ public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
             totalSamples,
             totalUsers
         };
-    }, cacheKey, ttlSeconds: 60); // Short TTL (1 min) as online status changes fast
+    }, cacheKey, ttlSeconds: DashboardCacheTtlSeconds);
 }
         [HttpGet, Route("GetNetworkDurations")]
         public async Task<IActionResult> GetNetworkDurations(
@@ -4512,7 +4513,7 @@ public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
                     });
                 }
 
-                await CacheObjectAsync(cacheKey, result, 300);
+                await CacheObjectAsync(cacheKey, result, DashboardCacheTtlSeconds);
 
                 return Ok(new
                 {
@@ -4680,7 +4681,7 @@ public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
                 .Take(5000)
                 .ToListAsync();
 
-            await CacheObjectAsync(cacheKey, data.Select(x => (object)x).ToList(), 300);
+            await CacheObjectAsync(cacheKey, data.Select(x => (object)x).ToList(), DashboardCacheTtlSeconds);
 
             // =====================================
             // 5? Final response
@@ -4961,10 +4962,10 @@ public async Task<IActionResult> MonthlySamplesV2(
             })
             .ToList<object>();
 
-        // 6. Save result to Redis with a 10-minute TTL
+        // 6. Save result to Redis
         if (_redis != null && _redis.IsConnected && result.Any())
         {
-            await _redis.SetObjectAsync(cacheKey, result, ttlSeconds: 600);
+            await _redis.SetObjectAsync(cacheKey, result, ttlSeconds: DashboardCacheTtlSeconds);
         }
 
         return Ok(new { Status = 1, Source = "DATABASE", Data = result });
@@ -5141,13 +5142,13 @@ GROUP BY provider, tech;
                     CachedAt = DateTime.UtcNow
                 };
 
-                // Cache the response (5 minutes TTL)
+                // Cache the response.
                 if (_redis != null && _redis.IsConnected)
                 {
                     try
                     {
                         var cacheWriteStopwatch = System.Diagnostics.Stopwatch.StartNew();
-                        await _redis.SetObjectAsync(cacheKey, response, ttlSeconds: 300);
+                        await _redis.SetObjectAsync(cacheKey, response, ttlSeconds: DashboardCacheTtlSeconds);
                         cacheWriteStopwatch.Stop();
 
                         Console.WriteLine($" Cached: {cacheKey} (TTL: 300s)");
@@ -5466,7 +5467,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
             // =========================================================
             if (_redis != null && _redis.IsConnected)
             {
-                await _redis.SetObjectAsync(cacheKey, result, ttlSeconds: 600);
+                await _redis.SetObjectAsync(cacheKey, result, ttlSeconds: DashboardCacheTtlSeconds);
             }
 
             totalSw.Stop();
@@ -5664,7 +5665,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
             // =========================================================
             if (_redis != null && _redis.IsConnected)
             {
-                await _redis.SetObjectAsync(cacheKey, result, ttlSeconds: 600);
+                await _redis.SetObjectAsync(cacheKey, result, ttlSeconds: DashboardCacheTtlSeconds);
             }
 
             return Ok(new { Status = 1, Source = "DATABASE", Data = result });
@@ -5825,7 +5826,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
             // =========================================================
             if (_redis != null && _redis.IsConnected)
             {
-                await _redis.SetObjectAsync(cacheKey, result, ttlSeconds: 600);
+                await _redis.SetObjectAsync(cacheKey, result, ttlSeconds: DashboardCacheTtlSeconds);
             }
 
             return Ok(new { Status = 1, Source = "DATABASE", Data = result });
@@ -5974,7 +5975,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
                     // 6. SAVE TO REDIS
                     if (_redis != null && _redis.IsConnected)
                     {
-                        await _redis.SetObjectAsync(cacheKey, result, ttlSeconds: 600);
+                        await _redis.SetObjectAsync(cacheKey, result, ttlSeconds: DashboardCacheTtlSeconds);
                     }
 
                     return Ok(new { Status = 1, Source = "DATABASE", Data = result });
@@ -6186,7 +6187,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
             // =========================================================
             if (_redis != null && _redis.IsConnected)
             {
-                await _redis.SetObjectAsync(cacheKey, result, ttlSeconds: 600);
+                await _redis.SetObjectAsync(cacheKey, result, ttlSeconds: DashboardCacheTtlSeconds);
             }
 
             return Ok(new { Status = 1, Source = "DATABASE", Data = result });
@@ -6320,7 +6321,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
                 // =========================================================
                 if (_redis != null && _redis.IsConnected)
                 {
-                    await _redis.SetObjectAsync(cacheKey, result, ttlSeconds: 600); // 10 min cache
+                    await _redis.SetObjectAsync(cacheKey, result, ttlSeconds: DashboardCacheTtlSeconds);
                 }
 
                 return Ok(new { Status = 1, Source = "DATABASE", Data = result });
@@ -6493,7 +6494,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
             // =====================================================
             if (_redis != null && _redis.IsConnected)
             {
-                await _redis.SetObjectAsync(cacheKey, result, ttlSeconds: 600);
+                await _redis.SetObjectAsync(cacheKey, result, ttlSeconds: DashboardCacheTtlSeconds);
             }
 
             sw.Stop();
@@ -6735,7 +6736,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
             // =====================================================
             if (_redis != null && _redis.IsConnected)
             {
-                await _redis.SetObjectAsync(cacheKey, data, ttlSeconds: 600);
+                await _redis.SetObjectAsync(cacheKey, data, ttlSeconds: DashboardCacheTtlSeconds);
             }
 
             return Ok(new
@@ -6919,7 +6920,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
             // =========================================================
             if (_redis != null && _redis.IsConnected)
             {
-                await _redis.SetObjectAsync(cacheKey, result, ttlSeconds: 600);
+                await _redis.SetObjectAsync(cacheKey, result, ttlSeconds: DashboardCacheTtlSeconds);
             }
 
             return Ok(new { Status = 1, Source = "DATABASE", Data = result });
@@ -7030,7 +7031,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
                 // =========================================================
                 if (_redis != null && _redis.IsConnected)
                 {
-                    await _redis.SetObjectAsync(cacheKey, operators, ttlSeconds: 600); // 10 min cache
+                    await _redis.SetObjectAsync(cacheKey, operators, ttlSeconds: DashboardCacheTtlSeconds);
                 }
 
                 return Ok(new { Status = 1, Source = "DATABASE", Data = operators });
@@ -7110,7 +7111,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
                 // =========================================================
                 if (_redis != null && _redis.IsConnected)
                 {
-                    await _redis.SetObjectAsync(cacheKey, networks, ttlSeconds: 600); // 10 min cache
+                    await _redis.SetObjectAsync(cacheKey, networks, ttlSeconds: DashboardCacheTtlSeconds);
                 }
 
                 return Ok(new { Status = 1, Source = "DATABASE", Data = networks });
