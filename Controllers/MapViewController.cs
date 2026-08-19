@@ -210,7 +210,7 @@ namespace SignalTracker.Controllers
 
             try
             {
-                await _redis.DeleteByPatternAsync("mapview:projects:*");
+                await _redis.DeleteByPatternAsync("mapview:*:projects:*");
             }
             catch
             {

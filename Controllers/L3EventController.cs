@@ -186,8 +186,8 @@ namespace SignalTracker.Controllers
             var sessionId = GetJsonInt(payload, "session_id", "sessionId");
             var uploadId = GetJsonInt(payload, "tbl_upload_id", "upload_id", "uploadId");
             const string originalFileName = "L3/Event history";
-            const int l3Rows = 0;
-            const int eventRows = 0;
+            var l3Rows = await CountDiagnosticRowsAsync("tbl_l3_log", projectId, sessionId, uploadId, cancellationToken);
+            var eventRows = await CountDiagnosticRowsAsync("tbl_event_log", projectId, sessionId, uploadId, cancellationToken);
             const short status = 1;
 
             if (projectId.GetValueOrDefault() > 0)
@@ -214,6 +214,12 @@ namespace SignalTracker.Controllers
                 userId,
                 status,
                 cancellationToken);
+
+            if (projectId.GetValueOrDefault() > 0)
+            {
+                await RecalculateProjectL3EventFlagsAsync(projectId!.Value, cancellationToken);
+                await InvalidateProjectListCachesAsync();
+            }
 
             return Ok(new
             {
@@ -398,6 +404,7 @@ namespace SignalTracker.Controllers
                         }
 
                         await tx.CommitAsync(cancellationToken);
+                        await InvalidateProjectListCachesAsync();
 
                         return Ok(new
                         {
@@ -577,6 +584,7 @@ namespace SignalTracker.Controllers
                         await RecalculateProjectL3EventFlagsAsync(nextProjectId.Value, cancellationToken);
 
                     await tx.CommitAsync(cancellationToken);
+                    await InvalidateProjectListCachesAsync();
 
                     return Ok(new
                     {
@@ -728,6 +736,7 @@ namespace SignalTracker.Controllers
                     }
 
                     await tx.CommitAsync(cancellationToken);
+                    await InvalidateProjectListCachesAsync();
                     return Ok(new
                     {
                         status = 1,
@@ -1275,6 +1284,58 @@ namespace SignalTracker.Controllers
                 ("@projectId", projectId));
         }
 
+        private async Task<int> CountDiagnosticRowsAsync(
+            string tableName,
+            int? projectId,
+            int? sessionId,
+            int? uploadId,
+            CancellationToken cancellationToken)
+        {
+            if (uploadId.GetValueOrDefault() > 0)
+            {
+                return Convert.ToInt32(await ExecuteScalarAsync(
+                    $"SELECT COUNT(*) FROM {tableName} WHERE tbl_upload_id = @uploadId;",
+                    cancellationToken,
+                    ("@uploadId", uploadId!.Value)), CultureInfo.InvariantCulture);
+            }
+
+            if (sessionId.GetValueOrDefault() > 0)
+            {
+                return Convert.ToInt32(await ExecuteScalarAsync(
+                    $"SELECT COUNT(*) FROM {tableName} WHERE session_id = @sessionId;",
+                    cancellationToken,
+                    ("@sessionId", sessionId!.Value)), CultureInfo.InvariantCulture);
+            }
+
+            if (projectId.GetValueOrDefault() > 0)
+            {
+                var historyColumn = tableName.Equals("tbl_l3_log", StringComparison.OrdinalIgnoreCase)
+                    ? "l3_rows"
+                    : "events_rows";
+                return Convert.ToInt32(await ExecuteScalarAsync(
+                    $"SELECT COALESCE(SUM({historyColumn}), 0) FROM tbl_l3_event_history WHERE project_id = @projectId;",
+                    cancellationToken,
+                    ("@projectId", projectId!.Value)), CultureInfo.InvariantCulture);
+            }
+
+            return 0;
+        }
+
+        private async Task InvalidateProjectListCachesAsync()
+        {
+            if (_redis?.IsConnected != true)
+                return;
+
+            try
+            {
+                await _redis.DeleteByPatternAsync("mapview:*:projects:*");
+            }
+            catch
+            {
+                // Best effort only.
+            }
+        }
+
         private Task UpdateUploadHistoryOriginalFileNameAsync(int uploadId, string fileName, CancellationToken cancellationToken)
         {
             return ExecuteNonQueryAsync(
@@ -1525,6 +1586,7 @@ namespace SignalTracker.Controllers
                 await UpdateSessionL3EventFlagsAsync(sessionId.Value, l3Rows > 0, eventRows > 0, cancellationToken);
 
             await CreateMapViewController().PersistDiagnosticCallSummaryAsync(sessionId.GetValueOrDefault(), existingHistoryId, uploadId, cancellationToken);
+            await InvalidateProjectListCachesAsync();
         }
 
         private async Task<int?> ResolveSessionIdForUploadAsync(int uploadId, CancellationToken cancellationToken)
