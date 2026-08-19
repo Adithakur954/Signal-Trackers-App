@@ -28,6 +28,7 @@ namespace SignalTracker.Controllers
         private readonly RedisService _redis;
         private readonly UserScopeService _userScope;
         private readonly IDbConnectionProvider _connectionProvider;
+        private readonly NetworkLogDataService _networkLogData;
         private const int DiagnosticInsertBatchSize = 200;
 
         public L3EventController(
@@ -36,7 +37,8 @@ namespace SignalTracker.Controllers
             IWebHostEnvironment env,
             RedisService redis,
             UserScopeService userScope,
-            IDbConnectionProvider connectionProvider)
+            IDbConnectionProvider connectionProvider,
+            NetworkLogDataService networkLogData)
         {
             _context = context;
             _httpContextAccessor = httpContextAccessor;
@@ -44,6 +46,7 @@ namespace SignalTracker.Controllers
             _redis = redis;
             _userScope = userScope;
             _connectionProvider = connectionProvider;
+            _networkLogData = networkLogData;
         }
 
         [HttpGet("GetDiagnosticCallSummary")]
@@ -745,7 +748,7 @@ namespace SignalTracker.Controllers
 
         private MapViewController CreateMapViewController()
         {
-            return new MapViewController(_context, _httpContextAccessor, _env, _redis, _userScope, _connectionProvider)
+            return new MapViewController(_context, _httpContextAccessor, _env, _redis, _userScope, _connectionProvider, _networkLogData)
             {
                 ControllerContext = ControllerContext
             };

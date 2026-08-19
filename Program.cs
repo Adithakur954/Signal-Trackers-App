@@ -206,6 +206,7 @@ internal class Program
         builder.Services.AddScoped<LicenseFeatureService>();
         builder.Services.AddScoped<PythonBridgeService>();
         builder.Services.AddScoped<SitePredictionService>();
+        builder.Services.AddScoped<NetworkLogDataService>();
         builder.Services.AddScoped<ZipImportService>();
         builder.Services.AddScoped<IOtpService, OtpService>();
         builder.Services.AddScoped<IUserDeletionService, UserDeletionService>();

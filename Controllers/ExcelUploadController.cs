@@ -350,13 +350,15 @@ namespace SignalTracker.Controllers
                 {
                     var scopedUserScope = scope.ServiceProvider.GetRequiredService<UserScopeService>();
                     var scopedConnectionProvider = scope.ServiceProvider.GetRequiredService<IDbConnectionProvider>();
+                    var scopedNetworkLogData = scope.ServiceProvider.GetRequiredService<NetworkLogDataService>();
                     var l3EventController = new L3EventController(
                         scopedDb,
                         httpContextAccessor,
                         _env,
                         redis,
                         scopedUserScope,
-                        scopedConnectionProvider);
+                        scopedConnectionProvider,
+                        scopedNetworkLogData);
                     await l3EventController.RegisterCompletedUploadAsync(
                         uploadHistoryId,
                         originalFileName,

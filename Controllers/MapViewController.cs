@@ -41,6 +41,7 @@ namespace SignalTracker.Controllers
         private readonly RedisService _redis;
         private readonly UserScopeService _userScope;
         private readonly IDbConnectionProvider _connectionProvider;
+        private readonly NetworkLogDataService _networkLogData;
         private const int MapViewCacheTtlSeconds = 300;
         private static volatile bool NetworkLogUpdatedAtColumnEnsured;
         private static volatile bool ObsoleteNetworkLogCachesInvalidated;
@@ -61,7 +62,7 @@ namespace SignalTracker.Controllers
             "daterangelog:*"
         };
 
-        public MapViewController(ApplicationDbContext context, IHttpContextAccessor httpContextAccessor, IWebHostEnvironment env, RedisService redis,UserScopeService userScope, IDbConnectionProvider connectionProvider)
+        public MapViewController(ApplicationDbContext context, IHttpContextAccessor httpContextAccessor, IWebHostEnvironment env, RedisService redis,UserScopeService userScope, IDbConnectionProvider connectionProvider, NetworkLogDataService networkLogData)
         {
             db = context;
             _env = env;
@@ -69,6 +70,7 @@ namespace SignalTracker.Controllers
             _redis = redis;
             _userScope = userScope;
             _connectionProvider = connectionProvider;
+            _networkLogData = networkLogData;
         }
 
         private string BuildMapViewCacheKey(string endpoint, params object?[] parts)
@@ -6167,10 +6169,15 @@ public class MapFilter1
     public int? cursor_id { get; set; }
     public bool include_summary { get; set; } = true;
 
+    public string? GetRawSessionIds()
+    {
+        return new[] { session_ids, sessionIds, GetExtensionString("session_Ids"), sessionId }
+            .FirstOrDefault(v => !string.IsNullOrWhiteSpace(v));
+    }
+
     public List<long> GetSessionIds()
     {
-        var raw = new[] { session_ids, sessionIds, GetExtensionString("session_Ids"), sessionId }
-            .FirstOrDefault(v => !string.IsNullOrWhiteSpace(v));
+        var raw = GetRawSessionIds();
 
         if (string.IsNullOrWhiteSpace(raw))
             return new List<long>();
@@ -6204,7 +6211,8 @@ public Task<JsonResult> GetNetworkLogPost([FromBody] MapFilter1 filters)
 private async Task<JsonResult> GetNetworkLogCore(MapFilter1 filters)
 {
     var totalStopwatch = Stopwatch.StartNew();
-    var sessionIds = filters?.GetSessionIds() ?? new List<long>();
+    var sessionIds = _networkLogData.ParseSessionIds(filters?.GetRawSessionIds())
+        .ToList();
 
     if (sessionIds.Count == 0)
         return Json(new { message = "No valid session IDs provided", data = new List<object>() });
@@ -7064,98 +7072,12 @@ private async Task<(string Clause, Dictionary<string, object> Params)> BuildSqlW
 private (string Clause, Dictionary<string, object> Params) BuildSqlWhere(
     List<long> ids, string provider, MapFilter1 filters)
 {
-    var p = new Dictionary<string, object>();
-    
-    // ORDER MATTERS FOR INDEX USE: Filter by ID first!
-    var idParams = new List<string>();
-    for(int i=0; i<ids.Count; i++) { 
-        string pname = $"@sid{i}"; 
-        idParams.Add(pname); 
-        p.Add(pname, ids[i]); 
-    }
-    
-    var clauses = new List<string>();
-    if (idParams.Any()) clauses.Add($"session_id IN ({string.Join(",", idParams)})");
-    else clauses.Add("1 = 0"); 
-    clauses.Add("UPPER(TRIM(COALESCE(band, ''))) <> 'UNKNOWN'");
-    clauses.Add("primary_cell_info_1 IS NOT NULL AND TRIM(primary_cell_info_1) <> ''");
-    // clauses.Add(@"(
-    //     COALESCE(
-    //         NULLIF(TRIM(m_alpha_short), ''),
-    //         NULLIF(TRIM(m_alpha_long), '')
-    //     ) IS NOT NULL
-    //     OR UPPER(TRIM(COALESCE(network, ''))) LIKE '%5G%'
-    // )");
-    clauses.Add(@"(
-        NULLIF(TRIM(band), '') IS NOT NULL
-        OR UPPER(TRIM(COALESCE(network, ''))) LIKE '%5G%'
-    )");
-
-    // Move Wildcard search to the end so it runs on smaller dataset
-    if(!string.IsNullOrEmpty(provider)) {
-        clauses.Add("COALESCE(NULLIF(TRIM(m_alpha_short), ''), m_alpha_long) LIKE @prov");
-        p.Add("@prov", $"%{provider}%");
-    }
-
-    const string wifiPredicate = @"(
-        primary_cell_info_1 LIKE 'SSID:%'
-        OR primary_cell_info_1 LIKE '%BSSID:%'
-        OR EXISTS (
-            SELECT 1
-            FROM tbl_session s
-            WHERE s.id = session_id
-              AND LOWER(COALESCE(s.type, '')) = 'wifi'
-        )
-    )";
-    const string registeredCellPredicate = "primary_cell_info_1 LIKE '%mRegistered=YES%'";
-    const string fiveGCellPredicate = @"(
-        UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''), COALESCE(primary_cell_info_1, ''), COALESCE(all_neigbor_cell_info, ''))) LIKE '%5G%'
-        OR UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''), COALESCE(primary_cell_info_1, ''), COALESCE(all_neigbor_cell_info, ''))) LIKE '%NRARFCN%'
-        OR UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''), COALESCE(primary_cell_info_1, ''), COALESCE(all_neigbor_cell_info, ''))) LIKE '%MNR%'
-        OR UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''), COALESCE(primary_cell_info_1, ''), COALESCE(all_neigbor_cell_info, ''))) LIKE '%NCI%'
-        OR UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''), COALESCE(primary_cell_info_1, ''), COALESCE(all_neigbor_cell_info, ''))) REGEXP '(^|[^A-Z0-9])NR([^A-Z0-9]|$)'
-        OR UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''), COALESCE(primary_cell_info_1, ''), COALESCE(all_neigbor_cell_info, ''))) REGEXP '(^|[^A-Z0-9])N[0-9]{1,3}([^A-Z0-9]|$)'
-    )";
-
-    if (!string.IsNullOrWhiteSpace(filters?.NetworkType) &&
-        !filters.NetworkType.Equals("All", StringComparison.OrdinalIgnoreCase))
-    {
-        var networkType = filters.NetworkType.Trim();
-        if (networkType.Equals("wifi", StringComparison.OrdinalIgnoreCase) ||
-            networkType.Equals("wi-fi", StringComparison.OrdinalIgnoreCase))
-        {
-            clauses.Add(wifiPredicate);
-        }
-        else
-        {
-            if (networkType.Equals("5g", StringComparison.OrdinalIgnoreCase) ||
-                networkType.Equals("5g nsa", StringComparison.OrdinalIgnoreCase) ||
-                networkType.Equals("nr", StringComparison.OrdinalIgnoreCase))
-            {
-                clauses.Add(fiveGCellPredicate);
-            }
-            else
-            {
-                clauses.Add("network IS NOT NULL AND network LIKE @networkType");
-                p.Add("@networkType", $"%{networkType}%");
-                clauses.Add(registeredCellPredicate);
-            }
-        }
-    }
-    else
-    {
-        clauses.Add($"({registeredCellPredicate} OR {wifiPredicate} OR {fiveGCellPredicate})");
-    }
-
-    if(filters.StartDate.HasValue) {
-        clauses.Add("timestamp >= @from");
-        p.Add("@from", filters.StartDate);
-    }
-    if(filters.EndDate.HasValue) {
-        clauses.Add("timestamp < @to");
-        p.Add("@to", filters.EndDate.Value.AddDays(1));
-    }
-    return (string.Join(" AND ", clauses), p);
+    return _networkLogData.BuildNetworkLogSqlWhere(
+        ids,
+        provider,
+        filters?.NetworkType,
+        filters?.StartDate,
+        filters?.EndDate);
 }
 
 // Data Transfer Objects
@@ -7281,7 +7203,7 @@ private string BuildNetworkLogCacheKey(
     long? projectId = null,
     string dataVersion = "noversion")
 {
-    var sortedSessionIds = string.Join("-", sessionIds.OrderBy(x => x));
+    var sortedSessionIds = _networkLogData.BuildSessionIdsCachePart(sessionIds);
     string providerKey = provider ?? "all";
     string networkTypeKey = NormalizeCacheKeyPart(string.IsNullOrWhiteSpace(networkType) ? "all" : networkType);
     string fromKey = from?.ToString("yyyyMMdd") ?? "null";
@@ -9513,12 +9435,7 @@ public async Task<JsonResult> GetProviderWiseVolume([FromQuery] MapFilter filter
     if (string.IsNullOrWhiteSpace(sessionIdsParam))
         return Json(new { status = 0, message = "Invalid session_id" });
 
-    var sessionIds = sessionIdsParam
-        .Split(',')
-        .Select(s => s.Trim())
-        .Where(s => int.TryParse(s, out _))
-        .Select(int.Parse)
-        .ToList();
+    var sessionIds = _networkLogData.ParseSessionIds(sessionIdsParam).ToList();
 
     if (!sessionIds.Any())
         return Json(new { status = 0, message = "Invalid session_id" });
@@ -9542,36 +9459,19 @@ public async Task<JsonResult> GetProviderWiseVolume([FromQuery] MapFilter filter
         // -----------------------------
         // Date Filters
         // -----------------------------
-        object fromParam = filters.StartDate.HasValue
-            ? filters.StartDate.Value
-            : DBNull.Value;
-
-        object toParam = filters.EndDate.HasValue
-            ? filters.EndDate.Value.AddDays(1)
-            : DBNull.Value;
+        object fromParam = _networkLogData.ToInclusiveFrom(filters.StartDate);
+        object toParam = _networkLogData.ToExclusiveTo(filters.EndDate);
 
         // -----------------------------
         // Provider Filter
         // -----------------------------
-        string providerNormalized = null;
-        if (!string.IsNullOrEmpty(filters.NetworkType) &&
-            !filters.NetworkType.Equals("ALL", StringComparison.OrdinalIgnoreCase))
-        {
-            var p = filters.NetworkType.ToLower();
-            if (p.StartsWith("j")) providerNormalized = "jio";
-            else if (p.StartsWith("a")) providerNormalized = "airtel";
-            else if (p.StartsWith("v")) providerNormalized = "vodafone";
-        }
-
-        object providerParam = providerNormalized == null
-            ? DBNull.Value
-            : $"%{providerNormalized}%";
+        string providerNormalized = _networkLogData.NormalizeProvider(filters.NetworkType);
+        object providerParam = _networkLogData.ToProviderLikeParameter(providerNormalized);
 
         // -----------------------------
         // Session IDs placeholders
         // -----------------------------
-        string sessionIdsPlaceholder =
-            string.Join(",", sessionIds.Select((_, i) => $"@sid{i}"));
+        string sessionIdsPlaceholder = _networkLogData.BuildSessionIdPlaceholders(sessionIds);
 
         // -----------------------------
         // FINAL SQL
@@ -9811,12 +9711,10 @@ GROUP BY rl.session_id, rl.provider, rl.tech;
         using var cmd = conn.CreateCommand();
         cmd.CommandText = sql;
 
-        for (int i = 0; i < sessionIds.Count; i++)
-            Add(cmd, $"@sid{i}", sessionIds[i]);
-
-        Add(cmd, "@from", fromParam);
-        Add(cmd, "@to", toParam);
-        Add(cmd, "@provider", providerParam);
+        _networkLogData.AddSessionIdParameters(cmd, sessionIds);
+        _networkLogData.Add(cmd, "@from", fromParam);
+        _networkLogData.Add(cmd, "@to", toParam);
+        _networkLogData.Add(cmd, "@provider", providerParam);
 
         using var rd = await cmd.ExecuteReaderAsync();
         while (await rd.ReadAsync())
