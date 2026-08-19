@@ -4313,6 +4313,14 @@ public async Task<IActionResult> GetSessions(
                 .ToList();
         }
 
+private sealed class DashboardTotalsV2Data
+{
+    public int totalSessions { get; set; }
+    public int totalOnlineSessions { get; set; }
+    public int totalSamples { get; set; }
+    public int totalUsers { get; set; }
+}
+
        [HttpGet("TotalsV2")]
 public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
 {
@@ -4336,26 +4344,9 @@ public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
     // Cache must be isolated per company so Company A doesn't see Company B's totals.
     string cacheKey = $"DashboardTotalsV2:{GetCacheCountryScope()}:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}";
 
-    // =========================================================
-    // 3. EXECUTE SAFE QUERY HANDLER
-    // =========================================================
-    // We pass the cache key and logic to our SafeOkV2 helper (assuming it accepts these params).
-    // Note: I expanded the lambda to handle the logic explicitly here for clarity.
-    
-    return await SafeOkV2(nameof(TotalsV2), async () =>
+    try
     {
         var today = DateTime.Today;
-
-        // --- 1. Total Sessions (Filtered by Company) ---
-        // Join Session -> User to check company_id
-        var totalSessions = await (
-            from s in db.tbl_session.AsNoTracking()
-            join u in db.tbl_user.AsNoTracking() on s.user_id equals u.id
-            where useUserScope
-                ? s.user_id == currentUserId
-                : (targetCompanyId == 0 || u.company_id == targetCompanyId)
-            select s
-        ).CountAsync();
 
         // --- 2. Total Online Sessions (Filtered by Company) ---
         var totalOnlineSessions = await (
@@ -4370,33 +4361,69 @@ public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
             select s
         ).CountAsync();
 
-        // --- 3. Total Samples (Filtered by Company) ---
-        // This is the heaviest query. We must join Log -> Session -> User.
-        var totalSamples = await (
-            from n in db.tbl_network_log.AsNoTracking()
-            join s in db.tbl_session.AsNoTracking() on n.session_id equals s.id
-            join u in db.tbl_user.AsNoTracking() on s.user_id equals u.id
-            where useUserScope
-                ? s.user_id == currentUserId
-                : (targetCompanyId == 0 || u.company_id == targetCompanyId)
-            select n
-        ).CountAsync();
-
-        // --- 4. Total Users (Filtered by Company) ---
-        var totalUsers = await db.tbl_user.AsNoTracking()
-            .Where(u => useUserScope
-                ? u.id == currentUserId
-                : (targetCompanyId == 0 || u.company_id == targetCompanyId))
-            .CountAsync();
-
-        return new
+        var data = await TryGetCachedObjectAsync<DashboardTotalsV2Data>(cacheKey);
+        if (data == null)
         {
-            totalSessions,
-            totalOnlineSessions,
-            totalSamples,
-            totalUsers
-        };
-    }, cacheKey, ttlSeconds: DashboardCacheTtlSeconds);
+            // --- 1. Total Sessions (Filtered by Company) ---
+            // Join Session -> User to check company_id
+            var totalSessions = await (
+                from s in db.tbl_session.AsNoTracking()
+                join u in db.tbl_user.AsNoTracking() on s.user_id equals u.id
+                where useUserScope
+                    ? s.user_id == currentUserId
+                    : (targetCompanyId == 0 || u.company_id == targetCompanyId)
+                select s
+            ).CountAsync();
+
+            // --- 3. Total Samples (Filtered by Company) ---
+            // This is the heaviest query. We must join Log -> Session -> User.
+            var totalSamples = await (
+                from n in db.tbl_network_log.AsNoTracking()
+                join s in db.tbl_session.AsNoTracking() on n.session_id equals s.id
+                join u in db.tbl_user.AsNoTracking() on s.user_id equals u.id
+                where useUserScope
+                    ? s.user_id == currentUserId
+                    : (targetCompanyId == 0 || u.company_id == targetCompanyId)
+                select n
+            ).CountAsync();
+
+            // --- 4. Total Users (Filtered by Company) ---
+            var totalUsers = await db.tbl_user.AsNoTracking()
+                .Where(u => useUserScope
+                    ? u.id == currentUserId
+                    : (targetCompanyId == 0 || u.company_id == targetCompanyId))
+                .CountAsync();
+
+            data = new DashboardTotalsV2Data
+            {
+                totalSessions = totalSessions,
+                totalSamples = totalSamples,
+                totalUsers = totalUsers
+            };
+            await CacheObjectAsync(cacheKey, data, DashboardCacheTtlSeconds);
+            Response.Headers["X-Cache"] = "MISS";
+        }
+        else
+        {
+            Response.Headers["X-Cache"] = "HIT-LIVE-ONLINE";
+        }
+
+        data.totalOnlineSessions = totalOnlineSessions;
+
+        return Json(new ReturnAPIResponse
+        {
+            Status = 1,
+            Data = data
+        });
+    }
+    catch (Exception ex)
+    {
+        return Json(new ReturnAPIResponse
+        {
+            Status = 0,
+            Message = "Error: " + SafeException.Get(ex)
+        });
+    }
 }
         [HttpGet, Route("GetNetworkDurations")]
         public async Task<IActionResult> GetNetworkDurations(
