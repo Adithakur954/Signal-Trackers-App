@@ -174,7 +174,8 @@ namespace SignalTracker.Services.ZipImport
             return entry.Length > 0 &&
                    name.EndsWith(".csv", StringComparison.OrdinalIgnoreCase) &&
                    (name.StartsWith("NetworkLog_", StringComparison.OrdinalIgnoreCase) ||
-                    name.StartsWith("NetworkLogUnsent_", StringComparison.OrdinalIgnoreCase));
+                    name.StartsWith("NetworkLogUnsent_", StringComparison.OrdinalIgnoreCase) ||
+                    name.StartsWith("NetworkLogOffline_", StringComparison.OrdinalIgnoreCase));
         }
 
         private static byte? TryGetSubSessionTypeFromName(ZipArchiveEntry entry)

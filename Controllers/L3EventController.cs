@@ -255,14 +255,18 @@ namespace SignalTracker.Controllers
             await EnsureL3EventSchemaAsync(cancellationToken);
 
             int? linkedProjectId = projectId.GetValueOrDefault() > 0 ? projectId.Value : null;
+            ProjectInfo? linkedProjectInfo = null;
             if (linkedProjectId.HasValue)
             {
-                var projectInfo = await GetAuthorizedProjectInfoAsync(linkedProjectId.Value, userId, cancellationToken);
-                if (projectInfo == null)
+                linkedProjectInfo = await GetAuthorizedProjectInfoAsync(linkedProjectId.Value, userId, cancellationToken);
+                if (linkedProjectInfo == null)
                     return NotFound(new { status = 0, message = "Project was not found or is not available for this user." });
             }
 
             int? linkedSessionId = sessionId.GetValueOrDefault() > 0 ? sessionId.Value : null;
+            if (!linkedSessionId.HasValue && linkedProjectInfo != null)
+                linkedSessionId = TryGetFirstRefSessionId(linkedProjectInfo.RefSessionId);
+
             if (linkedSessionId.HasValue)
             {
                 var denied = await ValidateDiagnosticAccessAsync(linkedSessionId.Value, null, null, null, cancellationToken);
@@ -1922,6 +1926,16 @@ namespace SignalTracker.Controllers
                 .Select(x => int.TryParse(x, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ? parsed : 0)
                 .Where(x => x > 0)
                 .ToHashSet();
+        }
+
+        private static int? TryGetFirstRefSessionId(string? refSessionId)
+        {
+            return (refSessionId ?? string.Empty)
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(x => int.TryParse(x, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ? parsed : 0)
+                .FirstOrDefault(x => x > 0) is var sessionId && sessionId > 0
+                    ? sessionId
+                    : null;
         }
 
         private static T? ReadDb<T>(IDataRecord reader, string name)

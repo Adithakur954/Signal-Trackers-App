@@ -15,6 +15,8 @@ namespace SignalTracker.Services
             "availablepolygons:*",
             "networklog:v2:*",
             "networklog:v3:*",
+            "networklog:v14:*",
+            "networklog:v15:*",
             "latlon:dist:*",
             "n78_simple_kpi:*",
             "n78_neighbours:*",
