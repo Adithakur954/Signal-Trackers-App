@@ -580,10 +580,53 @@ namespace SignalTracker.Controllers
             return images;
         }
 
+        private static Dictionary<string, string> LoadImagePlotBlerMap(ZipArchive archive)
+        {
+            var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var entry = archive.Entries.FirstOrDefault(e => e.FullName.EndsWith("image_plot.csv", StringComparison.OrdinalIgnoreCase));
+            if (entry == null) return map;
+
+            try
+            {
+                using var stream = entry.Open();
+                using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+                var text = reader.ReadToEnd();
+                var lines = text.Split('\n').Select(l => l.TrimEnd('\r')).Where(l => l.Length > 0).ToList();
+                if (lines.Count < 2) return map;
+
+                var headers = ParseCsvLine(lines[0]).Select(h => h.Trim()).ToList();
+                int tsIdx = headers.FindIndex(h => h.Equals("timestamp", StringComparison.OrdinalIgnoreCase));
+                int blerIdx = headers.FindIndex(h => h.Contains("bler", StringComparison.OrdinalIgnoreCase));
+
+                if (tsIdx < 0 || blerIdx < 0) return map;
+
+                for (int i = 1; i < lines.Count; i++)
+                {
+                    var cols = ParseCsvLine(lines[i]);
+                    if (cols.Count <= tsIdx || cols.Count <= blerIdx) continue;
+
+                    var ts = cols[tsIdx].Trim();
+                    var blerVal = cols[blerIdx].Trim();
+
+                    if (!string.IsNullOrWhiteSpace(ts) && !ts.StartsWith("#") && !string.IsNullOrWhiteSpace(blerVal))
+                    {
+                        map[ts] = blerVal;
+                    }
+                }
+            }
+            catch
+            {
+                // Ignore unparseable image_plot.csv
+            }
+
+            return map;
+        }
+
         private List<WalkTestLogRow> ExtractNetworkRowsFromZip(ZipArchive archive, long sessionId)
         {
             var rows = new List<WalkTestLogRow>();
             var nextId = 1;
+            var imagePlotBlerMap = LoadImagePlotBlerMap(archive);
 
             var csvEntries = archive.Entries
                 .Where(e => e.FullName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase))
@@ -621,7 +664,20 @@ namespace SignalTracker.Controllers
                     if (cols.Count < 2) continue;
 
                     var row = ParseZipRow(cols, map, sessionId, ref nextId);
-                    if (row != null) rows.Add(row);
+                    if (row != null)
+                    {
+                        if (imagePlotBlerMap.Count > 0 && row.Timestamp.HasValue)
+                        {
+                            var tsKey1 = row.Timestamp.Value.ToString("yyyy-MM-dd HH:mm:ss.fff");
+                            var tsKey2 = row.Timestamp.Value.ToString("yyyy-MM-dd HH:mm:ss");
+                            if (imagePlotBlerMap.TryGetValue(tsKey1, out var blerVal) ||
+                                imagePlotBlerMap.TryGetValue(tsKey2, out blerVal))
+                            {
+                                row.Bler = blerVal;
+                            }
+                        }
+                        rows.Add(row);
+                    }
                 }
             }
 
@@ -2191,7 +2247,7 @@ namespace SignalTracker.Controllers
 
             foreach (var (field, val) in metaFields)
             {
-                var row = new XlsxRow(20);
+                var row = new XlsxRow(22);
                 row.Cells.Add(XlsxCell.Text(field, 4)); // Bold field header
                 row.Cells.Add(XlsxCell.Text(val));
                 sheet.Rows.Add(row);
@@ -2468,10 +2524,50 @@ namespace SignalTracker.Controllers
             return GenerateLegendPng(header, bandRows, thresholds);
         }
 
+        private static void AddBlackFrame(Image<Rgba32> img, int thickness = 12)
+        {
+            var black = new Rgba32(0, 0, 0, 255);
+            img.ProcessPixelRows(accessor =>
+            {
+                int w = accessor.Width;
+                int h = accessor.Height;
+                for (int t = 0; t < thickness; t++)
+                {
+                    if (t < h)
+                    {
+                        accessor.GetRowSpan(t).Fill(black);
+                        accessor.GetRowSpan(h - 1 - t).Fill(black);
+                    }
+                }
+                for (int y = 0; y < h; y++)
+                {
+                    var row = accessor.GetRowSpan(y);
+                    for (int t = 0; t < thickness && t < w; t++)
+                    {
+                        row[t] = black;
+                        row[w - 1 - t] = black;
+                    }
+                }
+            });
+        }
+
         private static byte[] OverlayLegendOnMap(byte[] mapBytes, byte[]? legendBytes)
         {
             if (legendBytes == null || legendBytes.Length == 0)
-                return mapBytes;
+            {
+                try
+                {
+                    using var mapImg = Image.Load<Rgba32>(mapBytes);
+                    AddBlackFrame(mapImg, 12);
+                    using var msBorder = new MemoryStream();
+                    mapImg.SaveAsPng(msBorder);
+                    return msBorder.ToArray();
+                }
+                catch
+                {
+                    return mapBytes;
+                }
+            }
 
             try
             {
@@ -2513,6 +2609,9 @@ namespace SignalTracker.Controllers
                 int legendX = margin;
                 int legendY = mapImage.Height + margin;
                 canvas.Mutate(ctx => ctx.DrawImage(legendImage, new Point(legendX, legendY), 1.0f));
+
+                // Add thick solid black picture frame around the entire combined canvas
+                AddBlackFrame(canvas, 12);
 
                 using var ms = new MemoryStream();
                 canvas.SaveAsPng(ms);
@@ -2558,31 +2657,51 @@ namespace SignalTracker.Controllers
 
             if (headerUpper == "RSRP" || headerUpper == "RSRQ" || headerUpper == "SINR" ||
                 headerUpper == "DL_THPT" || headerUpper == "UL_THPT" || headerUpper == "LTE_BLER" ||
-                headerUpper == "MOS" || headerUpper == "PUSCH_TX" || headerUpper == "EARFCN")
+                headerUpper == "BLER" || headerUpper == "MOS" || headerUpper == "PUSCH_TX" || headerUpper == "EARFCN")
             {
-                var values = targetRows.Select(x =>
-                    headerUpper == "RSRP" ? (double?)x.Rsrp :
-                    headerUpper == "RSRQ" ? (double?)x.Rsrq :
-                    headerUpper == "SINR" ? (double?)x.Sinr :
-                    headerUpper == "MOS" ? (double?)x.Mos :
-                    headerUpper == "DL_THPT" ? ParseDouble(x.DlTpt) :
-                    headerUpper == "UL_THPT" ? ParseDouble(x.UlTpt) :
-                    headerUpper == "LTE_BLER" ? ParseDouble(x.Bler) :
-                    headerUpper == "PUSCH_TX" ? ParseDouble(x.Ta) :
-                    headerUpper == "EARFCN" ? ParseDouble(x.Earfcn) : null)
-                    .Where(x => x.HasValue)
-                    .Select(x => x!.Value)
-                    .ToList();
+                int total = targetRows.Count > 0 ? targetRows.Count : 1;
 
-                int total = values.Count > 0 ? values.Count : 1;
-
-                foreach (var val in values)
+                foreach (var x in targetRows)
                 {
-                    var match = result.FirstOrDefault(r => r.Range.Contains(val)) ??
-                                result.FirstOrDefault(r => r.Range.ContainsInclusive(val));
+                    double? val = headerUpper switch
+                    {
+                        "RSRP" => x.Rsrp,
+                        "RSRQ" => x.Rsrq,
+                        "SINR" => x.Sinr,
+                        "MOS" => x.Mos,
+                        "DL_THPT" => ParseDouble(x.DlTpt),
+                        "UL_THPT" => ParseDouble(x.UlTpt),
+                        "LTE_BLER" or "BLER" => ParseDouble(x.Bler),
+                        "PUSCH_TX" => ParseDouble(x.Ta),
+                        "EARFCN" => ParseDouble(x.Earfcn),
+                        _ => null
+                    };
+
+                    LegendStatRow? match = null;
+
+                    if (val.HasValue)
+                    {
+                        match = result.FirstOrDefault(r => r.Range.Contains(val.Value)) ??
+                                result.FirstOrDefault(r => r.Range.ContainsInclusive(val.Value));
+                    }
+
+                    if (match == null && (headerUpper == "LTE_BLER" || headerUpper == "BLER") && !string.IsNullOrWhiteSpace(x.Bler))
+                    {
+                        var blerStr = x.Bler.Trim();
+                        match = result.FirstOrDefault(r =>
+                            (!string.IsNullOrWhiteSpace(r.Range.Label) && r.Range.Label.Equals(blerStr, StringComparison.OrdinalIgnoreCase)) ||
+                            (!string.IsNullOrWhiteSpace(r.Range.ValueMatch) && r.Range.ValueMatch.Equals(blerStr, StringComparison.OrdinalIgnoreCase)) ||
+                            (!string.IsNullOrWhiteSpace(r.Range.Display) && r.Range.Display.Contains(blerStr, StringComparison.OrdinalIgnoreCase)) ||
+                            (blerStr.Equals("No Errors", StringComparison.OrdinalIgnoreCase) && r.Range.Min == 0 && r.Range.Max <= 2) ||
+                            (blerStr.Equals("Low", StringComparison.OrdinalIgnoreCase) && r.Range.Min >= 1 && r.Range.Max <= 5) ||
+                            (blerStr.Equals("Medium", StringComparison.OrdinalIgnoreCase) && r.Range.Min >= 3 && r.Range.Max <= 10) ||
+                            (blerStr.Equals("High", StringComparison.OrdinalIgnoreCase) && r.Range.Min >= 10));
+                    }
 
                     if (match != null)
+                    {
                         match.Count++;
+                    }
                 }
 
                 foreach (var item in result)
@@ -2615,7 +2734,10 @@ namespace SignalTracker.Controllers
         private static double? ParseDouble(string? value)
         {
             if (string.IsNullOrWhiteSpace(value)) return null;
-            var match = Regex.Match(value, @"-?\d+(\.\d+)?");
+            var str = value.Trim();
+            if (str.Contains('@'))
+                str = str.Split('@')[0].Trim();
+            var match = Regex.Match(str, @"-?\d+(\.\d+)?");
             return match.Success && double.TryParse(match.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var n)
                 ? n
                 : null;
@@ -2700,6 +2822,7 @@ namespace SignalTracker.Controllers
             public double Max { get; set; }
             public string ColorHex { get; set; } = "#808080";
             public string? ValueMatch { get; set; }
+            public string? Label { get; set; }
 
             public ThresholdRange() { }
 
@@ -2722,6 +2845,15 @@ namespace SignalTracker.Controllers
             {
                 get
                 {
+                    if (!string.IsNullOrWhiteSpace(ValueMatch) &&
+                        (ValueMatch.Equals("No Errors", StringComparison.OrdinalIgnoreCase) ||
+                         ValueMatch.Equals("Low", StringComparison.OrdinalIgnoreCase) ||
+                         ValueMatch.Equals("Medium", StringComparison.OrdinalIgnoreCase) ||
+                         ValueMatch.Equals("High", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        return FormatRange(Min, Max);
+                    }
+
                     if (!string.IsNullOrWhiteSpace(ValueMatch))
                         return ValueMatch;
 
@@ -2962,12 +3094,10 @@ namespace SignalTracker.Controllers
                     },
                     Bler = new List<ThresholdRange>
                     {
-                        new("0% - 1%",0,1,"#006400") { ValueMatch="< 1%" },
-                        new("1% - 3%",1,3,"#92D050") { ValueMatch="1% - 3%" },
-                        new("3% - 5%",3,5,"#95D5F5") { ValueMatch="3% - 5%" },
-                        new("5% - 10%",5,10,"#0000FF") { ValueMatch="5% - 10%" },
-                        new("10% - 15%",10,15,"#FFFF00") { ValueMatch="10% - 15%" },
-                        new("> 15%",15,100,"#FF0000") { ValueMatch="> 15%" }
+                        new("0 to 2", 0, 2, "#006400") { Label = "No Errors", ValueMatch = "No Errors" },
+                        new("2 to 5", 2, 5, "#66CC33") { Label = "Low", ValueMatch = "Low" },
+                        new("5 to 10", 5, 10, "#FFFF00") { Label = "Medium", ValueMatch = "Medium" },
+                        new("10 to 25", 10, 25, "#FF0000") { Label = "High", ValueMatch = "High" }
                     },
                     VolteCall = new List<ThresholdRange>
                     {
@@ -3346,7 +3476,7 @@ namespace SignalTracker.Controllers
                 "SINR" => "SINR (dB)",
                 "DL_THPT" => "DL Throughput (Mbps)",
                 "UL_THPT" => "UL Throughput (Mbps)",
-                "LTE_BLER" or "BLER" => "BLER (%)",
+                "LTE_BLER" or "BLER" => "BLER",
                 "VOLTE_CALL" or "VOLTE" => "VoLTE Call",
                 "PUSCH_TX" => "PUSCH Tx Power (dBm)",
                 "EARFCN" => "EARFCN / Band",
@@ -3676,7 +3806,7 @@ namespace SignalTracker.Controllers
 
             public static XlsxRow Title(string text, int span)
             {
-                var row = new XlsxRow(24);
+                var row = new XlsxRow(28);
                 row.Cells.Add(XlsxCell.Text(text, 1));
                 for (var i = 1; i < span; i++)
                     row.Cells.Add(XlsxCell.Text(""));
@@ -3685,21 +3815,21 @@ namespace SignalTracker.Controllers
 
             public static XlsxRow Header(params string[] values)
             {
-                var row = new XlsxRow();
+                var row = new XlsxRow(26);
                 row.Cells.AddRange(values.Select(value => XlsxCell.Text(value, 2)));
                 return row;
             }
 
             public static XlsxRow Data(params string?[] values)
             {
-                var row = new XlsxRow();
+                var row = new XlsxRow(22);
                 row.Cells.AddRange(values.Select(value => XlsxCell.Text(value ?? "", 3)));
                 return row;
             }
 
             public static XlsxRow FromText(string label, string value)
             {
-                var row = new XlsxRow();
+                var row = new XlsxRow(22);
                 row.Cells.Add(XlsxCell.Text(label, 4));
                 row.Cells.Add(XlsxCell.Text(value, 3));
                 return row;
@@ -3707,7 +3837,7 @@ namespace SignalTracker.Controllers
 
             public static XlsxRow Blank()
             {
-                return new XlsxRow();
+                return new XlsxRow(16);
             }
         }
 
