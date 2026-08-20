@@ -596,7 +596,7 @@ namespace SignalTracker.Controllers
 
                 var headers = ParseCsvLine(lines[0]).Select(h => h.Trim()).ToList();
                 int tsIdx = headers.FindIndex(h => h.Equals("timestamp", StringComparison.OrdinalIgnoreCase));
-                int blerIdx = headers.FindIndex(h => h.Contains("bler", StringComparison.OrdinalIgnoreCase));
+                int blerIdx = headers.FindIndex(h => h.Equals("LTE BLER", StringComparison.OrdinalIgnoreCase) || h.Contains("bler", StringComparison.OrdinalIgnoreCase));
 
                 if (tsIdx < 0 || blerIdx < 0) return map;
 
@@ -610,7 +610,23 @@ namespace SignalTracker.Controllers
 
                     if (!string.IsNullOrWhiteSpace(ts) && !ts.StartsWith("#") && !string.IsNullOrWhiteSpace(blerVal))
                     {
-                        map[ts] = blerVal;
+                        if (blerVal.Contains('@'))
+                        {
+                            blerVal = blerVal.Split('@')[0].Trim();
+                        }
+
+                        if (!string.IsNullOrWhiteSpace(blerVal))
+                        {
+                            map[ts] = blerVal;
+                            if (ts.Contains('.'))
+                            {
+                                var secTs = ts.Split('.')[0].Trim();
+                                if (!map.ContainsKey(secTs))
+                                {
+                                    map[secTs] = blerVal;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -622,10 +638,154 @@ namespace SignalTracker.Controllers
             return map;
         }
 
+        private static List<WalkTestLogRow> ExtractRowsFromImagePlot(ZipArchive archive, long sessionId, ref int nextId)
+        {
+            var rows = new List<WalkTestLogRow>();
+            var entry = archive.Entries.FirstOrDefault(e => e.FullName.EndsWith("image_plot.csv", StringComparison.OrdinalIgnoreCase));
+            if (entry == null) return rows;
+
+            try
+            {
+                using var stream = entry.Open();
+                using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+                var text = reader.ReadToEnd();
+                var lines = text.Split('\n').Select(l => l.TrimEnd('\r')).Where(l => l.Length > 0).ToList();
+                if (lines.Count < 2) return rows;
+
+                var headers = ParseCsvLine(lines[0]).Select(h => h.Trim()).ToList();
+                int tsIdx     = headers.FindIndex(h => h.Equals("timestamp", StringComparison.OrdinalIgnoreCase));
+                int latIdx    = headers.FindIndex(h => h.Equals("lat", StringComparison.OrdinalIgnoreCase) || h.Equals("latitude", StringComparison.OrdinalIgnoreCase));
+                int lonIdx    = headers.FindIndex(h => h.Equals("lon", StringComparison.OrdinalIgnoreCase) || h.Equals("longitude", StringComparison.OrdinalIgnoreCase));
+                int rsrpIdx   = headers.FindIndex(h => h.Equals("RSRP", StringComparison.OrdinalIgnoreCase) || h.Contains("rsrp", StringComparison.OrdinalIgnoreCase));
+                int rsrqIdx   = headers.FindIndex(h => h.Equals("RSRQ", StringComparison.OrdinalIgnoreCase) || h.Contains("rsrq", StringComparison.OrdinalIgnoreCase));
+                int sinrIdx   = headers.FindIndex(h => h.Equals("SINR", StringComparison.OrdinalIgnoreCase) || h.Contains("sinr", StringComparison.OrdinalIgnoreCase));
+                int dlIdx     = headers.FindIndex(h => h.Equals("DL THPT", StringComparison.OrdinalIgnoreCase) || h.Contains("dl", StringComparison.OrdinalIgnoreCase));
+                int ulIdx     = headers.FindIndex(h => h.Equals("UL THPT", StringComparison.OrdinalIgnoreCase) || h.Contains("ul", StringComparison.OrdinalIgnoreCase));
+                int earfcnIdx = headers.FindIndex(h => h.Equals("EARFCN", StringComparison.OrdinalIgnoreCase) || h.Contains("earfcn", StringComparison.OrdinalIgnoreCase) || h.Contains("arfcn", StringComparison.OrdinalIgnoreCase));
+                int blerIdx   = headers.FindIndex(h => h.Equals("LTE BLER", StringComparison.OrdinalIgnoreCase) || h.Contains("bler", StringComparison.OrdinalIgnoreCase));
+                int pciIdx    = headers.FindIndex(h => h.Equals("PCI", StringComparison.OrdinalIgnoreCase) || h.Contains("pci", StringComparison.OrdinalIgnoreCase));
+                int ciIdx     = headers.FindIndex(h => h.Equals("CI", StringComparison.OrdinalIgnoreCase) || h.Equals("CELL_ID", StringComparison.OrdinalIgnoreCase) || h.Contains("cell", StringComparison.OrdinalIgnoreCase));
+                int nodebIdx  = headers.FindIndex(h => h.Equals("NodeB ID", StringComparison.OrdinalIgnoreCase) || h.Contains("nodeb", StringComparison.OrdinalIgnoreCase));
+                int puschIdx  = headers.FindIndex(h => h.Equals("PUSCH Tx", StringComparison.OrdinalIgnoreCase) || h.Contains("pusch", StringComparison.OrdinalIgnoreCase));
+                int volteIdx  = headers.FindIndex(h => h.Equals("VoLTE Call", StringComparison.OrdinalIgnoreCase) || h.Contains("volte", StringComparison.OrdinalIgnoreCase));
+
+                static string GetCleanVal(List<string> cols, int idx)
+                {
+                    if (idx < 0 || idx >= cols.Count) return "";
+                    var raw = cols[idx].Trim();
+                    if (raw.StartsWith("#")) return "";
+                    return raw.Contains('@') ? raw.Split('@')[0].Trim() : raw;
+                }
+
+                static string? GetColorVal(List<string> cols, int idx)
+                {
+                    if (idx < 0 || idx >= cols.Count) return null;
+                    var raw = cols[idx].Trim();
+                    if (raw.StartsWith("#")) return null;
+                    if (raw.Contains('@'))
+                    {
+                        var parts = raw.Split('@');
+                        if (parts.Length > 1)
+                        {
+                            var hex = parts[1].Trim();
+                            if (!string.IsNullOrWhiteSpace(hex))
+                            {
+                                return NormalizeColorHex(hex);
+                            }
+                        }
+                    }
+                    return null;
+                }
+
+                for (int i = 1; i < lines.Count; i++)
+                {
+                    var cols = ParseCsvLine(lines[i]);
+                    if (cols.Count < 2) continue;
+                    if (cols[0].Trim().StartsWith("#")) continue;
+
+                    var tsRaw = tsIdx >= 0 && tsIdx < cols.Count ? cols[tsIdx].Trim() : "";
+                    if (!DateTime.TryParse(tsRaw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var ts))
+                        ts = DateTime.Today.AddSeconds(nextId);
+
+                    var earfcnVal = GetCleanVal(cols, earfcnIdx);
+                    var bandVal   = ResolveBandFromEarfcn(earfcnVal);
+
+                    var sheetName = !string.IsNullOrWhiteSpace(earfcnVal)
+                        ? (bandVal != null ? $"{earfcnVal} ({bandVal})" : earfcnVal)
+                        : (bandVal ?? "Unknown Band");
+
+                    var metricColors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+                    var ciColor = GetColorVal(cols, ciIdx);
+                    if (ciColor != null)
+                    {
+                        metricColors["CI"] = ciColor;
+                        metricColors["CELL_ID"] = ciColor;
+                        metricColors["Cell ID"] = ciColor;
+                        metricColors["CellID"] = ciColor;
+                    }
+
+                    var pciColor = GetColorVal(cols, pciIdx);
+                    if (pciColor != null)
+                    {
+                        metricColors["PCI"] = pciColor;
+                    }
+
+                    var nodebColor = GetColorVal(cols, nodebIdx);
+                    if (nodebColor != null)
+                    {
+                        metricColors["NODEB_ID"] = nodebColor;
+                        metricColors["NodeB ID"] = nodebColor;
+                        metricColors["NodeB_ID"] = nodebColor;
+                    }
+
+                    var row = new WalkTestLogRow
+                    {
+                        Id = nextId++,
+                        SessionId = (int)sessionId,
+                        Timestamp = ts,
+                        Lat = ParseFloatSafe(GetCleanVal(cols, latIdx)),
+                        Lon = ParseFloatSafe(GetCleanVal(cols, lonIdx)),
+                        Earfcn = earfcnVal,
+                        Band = bandVal,
+                        BandSheetName = sheetName,
+                        Rsrp = ClampKpiFloat(ParseFloatSafe(GetCleanVal(cols, rsrpIdx)), -140, -44),
+                        Rsrq = ClampKpiFloat(ParseFloatSafe(GetCleanVal(cols, rsrqIdx)), -34, 3),
+                        Sinr = ClampKpiFloat(ParseFloatSafe(GetCleanVal(cols, sinrIdx)), -23, 40),
+                        DlTpt = GetCleanVal(cols, dlIdx),
+                        UlTpt = GetCleanVal(cols, ulIdx),
+                        Bler = GetCleanVal(cols, blerIdx),
+                        Pci = GetCleanVal(cols, pciIdx),
+                        CellId = GetCleanVal(cols, ciIdx),
+                        NodeBId = GetCleanVal(cols, nodebIdx),
+                        Ta = GetCleanVal(cols, puschIdx),
+                        VolteCall = GetCleanVal(cols, volteIdx),
+                        Primary = "Yes",
+                        MetricColors = metricColors.Count > 0 ? metricColors : null
+                    };
+
+                    rows.Add(row);
+                }
+            }
+            catch
+            {
+                // Return whatever was parsed if an exception occurred
+            }
+
+            return rows;
+        }
+
         private List<WalkTestLogRow> ExtractNetworkRowsFromZip(ZipArchive archive, long sessionId)
         {
             var rows = new List<WalkTestLogRow>();
             var nextId = 1;
+
+            var imagePlotRows = ExtractRowsFromImagePlot(archive, sessionId, ref nextId);
+            if (imagePlotRows.Count > 0)
+            {
+                return imagePlotRows;
+            }
+
             var imagePlotBlerMap = LoadImagePlotBlerMap(archive);
 
             var csvEntries = archive.Entries
@@ -649,6 +809,19 @@ namespace SignalTracker.Controllers
 
             foreach (var entry in csvEntries)
             {
+                var fn = Path.GetFileName(entry.FullName);
+                DateTime? fileBaseTime = null;
+                var fnMatch = Regex.Match(fn, @"(\d{8})_(\d{2})(\d{2})(\d{2})");
+                if (fnMatch.Success && DateTime.TryParseExact(
+                    $"{fnMatch.Groups[1].Value}{fnMatch.Groups[2].Value}{fnMatch.Groups[3].Value}{fnMatch.Groups[4].Value}",
+                    "yyyyMMddHHmmss",
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.None,
+                    out var parsedFileTime))
+                {
+                    fileBaseTime = parsedFileTime;
+                }
+
                 using var stream = entry.Open();
                 using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
                 var text = reader.ReadToEnd();
@@ -663,13 +836,13 @@ namespace SignalTracker.Controllers
                     var cols = ParseCsvLine(lines[i]);
                     if (cols.Count < 2) continue;
 
-                    var row = ParseZipRow(cols, map, sessionId, ref nextId);
+                    var row = ParseZipRow(cols, map, sessionId, ref nextId, fileBaseTime);
                     if (row != null)
                     {
                         if (imagePlotBlerMap.Count > 0 && row.Timestamp.HasValue)
                         {
-                            var tsKey1 = row.Timestamp.Value.ToString("yyyy-MM-dd HH:mm:ss.fff");
-                            var tsKey2 = row.Timestamp.Value.ToString("yyyy-MM-dd HH:mm:ss");
+                            var tsKey1 = row.Timestamp.Value.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture);
+                            var tsKey2 = row.Timestamp.Value.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
                             if (imagePlotBlerMap.TryGetValue(tsKey1, out var blerVal) ||
                                 imagePlotBlerMap.TryGetValue(tsKey2, out blerVal))
                             {
@@ -829,7 +1002,7 @@ namespace SignalTracker.Controllers
             return null;
         }
 
-        private WalkTestLogRow? ParseZipRow(List<string> cols, ZipColumnMap map, long sessionId, ref int nextId)
+        private WalkTestLogRow? ParseZipRow(List<string> cols, ZipColumnMap map, long sessionId, ref int nextId, DateTime? fileBaseTime = null)
         {
             var tsRaw = GetZipCol(cols, map.Timestamp);
             if (!string.IsNullOrWhiteSpace(tsRaw) && tsRaw.Contains("@@"))
@@ -838,16 +1011,39 @@ namespace SignalTracker.Controllers
             DateTime ts;
             if (!DateTime.TryParse(tsRaw, CultureInfo.InvariantCulture, DateTimeStyles.None, out ts))
             {
-                // Handle relative timestamp formats like "48:48.9" (mm:ss.s or hh:mm:ss)
+                // Handle relative timestamp formats like "14:56.6" (mm:ss.s or hh:mm:ss)
                 var relMatch = Regex.Match(tsRaw ?? "", @"^(\d+):(\d+)(?:\.(\d+))?$");
                 if (relMatch.Success)
                 {
                     int part1 = int.Parse(relMatch.Groups[1].Value);
                     int part2 = int.Parse(relMatch.Groups[2].Value);
-                    // If part1 >= 24, treat as mm:ss else hh:mm
-                    ts = part1 >= 24
-                        ? DateTime.Today.AddMinutes(part1).AddSeconds(part2)
-                        : DateTime.Today.AddHours(part1).AddMinutes(part2);
+                    int ms = 0;
+                    if (relMatch.Groups[3].Success && !string.IsNullOrEmpty(relMatch.Groups[3].Value))
+                    {
+                        var sub = relMatch.Groups[3].Value;
+                        if (sub.Length == 1) ms = int.Parse(sub) * 100;
+                        else if (sub.Length == 2) ms = int.Parse(sub) * 10;
+                        else if (sub.Length >= 3) ms = int.Parse(sub[..3]);
+                    }
+
+                    if (fileBaseTime.HasValue)
+                    {
+                        ts = new DateTime(
+                            fileBaseTime.Value.Year,
+                            fileBaseTime.Value.Month,
+                            fileBaseTime.Value.Day,
+                            fileBaseTime.Value.Hour,
+                            part1,
+                            part2,
+                            ms,
+                            DateTimeKind.Unspecified);
+                    }
+                    else
+                    {
+                        ts = part1 >= 24
+                            ? DateTime.Today.AddMinutes(part1).AddSeconds(part2).AddMilliseconds(ms)
+                            : DateTime.Today.AddHours(part1).AddMinutes(part2).AddMilliseconds(ms);
+                    }
                 }
                 else
                 {
@@ -945,7 +1141,10 @@ namespace SignalTracker.Controllers
 
                 // Re-resolve BandSheetName after Band/Network have been normalised
                 // (NormalizeZipText may have turned "Unknown" → null, changing the result)
-                r.BandSheetName = ToBandSheetName(r.Band, r.Network, r.Earfcn, r.Primary);
+                if (string.IsNullOrWhiteSpace(r.BandSheetName) || r.BandSheetName.Equals("Unknown Band", StringComparison.OrdinalIgnoreCase))
+                {
+                    r.BandSheetName = ToBandSheetName(r.Band, r.Network, r.Earfcn, r.Primary);
+                }
 
                 if (string.IsNullOrWhiteSpace(r.NodeBId) && !string.IsNullOrWhiteSpace(r.CellId))
                 {
@@ -1282,9 +1481,25 @@ namespace SignalTracker.Controllers
             hex = hex.TrimStart('#');
 
             if (hex.Length == 8)
-                hex = hex[2..];
+            {
+                // ColorSettings.csv uses Android AARRGGBB format (e.g. FF006400 = opaque dark green)
+                // image_plot.csv uses RRGGBBAA format (e.g. F2303080 = red with 50% alpha)
+                // Heuristic: if leading 2 chars are "FF" it's almost certainly AARRGGBB alpha prefix — strip them.
+                // Otherwise treat as RRGGBBAA and strip trailing 2 chars.
+                var leading = hex[..2].ToUpperInvariant();
+                if (leading == "FF" || leading == "80" || leading == "00")
+                {
+                    // AARRGGBB — strip leading alpha
+                    hex = hex[2..];
+                }
+                else
+                {
+                    // RRGGBBAA — strip trailing alpha
+                    hex = hex[..6];
+                }
+            }
 
-            return hex.Length == 6 ? $"#{hex}" : "#808080";
+            return hex.Length == 6 ? $"#{hex.ToUpperInvariant()}" : "#808080";
         }
 
         private static double? ParseDoubleSafe(string? value)
@@ -2483,45 +2698,7 @@ namespace SignalTracker.Controllers
             bool filterByImageName = true,
             bool showSampleCount = false)
         {
-            if (bandRows != null && bandRows.Count > 0)
-            {
-                return GenerateLegendPng(header, bandRows, thresholds, filterByImageName, showSampleCount);
-            }
-
-            var headerUpper = header.ToUpperInvariant();
-            var headerLower = header.ToLowerInvariant();
-
-            var candidateKeys = new List<string>();
-            if (primarySessionId > 0)
-            {
-                candidateKeys.Add($"LEGEND_{primarySessionId}_{headerUpper}");
-                candidateKeys.Add($"{primarySessionId}_{headerUpper}_LEGEND");
-            }
-            candidateKeys.Add($"LEGEND_{headerUpper}");
-            candidateKeys.Add($"{headerUpper}_LEGEND");
-            candidateKeys.Add($"LEGEND_{headerLower}");
-            candidateKeys.Add($"{headerLower}_LEGEND");
-            candidateKeys.Add("GLOBAL_LEGEND");
-            candidateKeys.Add("LEGEND");
-
-            foreach (var key in candidateKeys)
-            {
-                if (imageBytesByUrl.TryGetValue(key, out var b) && b != null && b.Length > 0)
-                    return b;
-            }
-
-            foreach (var kvp in imageBytesByUrl)
-            {
-                if (kvp.Value == null || kvp.Value.Length == 0) continue;
-                if (!kvp.Key.Contains("legend", StringComparison.OrdinalIgnoreCase)) continue;
-
-                if (kvp.Key.Contains(headerUpper, StringComparison.OrdinalIgnoreCase))
-                {
-                    return kvp.Value;
-                }
-            }
-
-            return GenerateLegendPng(header, bandRows, thresholds);
+            return GenerateLegendPng(header, bandRows, thresholds, filterByImageName, showSampleCount);
         }
 
         private static void AddBlackFrame(Image<Rgba32> img, int thickness = 12)
@@ -3354,14 +3531,7 @@ namespace SignalTracker.Controllers
             {
                 foreach (var stat in stats)
                 {
-                    var hexColor = stat.Range.ColorHex;
-                    if (string.IsNullOrWhiteSpace(hexColor) || hexColor.Equals("#808080", StringComparison.OrdinalIgnoreCase))
-                    {
-                        var imgColor = GetHexColorFromRows(allRows, header);
-                        if (!string.IsNullOrWhiteSpace(imgColor))
-                            hexColor = imgColor;
-                    }
-
+                    var hexColor = !string.IsNullOrWhiteSpace(stat.Range.ColorHex) ? stat.Range.ColorHex : "#808080";
                     var (r, g, b) = ParseHexColor(hexColor);
                     var rangeDisplay = isEarfcn ? stat.Range.Display : stat.Range.RangeOnlyDisplay;
                     if (string.IsNullOrWhiteSpace(rangeDisplay)) rangeDisplay = stat.Range.Display;
