@@ -13,6 +13,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Collections.Generic;
+using System.Text.Json;
 using SignalTracker.Services; // Required for UserScopeService
 using SignalTracker.Security;
 
@@ -69,12 +70,89 @@ namespace SignalTracker.Controllers
             return trimmed[..maxLength];
         }
 
+        private static string? FirstNonBlank(params string?[] values)
+        {
+            foreach (var value in values)
+            {
+                if (!string.IsNullOrWhiteSpace(value))
+                    return value.Trim();
+            }
+
+            return null;
+        }
+
         private static string BuildCompactUploadFileName(string prefix, DateTime timestamp, string originalFileName)
         {
             var extension = Path.GetExtension(originalFileName);
             var stamp = timestamp.ToString("yyMMddHHmmssfff");
             var suffix = Guid.NewGuid().ToString("N")[..8];
             return $"{prefix}{stamp}_{suffix}{extension}";
+        }
+
+        private string GetChunkUploadRoot()
+        {
+            var path = Path.Combine(_env.ContentRootPath, "App_Data", "ChunkUploads");
+            Directory.CreateDirectory(path);
+            return path;
+        }
+
+        private static string NormalizeChunkUploadId(string chunkUploadId)
+        {
+            if (!Guid.TryParse(chunkUploadId, out var parsed))
+                throw new InvalidDataException("Invalid chunkUploadId.");
+
+            return parsed.ToString("N");
+        }
+
+        private string GetChunkUploadDirectory(string chunkUploadId)
+        {
+            var safeId = NormalizeChunkUploadId(chunkUploadId);
+            var path = Path.Combine(GetChunkUploadRoot(), safeId);
+            Directory.CreateDirectory(path);
+            return path;
+        }
+
+        private static string GetChunkFileName(int chunkIndex)
+            => chunkIndex.ToString("D8", System.Globalization.CultureInfo.InvariantCulture) + ".part";
+
+        private sealed class ChunkUploadManifest
+        {
+            public string ChunkUploadId { get; set; } = string.Empty;
+            public string FileName { get; set; } = string.Empty;
+            public long FileSize { get; set; }
+            public int TotalChunks { get; set; }
+            public int UploadFileType { get; set; }
+            public string? Remarks { get; set; }
+            public string? ProjectName { get; set; }
+            public string? SessionIds { get; set; }
+            public int UploadedChunks { get; set; }
+            public int? UploadHistoryId { get; set; }
+            public short Status { get; set; } = 2;
+            public string? ErrorMessage { get; set; }
+            public DateTime CreatedOn { get; set; } = DateTime.UtcNow;
+            public DateTime UpdatedOn { get; set; } = DateTime.UtcNow;
+        }
+
+        private string GetChunkManifestPath(string chunkUploadId)
+            => Path.Combine(GetChunkUploadDirectory(chunkUploadId), "manifest.json");
+
+        private async Task<ChunkUploadManifest> ReadChunkManifestAsync(string chunkUploadId, CancellationToken ct = default)
+        {
+            var path = GetChunkManifestPath(chunkUploadId);
+            if (!System.IO.File.Exists(path))
+                throw new FileNotFoundException("Chunk upload was not found.");
+
+            await using var stream = System.IO.File.OpenRead(path);
+            return await JsonSerializer.DeserializeAsync<ChunkUploadManifest>(stream, cancellationToken: ct)
+                ?? throw new InvalidDataException("Chunk upload manifest is invalid.");
+        }
+
+        private async Task WriteChunkManifestAsync(ChunkUploadManifest manifest, CancellationToken ct = default)
+        {
+            manifest.UpdatedOn = DateTime.UtcNow;
+            var path = GetChunkManifestPath(manifest.ChunkUploadId);
+            await using var stream = System.IO.File.Create(path);
+            await JsonSerializer.SerializeAsync(stream, manifest, cancellationToken: ct);
         }
 
         private async Task<bool> UploadHistoryOriginalFileNameColumnExistsAsync(CancellationToken ct = default)
@@ -243,6 +321,29 @@ namespace SignalTracker.Controllers
                 await uploadFile.CopyToAsync(stream);
             }
 
+            return await ProcessStoredUploadAsync(
+                mainPath,
+                savedMainName,
+                remarks,
+                polygonPath,
+                polygonFile,
+                userId,
+                uploadFileType,
+                projectId,
+                nowIst);
+        }
+
+        private async Task<(int UploadHistoryId, bool Success, string? ErrorMessage, bool ProcessingStarted)> ProcessStoredUploadAsync(
+            string mainPath,
+            string savedMainName,
+            string remarks,
+            string polygonPath,
+            string polygonFile,
+            int userId,
+            int uploadFileType,
+            int projectId,
+            DateTime nowIst)
+        {
             var excelDetails = new tbl_upload_history
             {
                 remarks = remarks,
@@ -707,6 +808,292 @@ namespace SignalTracker.Controllers
             {
                 Console.WriteLine("❌ Error in GetUploadedExcelFiles: operation failed (see server logs)");
                 return StatusCode(500, new { Status = 0, Message = "An internal server error occurred." });
+            }
+        }
+
+        [HttpPost("StartChunkUpload")]
+        public async Task<IActionResult> StartChunkUpload(
+            [FromForm] string fileName,
+            [FromForm] long fileSize,
+            [FromForm] int totalChunks,
+            [FromForm] int UploadFileType,
+            [FromForm] string? remarks = null,
+            [FromForm] string? ProjectName = null,
+            [FromForm] string? SessionIds = null,
+            CancellationToken ct = default)
+        {
+            try
+            {
+                cf.SessionCheck();
+
+                if (string.IsNullOrWhiteSpace(fileName))
+                    return Json(new { Status = 0, Message = "fileName is required." });
+                if (fileSize <= 0)
+                    return Json(new { Status = 0, Message = "fileSize is required." });
+                if (totalChunks <= 0)
+                    return Json(new { Status = 0, Message = "totalChunks is required." });
+
+                var extension = Path.GetExtension(fileName)?.ToLowerInvariant();
+                if (UploadFileType == 1 && extension != ".csv" && extension != ".zip")
+                    return Json(new { Status = 0, Message = "Session uploads support only .csv or .zip files." });
+
+                var chunkUploadId = Guid.NewGuid().ToString("N");
+                var manifest = new ChunkUploadManifest
+                {
+                    ChunkUploadId = chunkUploadId,
+                    FileName = Path.GetFileName(fileName),
+                    FileSize = fileSize,
+                    TotalChunks = totalChunks,
+                    UploadFileType = UploadFileType,
+                    Remarks = remarks,
+                    ProjectName = ProjectName,
+                    SessionIds = SessionIds,
+                    UploadedChunks = 0,
+                    Status = 2
+                };
+
+                await WriteChunkManifestAsync(manifest, ct);
+
+                return Json(new
+                {
+                    Status = 1,
+                    Message = "Chunk upload started.",
+                    ChunkUploadId = chunkUploadId,
+                    TotalChunks = totalChunks,
+                    UploadedChunks = 0
+                });
+            }
+            catch (Exception ex)
+            {
+                return Json(new { Status = 0, Message = SafeException.GetInnermost(ex) });
+            }
+        }
+
+        [HttpPost("UploadChunk")]
+        [RequestSizeLimit(64_000_000)]
+        [RequestFormLimits(MultipartBodyLengthLimit = 64_000_000, ValueLengthLimit = int.MaxValue, MultipartHeadersLengthLimit = int.MaxValue)]
+        public async Task<IActionResult> UploadChunk(
+            [FromForm] string chunkUploadId,
+            [FromForm] int chunkIndex,
+            [FromForm] int totalChunks,
+            [FromForm] IFormFile chunk,
+            CancellationToken ct = default)
+        {
+            try
+            {
+                cf.SessionCheck();
+
+                var manifest = await ReadChunkManifestAsync(chunkUploadId, ct);
+                if (totalChunks != manifest.TotalChunks)
+                    return Json(new { Status = 0, Message = "totalChunks does not match upload manifest." });
+                if (chunkIndex < 0 || chunkIndex >= manifest.TotalChunks)
+                    return Json(new { Status = 0, Message = "Invalid chunkIndex." });
+                if (chunk == null || chunk.Length == 0)
+                    return Json(new { Status = 0, Message = "Chunk file is required." });
+
+                var uploadDir = GetChunkUploadDirectory(chunkUploadId);
+                var chunkPath = Path.Combine(uploadDir, GetChunkFileName(chunkIndex));
+                await using (var output = System.IO.File.Create(chunkPath))
+                {
+                    await chunk.CopyToAsync(output, ct);
+                }
+
+                manifest.UploadedChunks = Directory
+                    .EnumerateFiles(uploadDir, "*.part")
+                    .Count();
+                await WriteChunkManifestAsync(manifest, ct);
+
+                return Json(new
+                {
+                    Status = 1,
+                    Message = "Chunk uploaded.",
+                    ChunkUploadId = manifest.ChunkUploadId,
+                    ChunkIndex = chunkIndex,
+                    UploadedChunks = manifest.UploadedChunks,
+                    TotalChunks = manifest.TotalChunks,
+                    UploadProgress = manifest.TotalChunks == 0 ? 0 : (int)Math.Round(manifest.UploadedChunks * 100.0 / manifest.TotalChunks)
+                });
+            }
+            catch (Exception ex)
+            {
+                return Json(new { Status = 0, Message = SafeException.GetInnermost(ex) });
+            }
+        }
+
+        [HttpPost("CompleteChunkUpload")]
+        [RequestSizeLimit(64_000_000)]
+        [RequestFormLimits(MultipartBodyLengthLimit = 64_000_000, ValueLengthLimit = int.MaxValue, MultipartHeadersLengthLimit = int.MaxValue)]
+        public async Task<IActionResult> CompleteChunkUpload(
+            [FromForm] string chunkUploadId,
+            [FromForm] string? remarks = null,
+            [FromForm] string? ProjectName = null,
+            [FromForm] string? SessionIds = null,
+            [FromForm] int? UploadFileType = null,
+            [FromForm] IFormFile? UploadNoteFile = null,
+            CancellationToken ct = default)
+        {
+            try
+            {
+                cf.SessionCheck();
+
+                var manifest = await ReadChunkManifestAsync(chunkUploadId, ct);
+                var uploadDir = GetChunkUploadDirectory(chunkUploadId);
+                var missing = Enumerable.Range(0, manifest.TotalChunks)
+                    .Where(i => !System.IO.File.Exists(Path.Combine(uploadDir, GetChunkFileName(i))))
+                    .ToList();
+                if (missing.Count > 0)
+                    return Json(new { Status = 0, Message = $"Missing chunks: {string.Join(",", missing.Take(20))}" });
+
+                var root = _env.ContentRootPath;
+                var uploadsDir = Path.Combine(root, "UploadedExcels");
+                Directory.CreateDirectory(uploadsDir);
+                DateTime nowIst = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, INDIAN_ZONE);
+                var savedMainName = BuildCompactUploadFileName("U_", nowIst, manifest.FileName);
+                var mainPath = Path.Combine(uploadsDir, savedMainName);
+
+                await using (var merged = System.IO.File.Create(mainPath))
+                {
+                    for (var i = 0; i < manifest.TotalChunks; i++)
+                    {
+                        var chunkPath = Path.Combine(uploadDir, GetChunkFileName(i));
+                        await using var input = System.IO.File.OpenRead(chunkPath);
+                        await input.CopyToAsync(merged, ct);
+                    }
+                }
+
+                string polygonPath = "";
+                string polygonFile = "";
+                if (UploadNoteFile != null && UploadNoteFile.Length > 0)
+                {
+                    polygonFile = BuildCompactUploadFileName("P_", nowIst, UploadNoteFile.FileName);
+                    polygonPath = Path.Combine(uploadsDir, polygonFile);
+                    await using var polygonOutput = System.IO.File.Create(polygonPath);
+                    await UploadNoteFile.CopyToAsync(polygonOutput, ct);
+                }
+
+                int userId = cf.UserId > 0 ? cf.UserId : Convert.ToInt32(HttpContext.Session.GetInt32("UserID"));
+                string userName = cf.UserName ?? "Unknown";
+                int uploadFileType = UploadFileType.GetValueOrDefault(manifest.UploadFileType);
+                int projectId = 0;
+
+                if (uploadFileType == 2)
+                {
+                    var objProject = new tbl_project
+                    {
+                        project_name = FirstNonBlank(ProjectName, manifest.ProjectName),
+                        ref_session_id = FirstNonBlank(SessionIds, manifest.SessionIds),
+                        created_by_user_id = userId,
+                        created_by_user_name = userName,
+                        status = 1
+                    };
+
+                    db.tbl_project.Add(objProject);
+                    await db.SaveChangesAsync(ct);
+                    projectId = objProject.id;
+                }
+
+                var result = await ProcessStoredUploadAsync(
+                    mainPath,
+                    savedMainName,
+                    FirstNonBlank(remarks, manifest.Remarks) ?? string.Empty,
+                    polygonPath,
+                    polygonFile,
+                    userId,
+                    uploadFileType,
+                    projectId,
+                    nowIst);
+
+                manifest.UploadHistoryId = result.UploadHistoryId;
+                manifest.Status = result.ProcessingStarted ? (short)2 : (short)(result.Success ? 1 : 0);
+                manifest.ErrorMessage = result.ErrorMessage;
+                await WriteChunkManifestAsync(manifest, ct);
+
+                return Json(new
+                {
+                    Status = result.ProcessingStarted ? 2 : (result.Success ? 1 : 0),
+                    Message = result.ProcessingStarted
+                        ? "File uploaded successfully. Processing started in the background."
+                        : result.Success
+                            ? "File uploaded and processed successfully."
+                            : "Upload failed.",
+                    ChunkUploadId = manifest.ChunkUploadId,
+                    UploadId = result.UploadHistoryId,
+                    ProcessingStarted = result.ProcessingStarted,
+                    ErrorMessage = result.ErrorMessage
+                });
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    var manifest = await ReadChunkManifestAsync(chunkUploadId, CancellationToken.None);
+                    manifest.Status = 0;
+                    manifest.ErrorMessage = SafeException.GetInnermost(ex);
+                    await WriteChunkManifestAsync(manifest, CancellationToken.None);
+                }
+                catch { }
+
+                return Json(new { Status = 0, Message = SafeException.GetInnermost(ex) });
+            }
+        }
+
+        [HttpGet("GetChunkUploadStatus")]
+        public async Task<IActionResult> GetChunkUploadStatus([FromQuery] string? chunkUploadId = null, [FromQuery] int? uploadId = null, CancellationToken ct = default)
+        {
+            try
+            {
+                cf.SessionCheck();
+
+                ChunkUploadManifest? manifest = null;
+                if (!string.IsNullOrWhiteSpace(chunkUploadId))
+                {
+                    manifest = await ReadChunkManifestAsync(chunkUploadId, ct);
+                    uploadId ??= manifest.UploadHistoryId;
+                }
+
+                short? status = manifest?.Status;
+                string? error = manifest?.ErrorMessage;
+                if (uploadId.GetValueOrDefault() > 0)
+                {
+                    var history = await db.tbl_upload_history
+                        .AsNoTracking()
+                        .Where(x => x.id == uploadId.Value)
+                        .Select(x => new { x.status, x.errors })
+                        .FirstOrDefaultAsync(ct);
+                    if (history != null)
+                    {
+                        status = history.status;
+                        error = history.errors;
+                    }
+                }
+
+                var uploadedChunks = manifest?.UploadedChunks ?? 0;
+                var totalChunks = manifest?.TotalChunks ?? 0;
+                var uploadProgress = totalChunks == 0 ? 0 : (int)Math.Round(uploadedChunks * 100.0 / totalChunks);
+                var processingProgress = status switch
+                {
+                    1 => 100,
+                    0 => 100,
+                    2 => uploadProgress >= 100 ? 50 : 0,
+                    _ => 0
+                };
+
+                return Json(new
+                {
+                    Status = status ?? 2,
+                    ChunkUploadId = manifest?.ChunkUploadId,
+                    UploadId = uploadId,
+                    UploadedChunks = uploadedChunks,
+                    TotalChunks = totalChunks,
+                    UploadProgress = uploadProgress,
+                    ProcessingProgress = processingProgress,
+                    State = (status ?? 2) == 1 ? "completed" : (status ?? 2) == 0 ? "failed" : uploadProgress >= 100 ? "processing" : "uploading",
+                    ErrorMessage = error
+                });
+            }
+            catch (Exception ex)
+            {
+                return Json(new { Status = 0, Message = SafeException.GetInnermost(ex) });
             }
         }
 
