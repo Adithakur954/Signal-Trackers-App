@@ -904,6 +904,17 @@ public IActionResult UploadSitePrediction(
                                 allErrorList.AddRange(errorList);
                         }
 
+                        if (fileType == 1 && sessionId > 0)
+                        {
+                            var l3Rows = CountSessionUploadRows("tbl_l3_log", sessionId, excelID);
+                            var eventRows = CountSessionUploadRows("tbl_event_log", sessionId, excelID);
+                            if (l3Rows > 0 || eventRows > 0)
+                            {
+                                UpdateSessionDiagnosticFlags(sessionId, l3Rows > 0, eventRows > 0);
+                                UpsertL3EventHistory(projectId, excelID, sessionId, originalFileName, l3Rows, eventRows, uploadedByUserId);
+                            }
+                        }
+
                         if (outerTx != null)
                         {
                             if (fileType == 1)
@@ -1616,16 +1627,25 @@ public IActionResult UploadSitePrediction(
 
         private static bool IsEventDiagnosticFile(string? fileName)
         {
-            return Path.GetFileName(fileName ?? string.Empty)
-                .StartsWith("Event_", StringComparison.OrdinalIgnoreCase);
+            var name = Path.GetFileNameWithoutExtension(fileName ?? string.Empty);
+            var extension = Path.GetExtension(fileName ?? string.Empty);
+            return (extension.Equals(".csv", StringComparison.OrdinalIgnoreCase) ||
+                    extension.Equals(".txt", StringComparison.OrdinalIgnoreCase)) &&
+                   (name.StartsWith("Event", StringComparison.OrdinalIgnoreCase) ||
+                    name.Contains("_Event", StringComparison.OrdinalIgnoreCase) ||
+                    name.Contains("-Event", StringComparison.OrdinalIgnoreCase) ||
+                    name.Contains("EventLog", StringComparison.OrdinalIgnoreCase));
         }
 
         private static bool IsL3DiagnosticFile(string? fileName)
         {
-            var name = Path.GetFileName(fileName ?? string.Empty);
-            return name.StartsWith("L3_", StringComparison.OrdinalIgnoreCase) ||
-                   name.StartsWith("L3-", StringComparison.OrdinalIgnoreCase) ||
-                   name.StartsWith("L3.", StringComparison.OrdinalIgnoreCase);
+            var name = Path.GetFileNameWithoutExtension(fileName ?? string.Empty);
+            var extension = Path.GetExtension(fileName ?? string.Empty);
+            return extension.Equals(".csv", StringComparison.OrdinalIgnoreCase) &&
+                   (name.StartsWith("L3", StringComparison.OrdinalIgnoreCase) ||
+                    name.Contains("_L3", StringComparison.OrdinalIgnoreCase) ||
+                    name.Contains("-L3", StringComparison.OrdinalIgnoreCase) ||
+                    name.Contains("Layer3", StringComparison.OrdinalIgnoreCase));
         }
 
         private static bool IsNetworkLogCsv(string? fileName)
@@ -1726,6 +1746,12 @@ public IActionResult UploadSitePrediction(
                     rowInserted++;
                 }
 
+                if (rowNo == 0)
+                {
+                    errorList.Add($"{fileName} event import warning: file contains headers only; no Event rows were stored.");
+                    return false;
+                }
+
                 return true;
             }
             catch (Exception ex)
@@ -1764,6 +1790,12 @@ public IActionResult UploadSitePrediction(
                     var row = NormalizeDiagnosticRow((IDictionary<string, object?>)record);
                     InsertL3DiagnosticRow(sessionId, excelId, fileName, rowNo, "csv", row, null);
                     rowInserted++;
+                }
+
+                if (rowNo == 0)
+                {
+                    errorList.Add($"{fileName} L3 import warning: file contains headers only; no L3 rows were stored.");
+                    return false;
                 }
 
                 return true;
@@ -2141,6 +2173,9 @@ public IActionResult UploadSitePrediction(
 
             try
             {
+                EnsureColumn("tbl_session", "l3", "BOOLEAN NOT NULL DEFAULT FALSE");
+                EnsureColumn("tbl_session", "event", "BOOLEAN NOT NULL DEFAULT FALSE");
+
                 using var l3 = conn.CreateCommand();
                 l3.Transaction = db.Database.CurrentTransaction?.GetDbTransaction();
                 l3.CommandText = @"
@@ -2190,6 +2225,27 @@ public IActionResult UploadSitePrediction(
                         INDEX ix_tbl_event_log_upload (tbl_upload_id)
                     );";
                 events.ExecuteNonQuery();
+
+                using var history = conn.CreateCommand();
+                history.Transaction = db.Database.CurrentTransaction?.GetDbTransaction();
+                history.CommandText = @"
+                    CREATE TABLE IF NOT EXISTS tbl_l3_event_history (
+                        id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                        project_id INT NULL,
+                        tbl_upload_id INT NULL,
+                        session_id INT NULL,
+                        original_file_name VARCHAR(500) NOT NULL,
+                        l3_rows INT NOT NULL DEFAULT 0,
+                        events_rows INT NOT NULL DEFAULT 0,
+                        uploaded_by INT NOT NULL,
+                        uploaded_on DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        status SMALLINT NOT NULL DEFAULT 1,
+                        UNIQUE KEY ux_l3_event_history_upload_session (tbl_upload_id, session_id),
+                        INDEX ix_tbl_l3_event_history_project (project_id),
+                        INDEX ix_tbl_l3_event_history_upload (tbl_upload_id),
+                        INDEX ix_tbl_l3_event_history_session (session_id)
+                    );";
+                history.ExecuteNonQuery();
             }
             finally
             {
@@ -2252,6 +2308,69 @@ public IActionResult UploadSitePrediction(
                 if (shouldClose)
                     conn.Close();
             }
+        }
+
+        private int CountSessionUploadRows(string tableName, int sessionId, int uploadId)
+        {
+            if (sessionId <= 0 || uploadId <= 0)
+                return 0;
+
+            using var cmd = db.Database.GetDbConnection().CreateCommand();
+            cmd.Transaction = db.Database.CurrentTransaction?.GetDbTransaction();
+            cmd.CommandText = $"SELECT COUNT(*) FROM `{tableName}` WHERE session_id = @sessionId AND tbl_upload_id = @uploadId;";
+            AddDiagnosticParam(cmd, "@sessionId", sessionId);
+            AddDiagnosticParam(cmd, "@uploadId", uploadId);
+            var result = cmd.ExecuteScalar();
+            return result == null || result == DBNull.Value
+                ? 0
+                : Convert.ToInt32(result, CultureInfo.InvariantCulture);
+        }
+
+        private void UpdateSessionDiagnosticFlags(int sessionId, bool hasL3, bool hasEvent)
+        {
+            using var cmd = db.Database.GetDbConnection().CreateCommand();
+            cmd.Transaction = db.Database.CurrentTransaction?.GetDbTransaction();
+            cmd.CommandText = @"
+                UPDATE tbl_session
+                SET `l3` = CASE WHEN @hasL3 THEN TRUE ELSE `l3` END,
+                    `event` = CASE WHEN @hasEvent THEN TRUE ELSE `event` END
+                WHERE id = @sessionId;";
+            AddDiagnosticParam(cmd, "@hasL3", hasL3);
+            AddDiagnosticParam(cmd, "@hasEvent", hasEvent);
+            AddDiagnosticParam(cmd, "@sessionId", sessionId);
+            cmd.ExecuteNonQuery();
+        }
+
+        private void UpsertL3EventHistory(int projectId, int uploadId, int sessionId, string originalFileName, int l3Rows, int eventRows, int uploadedByUserId)
+        {
+            var resolvedUserId = uploadedByUserId > 0 ? uploadedByUserId : cf.UserId;
+            if (resolvedUserId <= 0 || uploadId <= 0 || sessionId <= 0)
+                return;
+
+            using (var delete = db.Database.GetDbConnection().CreateCommand())
+            {
+                delete.Transaction = db.Database.CurrentTransaction?.GetDbTransaction();
+                delete.CommandText = "DELETE FROM tbl_l3_event_history WHERE tbl_upload_id = @uploadId AND session_id = @sessionId;";
+                AddDiagnosticParam(delete, "@uploadId", uploadId);
+                AddDiagnosticParam(delete, "@sessionId", sessionId);
+                delete.ExecuteNonQuery();
+            }
+
+            using var cmd = db.Database.GetDbConnection().CreateCommand();
+            cmd.Transaction = db.Database.CurrentTransaction?.GetDbTransaction();
+            cmd.CommandText = @"
+                INSERT INTO tbl_l3_event_history
+                    (project_id, tbl_upload_id, session_id, original_file_name, l3_rows, events_rows, uploaded_by, status)
+                VALUES
+                    (@projectId, @uploadId, @sessionId, @originalFileName, @l3Rows, @eventRows, @uploadedBy, 1);";
+            AddDiagnosticParam(cmd, "@projectId", projectId > 0 ? projectId : DBNull.Value);
+            AddDiagnosticParam(cmd, "@uploadId", uploadId);
+            AddDiagnosticParam(cmd, "@sessionId", sessionId);
+            AddDiagnosticParam(cmd, "@originalFileName", Path.GetFileName(originalFileName));
+            AddDiagnosticParam(cmd, "@l3Rows", l3Rows);
+            AddDiagnosticParam(cmd, "@eventRows", eventRows);
+            AddDiagnosticParam(cmd, "@uploadedBy", resolvedUserId);
+            cmd.ExecuteNonQuery();
         }
 
         private void EnsureSitePredictionUploadColumns()
