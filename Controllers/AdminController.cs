@@ -461,6 +461,8 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
                 "alllogs:*",
                 "networklog:v2:*",
                 "networklog:v3:*",
+                "networklog:v14:*",
+                "networklog:v15:*",
                 "mapview:*",
                 "daterangelog:*",
                 "latlon:dist:*",

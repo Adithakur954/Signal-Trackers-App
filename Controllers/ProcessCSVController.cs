@@ -297,10 +297,18 @@ namespace SignalTracker.Controllers
     public string? site { get; set; }
     public string? site_name { get; set; }
     public string? sector { get; set; }
+
+    [Name("cell_id", "Cell Id", "cellId")]
     public string? cell_id { get; set; }
+
     public string? sec_id { get; set; }
+
+    [Name("longitude", "Longitude", "lon", "lng")]
     public string? longitude { get; set; }
+
+    [Name("latitude", "Latitude", "lat")]
     public string? latitude { get; set; }
+
     public string? tac { get; set; }
     public string? pci { get; set; }
     public string? azimuth { get; set; }
@@ -439,6 +447,8 @@ namespace SignalTracker.Controllers
             {
                 "networklog:v2:*",
                 "networklog:v3:*",
+                "networklog:v14:*",
+                "networklog:v15:*",
                 "mapview:*",
                 "daterangelog:*",
                 "latlon:dist:*",
@@ -591,58 +601,13 @@ public IActionResult UploadSitePrediction(
         using (var fs = new FileStream(savedPath, FileMode.Create))
             file.CopyTo(fs);
 
-        // 🔹 EXTRA: validate headers for site-prediction + network log CSV before processing
+        // Validate only the columns needed to create a site prediction row here.
+        // Optional phone/IP metrics are added below when present; requiring all of
+        // them makes valid frontend exports fail before they ever reach the DB.
         string[] expectedHeaders = new string[]
         {
-            // ---------- site prediction columns ----------
-            "site","site_name","sector","cell_id","longitude","latitude","tac","pci","azimuth",
-            "height","bw","m_tilt","e_tilt","maximum_transmission_power_of_resource",
-            "real_transmit_power_of_resource","reference_signal_power","frequency","band",
-            "earfcn",
-
-            // ---------- old network log (IP) columns ----------
-            "Timestamp","SourceIP","DestinationIP","SourcePort","DestinationPort",
-            "Protocol","PacketSize","Flags","TimeToLive","Length","Info",
-
-            // ---------- new phone/network measurement CSV columns ----------
-            "Latitude","Longitude","Battery","Network","dls","uls",
-            "total_rx_kb","total_tx_kb","HotSpot","Apps","MOS",
-
-            "CI  (5G - Nci 4G - Ci 3G - BasestationId 2G - Cid)",
-            "EARFCN (5G - NARFCN 4G - ERAFCN 3G - UARFCN 2G - ARFCN)",
-            "BLER (2G - bitErrorRate 3G - ber  Others - BLER)",
-            "CQI",
-            "Latency",
-            "Jitter",
-            "DL THPT",
-            "Level",
-            "Alpha Long",
-            "Alpha Short",
-
-            "MCC",
-            "MNC",
-            "TAC  (2G/3G - lac 4G/5G - tac)",
-            "PCI",
-            "RSRP",
-            "RSRQ",
-            "SINR",
-            "csiRsrp",
-            "csiRsrq",
-            "csiSinr",
-
-            "GPS Fix Type",
-            "GPS HDOP",
-            "GPS VDOP",
-
-            "NodeB Id",
-            "Phone Antenna Gain",
-            "Cell Id",
-            "Primary",
-            "Throughput Details",
-            "No of Cells",
-            "CellInfo_1",
-            "CellInfo_2"
-            // cluster / Technology are optional
+            "longitude",
+            "latitude"
         };
 
         string missingHeaders;
@@ -922,7 +887,7 @@ public IActionResult UploadSitePrediction(
 	                                    continue;
 	                                }
 
-	                                if (isZipFile && !IsNetworkLogCsv(uploadCsvName))
+	                                if (isZipFile && !uploadCsvName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase))
 	                                {
 	                                    continue;
 	                                }
@@ -948,15 +913,17 @@ public IActionResult UploadSitePrediction(
                                 // errors. Otherwise one bad CSV in the ZIP rolls back all valid
                                 // L3/Event/Network rows and the UI shows "Failed" with no data.
                                 var hasPersistedRows = sessionId > 0 && HasSessionUploadRows(sessionId, excelID);
-                                if (sessionId > 0 && (IsValidSheet || hasPersistedRows))
+                                if (sessionId > 0 && hasPersistedRows)
                                 {
                                     outerTx.Commit();
-                                    if (hasPersistedRows)
-                                        IsValidSheet = true;
+                                    IsValidSheet = true;
                                 }
                                 else
                                 {
                                     outerTx.Rollback();
+                                    IsValidSheet = false;
+                                    if (!allErrorList.Any(e => e.Contains("No valid network-log rows", StringComparison.OrdinalIgnoreCase)))
+                                        allErrorList.Add("No valid network-log rows were inserted. Please upload the NetworkLog CSV/export ZIP, or check that the file has Timestamp and Latitude/Longitude columns.");
                                 }
                             }
                             else
@@ -1361,6 +1328,11 @@ public IActionResult UploadSitePrediction(
 
                 if (!parsed)
                 {
+                    if (IsNetworkLogTrailerStart(rawDate))
+                    {
+                        break;
+                    }
+
                     // Xiaomi MODEL wali metadata row wagaira yahan aa jayegi, usko ignore kar denge
                     if (!char.IsDigit(rawDate.FirstOrDefault()))
                     {
@@ -1622,6 +1594,16 @@ public IActionResult UploadSitePrediction(
     return isColValValid;
 }
 
+        private static bool IsNetworkLogTrailerStart(string rawTimestamp)
+        {
+            if (string.IsNullOrWhiteSpace(rawTimestamp))
+                return false;
+
+            var value = rawTimestamp.Trim();
+            return value.StartsWith("---", StringComparison.Ordinal) ||
+                   string.Equals(value, "Seq", StringComparison.OrdinalIgnoreCase);
+        }
+
         private static bool IsColorSettingsCsv(string? fileName)
         {
             if (string.IsNullOrWhiteSpace(fileName))
@@ -1651,7 +1633,8 @@ public IActionResult UploadSitePrediction(
             var name = Path.GetFileName(fileName ?? string.Empty);
             return name.EndsWith(".csv", StringComparison.OrdinalIgnoreCase) &&
                    (name.StartsWith("NetworkLog_", StringComparison.OrdinalIgnoreCase) ||
-                    name.StartsWith("NetworkLogUnsent_", StringComparison.OrdinalIgnoreCase));
+                    name.StartsWith("NetworkLogUnsent_", StringComparison.OrdinalIgnoreCase) ||
+                    name.StartsWith("NetworkLogOffline_", StringComparison.OrdinalIgnoreCase));
         }
 
         private bool HasSessionUploadRows(int sessionId, int uploadId)
@@ -2247,8 +2230,15 @@ public IActionResult UploadSitePrediction(
                 inspect.Parameters.Add(columnParam);
 
                 var dataType = Convert.ToString(inspect.ExecuteScalar())?.Trim().ToLowerInvariant();
-                if (string.IsNullOrWhiteSpace(dataType) ||
-                    dataType is "char" or "varchar" or "tinytext" or "text" or "mediumtext" or "longtext")
+                if (string.IsNullOrWhiteSpace(dataType))
+                {
+                    using var add = conn.CreateCommand();
+                    add.CommandText = $"ALTER TABLE `{tableName.Replace("`", "``")}` ADD COLUMN `{columnName.Replace("`", "``")}` {columnDefinition};";
+                    add.ExecuteNonQuery();
+                    return;
+                }
+
+                if (dataType is "char" or "varchar" or "tinytext" or "text" or "mediumtext" or "longtext")
                 {
                     return;
                 }
@@ -2261,6 +2251,51 @@ public IActionResult UploadSitePrediction(
             {
                 if (shouldClose)
                     conn.Close();
+            }
+        }
+
+        private void EnsureSitePredictionUploadColumns()
+        {
+            EnsureVarcharColumn("site_prediction", "cell_id", "VARCHAR(64) NULL");
+            EnsureVarcharColumn("site_prediction_optimized", "cell_id", "VARCHAR(64) NULL");
+            EnsureVarcharColumn("site_prediction", "site", "VARCHAR(255) NULL");
+            EnsureVarcharColumn("site_prediction_optimized", "site", "VARCHAR(255) NULL");
+            EnsureVarcharColumn("site_prediction", "site_name", "VARCHAR(255) NULL");
+            EnsureVarcharColumn("site_prediction_optimized", "site_name", "VARCHAR(255) NULL");
+
+            var textColumns = new[]
+            {
+                "Timestamp",
+                "SourceIP",
+                "DestinationIP",
+                "SourcePort",
+                "DestinationPort",
+                "Protocol",
+                "PacketSize",
+                "Flags",
+                "TimeToLive",
+                "Length",
+                "Info",
+                "Battery",
+                "Network",
+                "dls",
+                "uls",
+                "total_rx_kb",
+                "total_tx_kb",
+                "HotSpot",
+                "Apps",
+                "MOS",
+                "RSRP",
+                "RSRQ",
+                "SINR",
+                "cluster",
+                "technology"
+            };
+
+            foreach (var column in textColumns)
+            {
+                EnsureTextColumn("site_prediction", column);
+                EnsureTextColumn("site_prediction_optimized", column);
             }
         }
 
@@ -2735,70 +2770,18 @@ public bool ProcessSitePredictionSheet(
 
     try
     {
-        EnsureVarcharColumn("site_prediction", "cell_id", "VARCHAR(64) NULL");
-        EnsureVarcharColumn("site_prediction_optimized", "cell_id", "VARCHAR(64) NULL");
-        EnsureVarcharColumn("site_prediction", "site", "VARCHAR(255) NULL");
-        EnsureVarcharColumn("site_prediction_optimized", "site", "VARCHAR(255) NULL");
-        EnsureVarcharColumn("site_prediction", "site_name", "VARCHAR(255) NULL");
-        EnsureVarcharColumn("site_prediction_optimized", "site_name", "VARCHAR(255) NULL");
+        EnsureSitePredictionUploadColumns();
 
         using var reader = new StreamReader(filePath, Encoding.UTF8);
         var config = CreateLenientCsvConfiguration();
         using var csv = new CsvReader(reader, config);
 
-        // 🔹 ALL REQUIRED HEADERS (site + all CSV columns)
+        // Only lat/lon are mandatory for storing a point. Other site, RF, phone,
+        // and IP columns are optional and are stored when the CSV contains them.
         string[] expectedHeaders = new string[]
         {
-            // ---------- site prediction columns ----------
-            "site","site_name","sector","cell_id","longitude","latitude","tac","pci","azimuth",
-            "height","bw","m_tilt","e_tilt","maximum_transmission_power_of_resource",
-            "real_transmit_power_of_resource","reference_signal_power","frequency","band",
-            "earfcn",
-             
-
-            // ---------- old network log (IP) columns ----------
-            "Timestamp","SourceIP","DestinationIP","SourcePort","DestinationPort",
-            "Protocol","PacketSize","Flags","TimeToLive","Length","Info",
-
-            // ---------- new phone/network measurement CSV columns ----------
-            "Latitude","Longitude","Battery","Network","dls","uls",
-            "total_rx_kb","total_tx_kb","HotSpot","Apps","MOS",
-
-            "CI  (5G - Nci 4G - Ci 3G - BasestationId 2G - Cid)",
-            "EARFCN (5G - NARFCN 4G - ERAFCN 3G - UARFCN 2G - ARFCN)",
-            "BLER (2G - bitErrorRate 3G - ber  Others - BLER)",
-            "CQI",
-            "Latency",
-            "Jitter",
-            "DL THPT",
-            "Level",
-            "Alpha Long",
-            "Alpha Short",
-
-            "MCC",
-            "MNC",
-            "TAC  (2G/3G - lac 4G/5G - tac)",
-            "PCI",
-            "RSRP",
-            "RSRQ",
-            "SINR",
-            "csiRsrp",
-            "csiRsrq",
-            "csiSinr",
-
-            "GPS Fix Type",
-            "GPS HDOP",
-            "GPS VDOP",
-
-            "NodeB Id",
-            "Phone Antenna Gain",
-            "Cell Id",
-            "Primary",
-            "Throughput Details",
-            "No of Cells",
-            "CellInfo_1",
-            "CellInfo_2"
-            // cluster / Technology still optional
+            "longitude",
+            "latitude"
         };
 
         string missingHeaders;
@@ -2817,6 +2800,7 @@ public bool ProcessSitePredictionSheet(
 	        try
 	        {
 	            int rowIndex = 1;
+                int rowsInsertedForThisFile = 0;
 
             foreach (var row in records)
             {
@@ -2885,6 +2869,9 @@ public bool ProcessSitePredictionSheet(
                     HotSpot         = row.HotSpot,
                     Apps            = row.Apps,
                     MOS             = row.MOS,
+                    RSRP            = row.RSRP,
+                    RSRQ            = row.RSRQ,
+                    SINR            = row.SINR,
 
                     // cluster / technology
                     cluster    = string.IsNullOrWhiteSpace(row.cluster) ? ResolveOperator(temp) : row.cluster,
@@ -2893,24 +2880,28 @@ public bool ProcessSitePredictionSheet(
 
                 if (obj.latitude == null || obj.longitude == null)
                 {
-                    errorList.Add($"Row {rowIndex}: Missing or invalid Latitude/Longitude.");
-                    isColValValid = false;
+                    errorList.Add($"Row {rowIndex}: Skipped because Latitude/Longitude is missing or invalid.");
                     rowIndex++;
                     continue;
                 }
 
                 db.Set<site_prediction>().Add(obj);
                 rowInserted++;
+                rowsInsertedForThisFile++;
                 rowIndex++;
             }
 
-	            if (isColValValid)
+	            if (rowsInsertedForThisFile > 0)
 	            {
 	                db.SaveChanges();
 	                uploadedSuccessSheetList.Add(fileName);
 	            }
 	            else
 	            {
+                    isColValValid = false;
+                    if (errorList.Count == 0)
+                        errorList.Add($"{fileName}: No valid rows found to store.");
+
 	                foreach (var e in db.ChangeTracker.Entries()
 	                             .Where(e => e.State is EntityState.Added or EntityState.Modified))
 	                {
