@@ -57,6 +57,9 @@ namespace SignalTracker.Controllers
             "networklog:v9:*",
             "networklog:v14:*",
             "networklog:v15:*",
+            "networklog:v16:*",
+            "networklog:v17:*",
+            "networklog:v18:*",
             "latlon:dist:*",
             "n78_simple_kpi:*",
             "n78_neighbours:*",
@@ -228,11 +231,14 @@ namespace SignalTracker.Controllers
             try
             {
                 await _redis.DeleteByPatternAsync("networklog:v8:*");
+                await _redis.DeleteByPatternAsync("networklog:v15:*");
+                await _redis.DeleteByPatternAsync("networklog:v16:*");
+                await _redis.DeleteByPatternAsync("networklog:v17:*");
                 ObsoleteNetworkLogCachesInvalidated = true;
             }
             catch
             {
-                // Best effort only. The v9 key still prevents stale reads.
+                // Best effort only. The versioned key still prevents stale reads.
             }
         }
 
@@ -7215,7 +7221,7 @@ private string BuildNetworkLogCacheKey(
         : "no_project";
     string versionKey = NormalizeCacheKeyPart(dataVersion);
 
-    return $"networklog:v15:{GetProjectListCacheScope()}:{sortedSessionIds}:{providerKey}:{networkTypeKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
+    return $"networklog:v18:{GetProjectListCacheScope()}:{sortedSessionIds}:{providerKey}:{networkTypeKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
 }
 
 private static string CleanProviderDisplayName(string value)
@@ -7233,6 +7239,7 @@ private static void NormalizeNetworkLogRows(List<NetworkLogCacheRow> rows)
 {
     foreach (var row in rows)
     {
+        ApplyNetworkLogDownloadSize(row);
         row.m_alpha_long = CleanProviderDisplayName(ResolvePreferredProviderName(row));
         row.provider = NormalizeNetworkLogProvider(row);
         row.band = NormalizeNetworkLogBand(row.band);
@@ -7244,6 +7251,271 @@ private static void NormalizeNetworkLogRows(List<NetworkLogCacheRow> rows)
         row.is_wifi = string.Equals(row.connection_type, "wifi", StringComparison.OrdinalIgnoreCase);
         row.log_type = row.is_wifi ? "wifi" : "network";
     }
+}
+
+private static void ApplyNetworkLogDownloadSize(NetworkLogCacheRow row)
+{
+    var metrics = ExtractDownloadSizeMetrics(row);
+    row.download_direction = metrics.Direction ?? "";
+    row.download_result_status = metrics.ResultStatus ?? "";
+    row.download_size_source = metrics.Source ?? "";
+    row.downloaded_file_size_bytes = metrics.TotalBytes;
+    row.downloaded_file_size_mb = BytesToMb(metrics.TotalBytes);
+    row.downloaded_file_size_4g_bytes = metrics.LteBytes;
+    row.downloaded_file_size_4g_mb = BytesToMb(metrics.LteBytes);
+    row.downloaded_file_size_5g_bytes = metrics.NrBytes;
+    row.downloaded_file_size_5g_mb = BytesToMb(metrics.NrBytes);
+}
+
+private static DownloadSizeMetrics ExtractDownloadSizeMetrics(NetworkLogCacheRow row)
+{
+    if (!TryParseJsonObject(row.extra_json, out var root))
+        return new DownloadSizeMetrics();
+
+    using (root)
+    {
+        var rootElement = root.RootElement;
+        var psElement = TryGetPropertyIgnoreCase(rootElement, "ps", out var psRaw)
+            ? ParsePossiblyLooseJsonObject(JsonElementToString(psRaw))
+            : null;
+
+        try
+        {
+            var ps = psElement?.RootElement;
+            var direction = FirstNonBlank(
+                ps.HasValue ? GetJsonString(ps.Value, "direction") : null,
+                GetJsonString(rootElement, "direction"));
+
+            var resultStatus = FirstNonBlank(
+                ps.HasValue ? GetJsonString(ps.Value, "result_status") : null,
+                GetJsonString(rootElement, "result_status"));
+
+            var directDownBytes = FirstJsonNumber(
+                ps.HasValue ? ps.Value : default,
+                rootElement,
+                "down_bytes",
+                "downloaded_bytes",
+                "download_bytes");
+
+            var fileSizeBytes = FirstJsonNumber(
+                ps.HasValue ? ps.Value : default,
+                rootElement,
+                "file_size_bytes",
+                "filesize_bytes");
+
+            var durationMs = FirstJsonNumber(
+                ps.HasValue ? ps.Value : default,
+                rootElement,
+                "duration_ms");
+
+            var lteMbps = FirstJsonNumber(rootElement, default, "lte_mac_dl_delivered_mbps", "lte_mac_dl_mbps");
+            var nrMbps = FirstJsonNumber(rootElement, default, "nr_mac_dl_delivered_mbps", "nr_mac_dl_mbps");
+
+            long? lteBytes = null;
+            long? nrBytes = null;
+            var source = "";
+
+            if (durationMs is > 0)
+            {
+                lteBytes = MbpsDurationToBytes(lteMbps, durationMs);
+                nrBytes = MbpsDurationToBytes(nrMbps, durationMs);
+            }
+
+            var totalBytesRaw = directDownBytes ?? fileSizeBytes;
+            long? totalBytes = totalBytesRaw.HasValue
+                ? Math.Max(0, (long)Math.Round(totalBytesRaw.Value))
+                : null;
+
+            if (totalBytes.HasValue)
+            {
+                source = directDownBytes.HasValue ? "ps.down_bytes" : "ps.file_size_bytes";
+                ScaleSplitToTotal(totalBytes.Value, ref lteBytes, ref nrBytes);
+            }
+            else
+            {
+                if (!durationMs.HasValue && (lteMbps is > 0 || nrMbps is > 0))
+                {
+                    lteBytes = MbpsDurationToBytes(lteMbps, 1000);
+                    nrBytes = MbpsDurationToBytes(nrMbps, 1000);
+                    source = "extra_json_mac_dl_mbps_1s_estimate";
+                }
+
+                var estimatedTotal = SafeAdd(lteBytes, nrBytes);
+                if (estimatedTotal.HasValue)
+                {
+                    totalBytes = estimatedTotal.Value;
+                    if (string.IsNullOrWhiteSpace(source))
+                        source = "extra_json_mac_dl_mbps_duration_estimate";
+                }
+            }
+
+            return new DownloadSizeMetrics
+            {
+                Direction = direction,
+                ResultStatus = resultStatus,
+                Source = source,
+                TotalBytes = totalBytes,
+                LteBytes = lteBytes,
+                NrBytes = nrBytes
+            };
+        }
+        finally
+        {
+            psElement?.Dispose();
+        }
+    }
+}
+
+private static JsonDocument? ParsePossiblyLooseJsonObject(string? raw)
+{
+    if (string.IsNullOrWhiteSpace(raw))
+        return null;
+
+    if (TryParseJsonObject(raw, out var strict))
+        return strict;
+
+    var normalized = raw.Trim();
+    if (normalized.StartsWith("{", StringComparison.Ordinal) &&
+        normalized.EndsWith("}", StringComparison.Ordinal))
+    {
+        normalized = normalized.Replace('\'', '"').Replace(';', ',');
+        if (TryParseJsonObject(normalized, out var loose))
+            return loose;
+    }
+
+    return null;
+}
+
+private static bool TryParseJsonObject(string? raw, out JsonDocument document)
+{
+    document = null!;
+    if (string.IsNullOrWhiteSpace(raw))
+        return false;
+
+    try
+    {
+        var parsed = JsonDocument.Parse(raw);
+        if (parsed.RootElement.ValueKind == JsonValueKind.Object)
+        {
+            document = parsed;
+            return true;
+        }
+
+        parsed.Dispose();
+    }
+    catch
+    {
+    }
+
+    return false;
+}
+
+private static string? JsonElementToString(JsonElement element)
+{
+    return element.ValueKind == JsonValueKind.String
+        ? element.GetString()
+        : element.GetRawText();
+}
+
+private static bool TryGetPropertyIgnoreCase(JsonElement element, string name, out JsonElement value)
+{
+    if (element.ValueKind == JsonValueKind.Object)
+    {
+        foreach (var property in element.EnumerateObject())
+        {
+            if (string.Equals(property.Name, name, StringComparison.OrdinalIgnoreCase))
+            {
+                value = property.Value;
+                return true;
+            }
+        }
+    }
+
+    value = default;
+    return false;
+}
+
+private static string? GetJsonString(JsonElement element, string name)
+{
+    if (!TryGetPropertyIgnoreCase(element, name, out var value))
+        return null;
+
+    return value.ValueKind == JsonValueKind.String
+        ? value.GetString()
+        : value.ToString();
+}
+
+private static double? FirstJsonNumber(JsonElement primary, JsonElement secondary, params string[] names)
+{
+    foreach (var name in names)
+    {
+        var value = GetJsonNumber(primary, name) ?? GetJsonNumber(secondary, name);
+        if (value.HasValue)
+            return value.Value;
+    }
+
+    return null;
+}
+
+private static double? GetJsonNumber(JsonElement element, string name)
+{
+    if (element.ValueKind != JsonValueKind.Object || !TryGetPropertyIgnoreCase(element, name, out var value))
+        return null;
+
+    if (value.ValueKind == JsonValueKind.Number && value.TryGetDouble(out var number))
+        return number;
+
+    if (value.ValueKind == JsonValueKind.String)
+        return TryParseNullableDouble(value.GetString());
+
+    return null;
+}
+
+private static long? MbpsDurationToBytes(double? mbps, double? durationMs)
+{
+    if (!mbps.HasValue || !durationMs.HasValue || mbps.Value <= 0 || durationMs.Value <= 0)
+        return null;
+
+    return (long)Math.Round(mbps.Value * (durationMs.Value / 1000d) * 1_000_000d / 8d);
+}
+
+private static long? SafeAdd(long? left, long? right)
+{
+    if (!left.HasValue && !right.HasValue)
+        return null;
+
+    return (left ?? 0) + (right ?? 0);
+}
+
+private static double? BytesToMb(long? bytes)
+{
+    return bytes.HasValue
+        ? Math.Round(bytes.Value / 1024d / 1024d, 3)
+        : null;
+}
+
+private static void ScaleSplitToTotal(double totalBytes, ref long? lteBytes, ref long? nrBytes)
+{
+    if (totalBytes < 0)
+        return;
+
+    var splitTotal = (lteBytes ?? 0) + (nrBytes ?? 0);
+    if (splitTotal <= 0)
+        return;
+
+    var scale = totalBytes / splitTotal;
+    lteBytes = (long)Math.Round((lteBytes ?? 0) * scale);
+    nrBytes = Math.Max(0, (long)Math.Round(totalBytes) - (lteBytes ?? 0));
+}
+
+private sealed class DownloadSizeMetrics
+{
+    public string? Direction { get; set; }
+    public string? ResultStatus { get; set; }
+    public string? Source { get; set; }
+    public long? TotalBytes { get; set; }
+    public long? LteBytes { get; set; }
+    public long? NrBytes { get; set; }
 }
 
 private static void Backfill5GNetworkLogFields(List<NetworkLogCacheRow> rows)
@@ -7590,6 +7862,15 @@ public class NetworkLogCacheRow
     public string log_type { get; set; } = "network";
     public bool is_wifi { get; set; }
     public string extra_json { get; set; } = "";
+    public long? downloaded_file_size_bytes { get; set; }
+    public double? downloaded_file_size_mb { get; set; }
+    public long? downloaded_file_size_4g_bytes { get; set; }
+    public double? downloaded_file_size_4g_mb { get; set; }
+    public long? downloaded_file_size_5g_bytes { get; set; }
+    public double? downloaded_file_size_5g_mb { get; set; }
+    public string download_direction { get; set; } = "";
+    public string download_result_status { get; set; } = "";
+    public string download_size_source { get; set; } = "";
 }
 
 // Delete project and unlink the polygon 
