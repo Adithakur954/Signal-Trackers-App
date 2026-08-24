@@ -393,6 +393,60 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
                 : $"id_{companyIdPart}:code_missing";
         }
 
+        private static DashboardDateFilter ResolveDashboardDateFilter(
+            DateTime? from,
+            DateTime? to,
+            int? month,
+            int? year,
+            int? defaultDays = null)
+        {
+            DateTime? effectiveFrom = null;
+            DateTime? effectiveToExclusive = null;
+
+            if (month.HasValue)
+            {
+                var safeMonth = Math.Clamp(month.Value, 1, 12);
+                var safeYear = year.GetValueOrDefault(DateTime.UtcNow.Year);
+                effectiveFrom = new DateTime(safeYear, safeMonth, 1);
+                effectiveToExclusive = effectiveFrom.Value.AddMonths(1);
+            }
+            else if (from.HasValue || to.HasValue)
+            {
+                effectiveFrom = from?.Date;
+                effectiveToExclusive = to?.Date.AddDays(1);
+            }
+            else if (defaultDays.HasValue)
+            {
+                effectiveToExclusive = DateTime.UtcNow.Date.AddDays(1);
+                effectiveFrom = effectiveToExclusive.Value.AddDays(-defaultDays.Value);
+            }
+
+            if (effectiveFrom.HasValue &&
+                effectiveToExclusive.HasValue &&
+                effectiveFrom.Value > effectiveToExclusive.Value)
+            {
+                var tmp = effectiveFrom;
+                effectiveFrom = effectiveToExclusive;
+                effectiveToExclusive = tmp.Value.AddDays(1);
+            }
+
+            return new DashboardDateFilter
+            {
+                From = effectiveFrom,
+                ToExclusive = effectiveToExclusive,
+                FromKey = effectiveFrom?.ToString("yyyyMMdd", CultureInfo.InvariantCulture) ?? "all",
+                ToKey = effectiveToExclusive?.AddDays(-1).ToString("yyyyMMdd", CultureInfo.InvariantCulture) ?? "all"
+            };
+        }
+
+        private sealed class DashboardDateFilter
+        {
+            public DateTime? From { get; set; }
+            public DateTime? ToExclusive { get; set; }
+            public string FromKey { get; set; } = "all";
+            public string ToKey { get; set; } = "all";
+        }
+
         private async Task<T?> TryGetCachedObjectAsync<T>(string cacheKey) where T : class
         {
             if (!IsRedisReady)
@@ -4344,7 +4398,12 @@ private sealed class DashboardTotalsV2Data
 }
 
        [HttpGet("TotalsV2")]
-public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
+public async Task<IActionResult> TotalsV2(
+    [FromQuery] int? company_id = null,
+    [FromQuery] DateTime? from = null,
+    [FromQuery] DateTime? to = null,
+    [FromQuery] int? month = null,
+    [FromQuery] int? year = null)
 {
     // =========================================================
     // 1. SMART SECURITY: RESOLVE COMPANY ID
@@ -4365,7 +4424,8 @@ public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
     // =========================================================
     // Cache must be isolated per company so Company A doesn't see Company B's totals.
     var companyScope = await GetDashboardCompanyCacheScopeAsync(targetCompanyId, useUserScope ? currentUserId : 0);
-    string cacheKey = $"DashboardTotalsV2:{GetCacheCountryScope()}:{companyScope}";
+    var dateFilter = ResolveDashboardDateFilter(from, to, month, year);
+    string cacheKey = $"DashboardTotalsV2:{GetCacheCountryScope()}:{companyScope}:{dateFilter.FromKey}:{dateFilter.ToKey}";
 
     try
     {
@@ -4389,26 +4449,40 @@ public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
         {
             // --- 1. Total Sessions (Filtered by Company) ---
             // Join Session -> User to check company_id
-            var totalSessions = await (
+            var sessionQuery =
                 from s in db.tbl_session.AsNoTracking()
                 join u in db.tbl_user.AsNoTracking() on s.user_id equals u.id
                 where useUserScope
                     ? s.user_id == currentUserId
                     : (targetCompanyId == 0 || u.company_id == targetCompanyId)
-                select s
-            ).CountAsync();
+                select s;
+
+            if (dateFilter.From.HasValue)
+                sessionQuery = sessionQuery.Where(s => s.start_time >= dateFilter.From.Value);
+
+            if (dateFilter.ToExclusive.HasValue)
+                sessionQuery = sessionQuery.Where(s => s.start_time < dateFilter.ToExclusive.Value);
+
+            var totalSessions = await sessionQuery.CountAsync();
 
             // --- 3. Total Samples (Filtered by Company) ---
             // This is the heaviest query. We must join Log -> Session -> User.
-            var totalSamples = await (
+            var sampleQuery =
                 from n in db.tbl_network_log.AsNoTracking()
                 join s in db.tbl_session.AsNoTracking() on n.session_id equals s.id
                 join u in db.tbl_user.AsNoTracking() on s.user_id equals u.id
                 where useUserScope
                     ? s.user_id == currentUserId
                     : (targetCompanyId == 0 || u.company_id == targetCompanyId)
-                select n
-            ).CountAsync();
+                select n;
+
+            if (dateFilter.From.HasValue)
+                sampleQuery = sampleQuery.Where(n => n.timestamp >= dateFilter.From.Value);
+
+            if (dateFilter.ToExclusive.HasValue)
+                sampleQuery = sampleQuery.Where(n => n.timestamp < dateFilter.ToExclusive.Value);
+
+            var totalSamples = await sampleQuery.CountAsync();
 
             // --- 4. Total Users (Filtered by Company) ---
             var totalUsers = await db.tbl_user.AsNoTracking()
@@ -4454,7 +4528,9 @@ public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
        [FromQuery] DateTime? toDate,
        [FromQuery] string provider = null,   // e.g. "a", "v", "j", "air", "vod", "jio"
        [FromQuery] string network = null,    // optional
-       [FromQuery] int? company_id = null)   // <--- ADDED PARAMETER
+       [FromQuery] int? company_id = null,   // <--- ADDED PARAMETER
+       [FromQuery] int? month = null,
+       [FromQuery] int? year = null)
         {
             // =========================================================
             // 1. SMART SECURITY: RESOLVE COMPANY ID
@@ -4470,10 +4546,11 @@ public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
             // =========================================================
             var normalizedProvider = string.IsNullOrWhiteSpace(provider) ? null : provider.Trim().ToLowerInvariant();
             var normalizedNetwork = string.IsNullOrWhiteSpace(network) ? null : network.Trim().ToLowerInvariant();
+            var dateFilter = ResolveDashboardDateFilter(fromDate, toDate, month, year);
 
             // Include CompanyID in cache key for isolation
             var companyScope = await GetDashboardCompanyCacheScopeAsync(targetCompanyId, useUserScope ? currentUserId : 0);
-            var cacheKey = $"NetDur:{GetCacheCountryScope()}:{companyScope}:{fromDate:yyyyMMdd}:{toDate:yyyyMMdd}:{normalizedProvider ?? "ALL"}:{normalizedNetwork ?? "ALL"}";
+            var cacheKey = $"NetDur:{GetCacheCountryScope()}:{companyScope}:{dateFilter.FromKey}:{dateFilter.ToKey}:{normalizedProvider ?? "ALL"}:{normalizedNetwork ?? "ALL"}";
 
             var result = new List<object>();
             var conn = db.Database.GetDbConnection();
@@ -4488,8 +4565,8 @@ public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
                     {
                         Status = 1,
                         CompanyID = targetCompanyId,
-                        FromDate = fromDate,
-                        ToDate = toDate,
+                        FromDate = dateFilter.From,
+                        ToDate = dateFilter.ToExclusive?.AddDays(-1),
                         ProviderFilter = provider,
                         NetworkFilter = network,
                         Count = cached.Count,
@@ -4526,7 +4603,7 @@ public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
                     JOIN tbl_user u ON s.user_id = u.id
                     WHERE (@global = 1 OR u.company_id = @companyId OR (@userId > 0 AND s.user_id = @userId))
                       AND (@fromDate IS NULL OR l.timestamp >= @fromDate)
-                      AND (@toDate   IS NULL OR l.timestamp <= @toDate)
+                      AND (@toDate   IS NULL OR l.timestamp < @toDate)
                       AND (@provider IS NULL OR LOWER(l.m_alpha_long) LIKE CONCAT('%', @provider, '%'))
                       AND (@network  IS NULL OR LOWER(l.network) = @network)
                 ) AS t
@@ -4542,8 +4619,8 @@ public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
                 Add(cmd, "@global", _userScope.IsSuperAdmin(User) && targetCompanyId == 0 ? 1 : 0);
                 Add(cmd, "@companyId", targetCompanyId);
                 Add(cmd, "@userId", useUserScope ? currentUserId : 0);
-                Add(cmd, "@fromDate", fromDate);
-                Add(cmd, "@toDate", toDate);
+                Add(cmd, "@fromDate", dateFilter.From);
+                Add(cmd, "@toDate", dateFilter.ToExclusive);
                 Add(cmd, "@provider", normalizedProvider);
                 Add(cmd, "@network", normalizedNetwork);
 
@@ -4570,8 +4647,8 @@ public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
                 {
                     Status = 1,
                     CompanyID = targetCompanyId,
-                    FromDate = fromDate,
-                    ToDate = toDate,
+                    FromDate = dateFilter.From,
+                    ToDate = dateFilter.ToExclusive?.AddDays(-1),
                     ProviderFilter = provider,
                     NetworkFilter = network,
                     Count = result.Count,
@@ -7023,7 +7100,12 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
         }    // Discovery APIs (retained for V2 endpoint usage)
 
         [HttpGet("OperatorsV2")]
-        public async Task<IActionResult> OperatorsV2([FromQuery] int? company_id = null)
+        public async Task<IActionResult> OperatorsV2(
+            [FromQuery] int? company_id = null,
+            [FromQuery] DateTime? from = null,
+            [FromQuery] DateTime? to = null,
+            [FromQuery] int? month = null,
+            [FromQuery] int? year = null)
         {
             // =========================================================
             // 1. SMART SECURITY: RESOLVE COMPANY ID
@@ -7039,7 +7121,8 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
 
     // 2. CACHE KEY
     var companyScope = await GetDashboardCompanyCacheScopeAsync(targetCompanyId, useUserScope ? currentUserId : 0);
-    string cacheKey = $"OperatorsList:{GetCacheCountryScope()}:{companyScope}";
+    var dateFilter = ResolveDashboardDateFilter(from, to, month, year, defaultDays: 90);
+    string cacheKey = $"OperatorsList:{GetCacheCountryScope()}:{companyScope}:{dateFilter.FromKey}:{dateFilter.ToKey}";
 
             
             if (_redis != null && _redis.IsConnected)
@@ -7056,8 +7139,6 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
             // =========================================================
             try
             {
-                // Keep this discovery API fast by limiting to recent activity.
-                var cutoff = DateTime.UtcNow.AddDays(-90);
                 List<string> operators;
 
                 if (targetCompanyId == 0 && !useUserScope)
@@ -7065,7 +7146,8 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
                     operators = await db.tbl_network_log.AsNoTracking()
                         .Where(l => !string.IsNullOrEmpty(l.m_alpha_long)
                                  && l.timestamp.HasValue
-                                 && l.timestamp.Value >= cutoff)
+                                 && (!dateFilter.From.HasValue || l.timestamp.Value >= dateFilter.From.Value)
+                                 && (!dateFilter.ToExclusive.HasValue || l.timestamp.Value < dateFilter.ToExclusive.Value))
                         .Select(l => l.m_alpha_long)
                         .Distinct()
                         .OrderBy(x => x)
@@ -7080,7 +7162,8 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
                         where (useUserScope ? s.user_id == currentUserId : u.company_id == targetCompanyId)
                            && !string.IsNullOrEmpty(l.m_alpha_long)
                            && l.timestamp.HasValue
-                           && l.timestamp.Value >= cutoff
+                           && (!dateFilter.From.HasValue || l.timestamp.Value >= dateFilter.From.Value)
+                           && (!dateFilter.ToExclusive.HasValue || l.timestamp.Value < dateFilter.ToExclusive.Value)
                         select l.m_alpha_long
                     )
                     .Distinct()
@@ -7105,7 +7188,12 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
         }
 
         [HttpGet("NetworksV2")]
-        public async Task<IActionResult> NetworksV2([FromQuery] int? company_id = null)
+        public async Task<IActionResult> NetworksV2(
+            [FromQuery] int? company_id = null,
+            [FromQuery] DateTime? from = null,
+            [FromQuery] DateTime? to = null,
+            [FromQuery] int? month = null,
+            [FromQuery] int? year = null)
         {
             // =========================================================
             // 1. SMART SECURITY: RESOLVE COMPANY ID
@@ -7120,7 +7208,8 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
 }
     // 2. CACHE KEY
     var companyScope = await GetDashboardCompanyCacheScopeAsync(targetCompanyId, useUserScope ? currentUserId : 0);
-    string cacheKey = $"NetworksList:{GetCacheCountryScope()}:{companyScope}";
+    var dateFilter = ResolveDashboardDateFilter(from, to, month, year, defaultDays: 90);
+    string cacheKey = $"NetworksList:{GetCacheCountryScope()}:{companyScope}:{dateFilter.FromKey}:{dateFilter.ToKey}";
 
            
             if (_redis != null && _redis.IsConnected)
@@ -7137,8 +7226,6 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
             // =========================================================
             try
             {
-                // Keep this discovery API fast by limiting to recent activity.
-                var cutoff = DateTime.UtcNow.AddDays(-90);
                 List<string> networks;
 
                 if (targetCompanyId == 0 && !useUserScope)
@@ -7146,7 +7233,8 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
                     networks = await db.tbl_network_log.AsNoTracking()
                         .Where(l => !string.IsNullOrEmpty(l.network)
                                  && l.timestamp.HasValue
-                                 && l.timestamp.Value >= cutoff)
+                                 && (!dateFilter.From.HasValue || l.timestamp.Value >= dateFilter.From.Value)
+                                 && (!dateFilter.ToExclusive.HasValue || l.timestamp.Value < dateFilter.ToExclusive.Value))
                         .Select(l => l.network)
                         .Distinct()
                         .OrderBy(x => x)
@@ -7161,7 +7249,8 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
                         where (useUserScope ? s.user_id == currentUserId : u.company_id == targetCompanyId)
                            && !string.IsNullOrEmpty(l.network)
                            && l.timestamp.HasValue
-                           && l.timestamp.Value >= cutoff
+                           && (!dateFilter.From.HasValue || l.timestamp.Value >= dateFilter.From.Value)
+                           && (!dateFilter.ToExclusive.HasValue || l.timestamp.Value < dateFilter.ToExclusive.Value)
                         select l.network
                     )
                     .Distinct()
