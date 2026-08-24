@@ -5991,12 +5991,13 @@ public async Task<JsonResult> CreateProjectWithPolygons([FromBody] CreateProject
         // =============== Logs: list/filter endpoints =============
         // =========================================================
 
-        public class MapFilter
+public class MapFilter
 {
     public int session_id { get; set; }
     public string? NetworkType { get; set; } // This now refers to Provider
     public DateTime? StartDate { get; set; }
     public DateTime? EndDate { get; set; }
+    public long? project_id { get; set; }
     public int page { get; set; } = 1;
     public int limit { get; set; } = 50000;
 }
@@ -9725,203 +9726,160 @@ public async Task<JsonResult> GetProviderWiseVolume([FromQuery] MapFilter filter
 
     try
     {
-        using var conn = db.Database.GetDbConnection();
-        if (conn.State != ConnectionState.Open)
-            await conn.OpenAsync();
-
         var cacheKey = BuildMapViewCacheKey(
-            "provider-wise-volume-v17",
+            "provider-wise-volume-v19",
             sessionIdsParam,
             filters?.StartDate,
             filters?.EndDate,
-            filters?.NetworkType ?? "all");
+            filters?.NetworkType ?? "all",
+            filters?.project_id?.ToString(CultureInfo.InvariantCulture) ?? "no_project");
         var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
         if (cached != null)
             return Json(cached);
 
-        // -----------------------------
-        // Date Filters
-        // -----------------------------
-        object fromParam = _networkLogData.ToInclusiveFrom(filters.StartDate);
-        object toParam = _networkLogData.ToExclusiveTo(filters.EndDate);
-
-        // -----------------------------
-        // Provider Filter
-        // -----------------------------
         string providerNormalized = _networkLogData.NormalizeProvider(filters.NetworkType);
-        object providerParam = _networkLogData.ToProviderLikeParameter(providerNormalized);
+        var networkLogFilters = new MapFilter1
+        {
+            session_ids = sessionIdsParam,
+            NetworkType = "ALL",
+            StartDate = filters?.StartDate,
+            EndDate = filters?.EndDate,
+            project_id = filters?.project_id
+        };
+        var (whereClause, parameters) = await BuildSqlWhereAsync(sessionIds, providerNormalized, networkLogFilters);
 
-        // -----------------------------
-        // Session IDs placeholders
-        // -----------------------------
-        string sessionIdsPlaceholder = _networkLogData.BuildSessionIdPlaceholders(sessionIds);
+        using var conn = db.Database.GetDbConnection();
+        if (conn.State != ConnectionState.Open)
+            await conn.OpenAsync();
 
-        // -----------------------------
-        // FINAL SQL
-        // -----------------------------
-string sql = $@"
-WITH session_provider_counts AS (
+        string sql = $@"
+WITH base_logs AS (
     SELECT
+        id,
         session_id,
-        LOWER(TRIM(m_alpha_long)) AS provider,
-        COUNT(*) AS provider_count
-    FROM tbl_network_log
-    WHERE session_id IN ({sessionIdsPlaceholder})
-      AND m_alpha_long IS NOT NULL
-      AND TRIM(m_alpha_long) <> ''
-      AND LOWER(TRIM(m_alpha_long)) <> 'unknown'
-    GROUP BY session_id, LOWER(TRIM(m_alpha_long))
-),
-session_providers AS (
-    SELECT session_id, provider
-    FROM (
-        SELECT
-            session_id,
-            provider,
-            ROW_NUMBER() OVER (
-                PARTITION BY session_id
-                ORDER BY provider_count DESC, provider
-            ) AS rn
-        FROM session_provider_counts
-    ) ranked_providers
-    WHERE rn = 1
-),
-base_logs AS (
-    SELECT
-        l.session_id,
-        COALESCE(NULLIF(LOWER(TRIM(l.m_alpha_long)), ''), sp.provider) AS provider,
+        COALESCE(NULLIF(TRIM(m_alpha_long), ''), NULLIF(TRIM(m_alpha_short), '')) AS provider,
         CASE
-            WHEN UPPER(TRIM(COALESCE(l.network, ''))) = '4G(LTE-ANCHOR NSA)'
-              OR UPPER(COALESCE(l.network, '')) LIKE '%LTE ANCHOR%'
-              OR UPPER(COALESCE(l.network, '')) LIKE '%LTE-ANCHOR%'
-              OR UPPER(COALESCE(l.network, '')) LIKE '%LTE_ANCHOR%'
-              OR UPPER(COALESCE(l.network, '')) LIKE '%LTE ANCHORE%'
-              OR UPPER(COALESCE(l.network, '')) LIKE '%LTE-ANCHORE%'
-              OR UPPER(COALESCE(l.network, '')) LIKE '%LTE_ANCHORE%' THEN '4G(LTE-ANCHOR NSA)'
+            WHEN UPPER(TRIM(COALESCE(network, ''))) = '4G(LTE-ANCHOR NSA)'
+              OR UPPER(COALESCE(network, '')) LIKE '%LTE ANCHOR%'
+              OR UPPER(COALESCE(network, '')) LIKE '%LTE-ANCHOR%'
+              OR UPPER(COALESCE(network, '')) LIKE '%LTE_ANCHOR%'
+              OR UPPER(COALESCE(network, '')) LIKE '%LTE ANCHORE%'
+              OR UPPER(COALESCE(network, '')) LIKE '%LTE-ANCHORE%'
+              OR UPPER(COALESCE(network, '')) LIKE '%LTE_ANCHORE%' THEN '4G(LTE-ANCHOR NSA)'
             WHEN (
-                    UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''))) LIKE '%5G%'
-                 OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%NR NSA%'
-                 OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%NR SA%'
-                 OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%NR-CA%'
-                 OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%NR-DC%'
-                 OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%VONR%'
-                 OR UPPER(COALESCE(l.network, '')) LIKE '%ENDC%'
-                 OR UPPER(COALESCE(l.network, '')) LIKE '%EN-DC%'
-                 OR UPPER(COALESCE(l.network, '')) LIKE '%NSA%'
-                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''))) LIKE '%NRARFCN%'
-                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''))) LIKE '%MNR%'
-                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''))) LIKE '%NCI%'
-                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''))) REGEXP '(^|[^A-Z0-9])NR([^A-Z0-9]|$)'
-                 OR UPPER(CONCAT_WS(' ', COALESCE(l.network, ''), COALESCE(l.band, ''))) REGEXP '(^|[^A-Z0-9])N[0-9]{{1,3}}([^A-Z0-9]|$)'
-                 OR UPPER(TRIM(COALESCE(l.network, ''))) = 'SA'
-                 OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '% SA%'
+                    UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''))) LIKE '%5G%'
+                 OR UPPER(TRIM(COALESCE(network, ''))) LIKE '%NR NSA%'
+                 OR UPPER(TRIM(COALESCE(network, ''))) LIKE '%NR SA%'
+                 OR UPPER(TRIM(COALESCE(network, ''))) LIKE '%NR-CA%'
+                 OR UPPER(TRIM(COALESCE(network, ''))) LIKE '%NR-DC%'
+                 OR UPPER(TRIM(COALESCE(network, ''))) LIKE '%VONR%'
+                 OR UPPER(COALESCE(network, '')) LIKE '%ENDC%'
+                 OR UPPER(COALESCE(network, '')) LIKE '%EN-DC%'
+                 OR UPPER(COALESCE(network, '')) LIKE '%NSA%'
+                 OR UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''))) LIKE '%NRARFCN%'
+                 OR UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''))) LIKE '%MNR%'
+                 OR UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''))) LIKE '%NCI%'
+                 OR UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''))) REGEXP '(^|[^A-Z0-9])NR([^A-Z0-9]|$)'
+                 OR UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''))) REGEXP '(^|[^A-Z0-9])N[0-9]{{1,3}}([^A-Z0-9]|$)'
+                 OR UPPER(TRIM(COALESCE(network, ''))) = 'SA'
+                 OR UPPER(TRIM(COALESCE(network, ''))) LIKE '% SA%'
                 ) THEN '5G'
-            WHEN UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%4G%'
-              OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%LTE%'
-              OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%LTE-A%'
-              OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%LTE A%'
-              OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%LTE CA%'
-              OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%VOLTE%'
-              OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%NB-IOT%'
-              OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%LTE-M%' THEN '4G'
-            WHEN UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%3G%'
-              OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%WCDMA%'
-              OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%UMTS%'
-              OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%HSPA%'
-              OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%DC-HSPA+%' THEN '3G'
-            WHEN UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%2G%'
-              OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%GSM%'
-              OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%EDGE%'
-              OR UPPER(TRIM(COALESCE(l.network, ''))) LIKE '%GPRS%' THEN '2G'
+            WHEN UPPER(TRIM(COALESCE(network, ''))) LIKE '%4G%'
+              OR UPPER(TRIM(COALESCE(network, ''))) LIKE '%LTE%'
+              OR UPPER(TRIM(COALESCE(network, ''))) LIKE '%LTE-A%'
+              OR UPPER(TRIM(COALESCE(network, ''))) LIKE '%LTE A%'
+              OR UPPER(TRIM(COALESCE(network, ''))) LIKE '%LTE CA%'
+              OR UPPER(TRIM(COALESCE(network, ''))) LIKE '%VOLTE%'
+              OR UPPER(TRIM(COALESCE(network, ''))) LIKE '%NB-IOT%'
+              OR UPPER(TRIM(COALESCE(network, ''))) LIKE '%LTE-M%' THEN '4G'
+            WHEN UPPER(TRIM(COALESCE(network, ''))) LIKE '%3G%'
+              OR UPPER(TRIM(COALESCE(network, ''))) LIKE '%WCDMA%'
+              OR UPPER(TRIM(COALESCE(network, ''))) LIKE '%UMTS%'
+              OR UPPER(TRIM(COALESCE(network, ''))) LIKE '%HSPA%'
+              OR UPPER(TRIM(COALESCE(network, ''))) LIKE '%DC-HSPA+%' THEN '3G'
+            WHEN UPPER(TRIM(COALESCE(network, ''))) LIKE '%2G%'
+              OR UPPER(TRIM(COALESCE(network, ''))) LIKE '%GSM%'
+              OR UPPER(TRIM(COALESCE(network, ''))) LIKE '%EDGE%'
+              OR UPPER(TRIM(COALESCE(network, ''))) LIKE '%GPRS%' THEN '2G'
             ELSE 'Unknown'
         END AS tech,
-        l.timestamp,
-        CAST(l.total_rx_kb AS DECIMAL(18,4)) AS total_rx_kb,
-        CAST(l.total_tx_kb AS DECIMAL(18,4)) AS total_tx_kb,
+        timestamp,
         CASE
-            WHEN l.dl_tpt IS NOT NULL
-              AND TRIM(CAST(l.dl_tpt AS CHAR)) REGEXP '^-?[0-9]+(\\.[0-9]+)?$'
-            THEN CAST(l.dl_tpt AS DECIMAL(18,4))
+            WHEN total_rx_kb IS NOT NULL
+              AND TRIM(CAST(total_rx_kb AS CHAR)) REGEXP '^[0-9]+(\\.[0-9]+)?$'
+            THEN CAST(total_rx_kb AS DECIMAL(18,4))
+            ELSE NULL
+        END AS rx_counter_bytes,
+        CASE
+            WHEN total_tx_kb IS NOT NULL
+              AND TRIM(CAST(total_tx_kb AS CHAR)) REGEXP '^[0-9]+(\\.[0-9]+)?$'
+            THEN CAST(total_tx_kb AS DECIMAL(18,4))
+            ELSE NULL
+        END AS tx_counter_bytes,
+        CASE
+            WHEN dl_tpt IS NOT NULL
+              AND TRIM(CAST(dl_tpt AS CHAR)) REGEXP '^-?[0-9]+(\\.[0-9]+)?$'
+            THEN CAST(dl_tpt AS DECIMAL(18,4))
             ELSE NULL
         END AS dl_tpt_mbps,
         CASE
-            WHEN l.ul_tpt IS NOT NULL
-              AND TRIM(CAST(l.ul_tpt AS CHAR)) REGEXP '^-?[0-9]+(\\.[0-9]+)?$'
-            THEN CAST(l.ul_tpt AS DECIMAL(18,4))
+            WHEN ul_tpt IS NOT NULL
+              AND TRIM(CAST(ul_tpt AS CHAR)) REGEXP '^-?[0-9]+(\\.[0-9]+)?$'
+            THEN CAST(ul_tpt AS DECIMAL(18,4))
             ELSE NULL
         END AS ul_tpt_mbps
-    FROM tbl_network_log l
-    LEFT JOIN session_providers sp ON sp.session_id = l.session_id
-    WHERE l.session_id IN ({sessionIdsPlaceholder})
-      AND COALESCE(NULLIF(LOWER(TRIM(l.m_alpha_long)), ''), sp.provider) IS NOT NULL
-      AND COALESCE(NULLIF(LOWER(TRIM(l.m_alpha_long)), ''), sp.provider) <> 'unknown'
-      AND (@from IS NULL OR l.timestamp >= @from)
-      AND (@to IS NULL OR l.timestamp < @to)
-      AND (@provider IS NULL OR COALESCE(NULLIF(LOWER(TRIM(l.m_alpha_long)), ''), sp.provider) LIKE @provider)
+    FROM tbl_network_log
+    WHERE {whereClause}
+),
+filtered_logs AS (
+    SELECT *
+    FROM base_logs
+    WHERE provider IS NOT NULL
+      AND TRIM(provider) <> ''
+      AND LOWER(TRIM(provider)) <> 'unknown'
+      AND tech <> 'Unknown'
 ),
 ordered_logs AS (
     SELECT
+        id,
         session_id,
         provider,
         tech,
         timestamp,
-        total_rx_kb,
-        total_tx_kb,
         dl_tpt_mbps,
         ul_tpt_mbps,
+        rx_counter_bytes,
+        tx_counter_bytes,
+        LAG(rx_counter_bytes) OVER (
+            PARTITION BY session_id, provider, tech
+            ORDER BY timestamp, id
+        ) AS prev_rx_counter_bytes,
+        LAG(tx_counter_bytes) OVER (
+            PARTITION BY session_id, provider, tech
+            ORDER BY timestamp, id
+        ) AS prev_tx_counter_bytes,
         UNIX_TIMESTAMP(timestamp)
         - UNIX_TIMESTAMP(
             LAG(timestamp) OVER (
                 PARTITION BY session_id, provider, tech
-                ORDER BY timestamp
+                ORDER BY timestamp, id
             )
         ) AS gap_sec
-    FROM base_logs
-),
-filtered_logs AS (
-    SELECT *
-    FROM ordered_logs
-    WHERE tech <> 'Unknown'
-),
-grouped_logs AS (
-    SELECT
-        filtered_logs.*,
-        SUM(
-            CASE
-                WHEN gap_sec IS NULL THEN 1
-                WHEN gap_sec > 120 THEN 1
-                ELSE 0
-            END
-        ) OVER (
-            PARTITION BY session_id, provider, tech
-            ORDER BY timestamp
-        ) AS grp
     FROM filtered_logs
-),
-duration_intervals AS (
-    SELECT
-        session_id,
-        provider,
-        tech,
-        grp,
-        MIN(timestamp) AS start_time,
-        MAX(timestamp) AS end_time,
-        TIMESTAMPDIFF(SECOND, MIN(timestamp), MAX(timestamp)) AS duration_sec
-    FROM grouped_logs
-    GROUP BY session_id, provider, tech, grp
-),
-duration_summary AS (
-    SELECT
-        session_id,
-        provider,
-        tech,
-        SUM(duration_sec) AS duration_sec
-    FROM duration_intervals
-    GROUP BY session_id, provider, tech
 ),
 ranked_logs AS (
     SELECT
-        filtered_logs.*,
+        ordered_logs.*,
+        CASE
+            WHEN rx_counter_bytes IS NULL OR prev_rx_counter_bytes IS NULL THEN 0
+            WHEN rx_counter_bytes >= prev_rx_counter_bytes THEN rx_counter_bytes - prev_rx_counter_bytes
+            ELSE 0
+        END AS rx_delta_bytes,
+        CASE
+            WHEN tx_counter_bytes IS NULL OR prev_tx_counter_bytes IS NULL THEN 0
+            WHEN tx_counter_bytes >= prev_tx_counter_bytes THEN tx_counter_bytes - prev_tx_counter_bytes
+            ELSE 0
+        END AS tx_delta_bytes,
         ROW_NUMBER() OVER (
             PARTITION BY session_id, provider, tech
             ORDER BY CASE WHEN NULLIF(dl_tpt_mbps, 0) IS NULL THEN 1 ELSE 0 END, dl_tpt_mbps
@@ -9936,23 +9894,16 @@ ranked_logs AS (
         COUNT(NULLIF(ul_tpt_mbps, 0)) OVER (
             PARTITION BY session_id, provider, tech
         ) AS ul_cnt
-    FROM filtered_logs
+    FROM ordered_logs
 )
-
 SELECT
     rl.session_id,
     rl.provider,
     rl.tech,
     COUNT(*) AS sample_count,
-
-	    -- Volume in GB
-	    ROUND(GREATEST(MAX(rl.total_rx_kb) - MIN(rl.total_rx_kb), 0) / 1024 / 1024, 2) AS dl_gb,
-	    ROUND(GREATEST(MAX(rl.total_tx_kb) - MIN(rl.total_tx_kb), 0) / 1024 / 1024, 2) AS ul_gb,
-
-    -- Duration (INT64)
-    COALESCE(MAX(ds.duration_sec), 0) AS duration_sec,
-
-    -- Avg throughput comes from logged dl_tpt / ul_tpt samples, grouped by technology.
+    ROUND(COALESCE(SUM(rl.rx_delta_bytes), 0) / 1024 / 1024 / 1024, 2) AS dl_gb,
+    ROUND(COALESCE(SUM(rl.tx_delta_bytes), 0) / 1024 / 1024 / 1024, 2) AS ul_gb,
+    COALESCE(SUM(CASE WHEN rl.gap_sec > 0 AND rl.gap_sec <= 120 THEN rl.gap_sec ELSE 0 END), 0) AS duration_sec,
     ROUND(MIN(NULLIF(rl.dl_tpt_mbps, 0)), 3) AS min_dl_mbps,
     ROUND(MAX(NULLIF(rl.dl_tpt_mbps, 0)), 3) AS max_dl_mbps,
     ROUND(AVG(NULLIF(rl.dl_tpt_mbps, 0)), 3) AS avg_dl_mbps,
@@ -9979,13 +9930,11 @@ SELECT
             ELSE NULL
         END
     ), 3) AS median_ul_mbps,
-    COUNT(DISTINCT NULLIF(rl.ul_tpt_mbps, 0)) AS distinct_ul_count
+    COUNT(DISTINCT NULLIF(rl.ul_tpt_mbps, 0)) AS distinct_ul_count,
+    MAX(rl.dl_cnt) AS dl_sample_count,
+    MAX(rl.ul_cnt) AS ul_sample_count
 
 FROM ranked_logs rl
-LEFT JOIN duration_summary ds
-    ON ds.session_id = rl.session_id
-   AND ds.provider = rl.provider
-   AND ds.tech = rl.tech
 GROUP BY rl.session_id, rl.provider, rl.tech;
 ";
 
@@ -9994,10 +9943,8 @@ GROUP BY rl.session_id, rl.provider, rl.tech;
         using var cmd = conn.CreateCommand();
         cmd.CommandText = sql;
 
-        _networkLogData.AddSessionIdParameters(cmd, sessionIds);
-        _networkLogData.Add(cmd, "@from", fromParam);
-        _networkLogData.Add(cmd, "@to", toParam);
-        _networkLogData.Add(cmd, "@provider", providerParam);
+        foreach (var p in parameters)
+            _networkLogData.Add(cmd, p.Key, p.Value);
 
         using var rd = await cmd.ExecuteReaderAsync();
         while (await rd.ReadAsync())
@@ -10037,6 +9984,8 @@ GROUP BY rl.session_id, rl.provider, rl.tech;
     double stddevUlMbps = rd.IsDBNull(16) ? 0 : Convert.ToDouble(rd.GetValue(16));
     double medianUlMbps = rd.IsDBNull(17) ? 0 : Convert.ToDouble(rd.GetValue(17));
     int distinctUlCount = rd.IsDBNull(18) ? 0 : Convert.ToInt32(rd.GetValue(18));
+    int dlSampleCount = rd.IsDBNull(19) ? 0 : Convert.ToInt32(rd.GetValue(19));
+    int ulSampleCount = rd.IsDBNull(20) ? 0 : Convert.ToInt32(rd.GetValue(20));
 
             string sessionKey = sessionId.ToString();
 
@@ -10062,6 +10011,7 @@ GROUP BY rl.session_id, rl.provider, rl.tech;
                 stddev_dl_mbps = stddevDlMbps,
                 median_dl_mbps = medianDlMbps,
                 distinct_dl_count = distinctDlCount,
+                dl_sample_count = dlSampleCount,
                 is_constant_dl_tpt = sampleCount > 1 && distinctDlCount == 1,
                 min_ul_mbps = minUlMbps,
                 max_ul_mbps = maxUlMbps,
@@ -10069,6 +10019,7 @@ GROUP BY rl.session_id, rl.provider, rl.tech;
                 stddev_ul_mbps = stddevUlMbps,
                 median_ul_mbps = medianUlMbps,
                 distinct_ul_count = distinctUlCount,
+                ul_sample_count = ulSampleCount,
                 is_constant_ul_tpt = sampleCount > 1 && distinctUlCount == 1,
                 is_constant_tpt = sampleCount > 1 && distinctDlCount == 1 && distinctUlCount == 1
             };
