@@ -272,9 +272,11 @@ protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
                 e.ToTable("tbl_upload_history");
             });
 
-            modelBuilder.Entity<tbl_dashboard_cache>()
-                .HasIndex(x => x.cache_key)
-                .IsUnique();
+            modelBuilder.Entity<tbl_dashboard_cache>(e =>
+            {
+                e.ToTable("tbl_dashboard_cache");
+                e.HasIndex(x => new { x.company_code, x.cache_key }).IsUnique();
+            });
 
             // ---- 2. Keyless DTOs (Views/Raw SQL results) ----
 

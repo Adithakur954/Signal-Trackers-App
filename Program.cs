@@ -127,6 +127,59 @@ internal class Program
         }
     }
 
+    private static void EnsureDashboardCacheCompanyCodeColumnExists(WebApplication app)
+    {
+        try
+        {
+            using var scope = app.Services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var conn = db.Database.GetDbConnection();
+            var shouldClose = conn.State != ConnectionState.Open;
+            if (shouldClose)
+                conn.Open();
+
+            try
+            {
+                using var tableExists = conn.CreateCommand();
+                tableExists.CommandText = @"
+                    SELECT COUNT(*)
+                    FROM information_schema.tables
+                    WHERE table_schema = DATABASE()
+                      AND table_name = 'tbl_dashboard_cache';";
+
+                var hasTable = Convert.ToInt32(tableExists.ExecuteScalar()) > 0;
+                if (!hasTable)
+                    return;
+
+                using var exists = conn.CreateCommand();
+                exists.CommandText = @"
+                    SELECT COUNT(*)
+                    FROM information_schema.columns
+                    WHERE table_schema = DATABASE()
+                      AND table_name = 'tbl_dashboard_cache'
+                      AND column_name = 'company_code';";
+
+                var count = Convert.ToInt32(exists.ExecuteScalar());
+                if (count > 0)
+                    return;
+
+                using var add = conn.CreateCommand();
+                add.CommandText = "ALTER TABLE tbl_dashboard_cache ADD COLUMN company_code VARCHAR(100) NULL;";
+                add.ExecuteNonQuery();
+                Console.WriteLine("Added missing column tbl_dashboard_cache.company_code.");
+            }
+            finally
+            {
+                if (shouldClose)
+                    conn.Close();
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Could not ensure column tbl_dashboard_cache.company_code: {ex.Message}");
+        }
+    }
+
     private static void DropRemovedSitePredictionColumns(WebApplication app)
     {
         var removedColumns = new[]
@@ -425,6 +478,7 @@ internal class Program
         var app = builder.Build();
         EnsureSitePredictionColorColumnExists(app);
         EnsureUploadHistoryOriginalFileNameColumnExists(app);
+        EnsureDashboardCacheCompanyCodeColumnExists(app);
         DropRemovedSitePredictionColumns(app);
 
         // ----------------------------------------------------

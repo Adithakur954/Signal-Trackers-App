@@ -665,6 +665,7 @@ public class IndoorOutdoorLogDto
       public class tbl_dashboard_cache
        {
     public int id { get; set; }
+    public string? company_code { get; set; }
     public string cache_key { get; set; } = null!;
     public string json_data { get; set; } = null!;
     public DateTime last_updated { get; set; }

@@ -373,6 +373,26 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
             };
         }
 
+        private async Task<string> GetDashboardCompanyCacheScopeAsync(int targetCompanyId, int scopedUserId = 0)
+        {
+            if (scopedUserId > 0)
+                return $"user_{scopedUserId.ToString(CultureInfo.InvariantCulture)}";
+
+            if (targetCompanyId <= 0)
+                return "global";
+
+            var companyCode = await db.tbl_company
+                .AsNoTracking()
+                .Where(c => c.id == targetCompanyId)
+                .Select(c => c.company_code)
+                .FirstOrDefaultAsync();
+
+            var companyIdPart = targetCompanyId.ToString(CultureInfo.InvariantCulture);
+            return !string.IsNullOrWhiteSpace(companyCode)
+                ? $"id_{companyIdPart}:code_{NormalizeCacheSegment(companyCode)}"
+                : $"id_{companyIdPart}:code_missing";
+        }
+
         private async Task<T?> TryGetCachedObjectAsync<T>(string cacheKey) where T : class
         {
             if (!IsRedisReady)
@@ -4344,7 +4364,8 @@ public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
     // 2. DEFINE CACHE KEY (Include Company ID)
     // =========================================================
     // Cache must be isolated per company so Company A doesn't see Company B's totals.
-    string cacheKey = $"DashboardTotalsV2:{GetCacheCountryScope()}:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}";
+    var companyScope = await GetDashboardCompanyCacheScopeAsync(targetCompanyId, useUserScope ? currentUserId : 0);
+    string cacheKey = $"DashboardTotalsV2:{GetCacheCountryScope()}:{companyScope}";
 
     try
     {
@@ -4451,7 +4472,8 @@ public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
             var normalizedNetwork = string.IsNullOrWhiteSpace(network) ? null : network.Trim().ToLowerInvariant();
 
             // Include CompanyID in cache key for isolation
-            var cacheKey = $"NetDur:{GetCacheCountryScope()}:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:{fromDate:yyyyMMdd}:{toDate:yyyyMMdd}:{normalizedProvider ?? "ALL"}:{normalizedNetwork ?? "ALL"}";
+            var companyScope = await GetDashboardCompanyCacheScopeAsync(targetCompanyId, useUserScope ? currentUserId : 0);
+            var cacheKey = $"NetDur:{GetCacheCountryScope()}:{companyScope}:{fromDate:yyyyMMdd}:{toDate:yyyyMMdd}:{normalizedProvider ?? "ALL"}:{normalizedNetwork ?? "ALL"}";
 
             var result = new List<object>();
             var conn = db.Database.GetDbConnection();
@@ -4829,7 +4851,8 @@ public async Task<IActionResult> MonthlySamplesV2(
     string netKey = netSet != null
         ? string.Join(",", netSet.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
         : "ALL";
-    string cacheKey = $"MonthlySamples:{GetCacheCountryScope()}:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:{opKey}:{netKey}:{fromKey}:{toKey}";
+    var companyScope = await GetDashboardCompanyCacheScopeAsync(targetCompanyId, useUserScope ? currentUserId : 0);
+    string cacheKey = $"MonthlySamples:{GetCacheCountryScope()}:{companyScope}:{opKey}:{netKey}:{fromKey}:{toKey}";
 
     // 3. Try to fetch data from Redis Cache
     if (_redis != null && _redis.IsConnected)
@@ -5313,7 +5336,8 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
                 ? string.Join(",", netSet.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
                 : "ALL";
 
-            string cacheKey = $"OpSamples:{GetCacheCountryScope()}:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:{opKey}:{netKey}:{fromKey}:{toKey}";
+            var companyScope = await GetDashboardCompanyCacheScopeAsync(targetCompanyId, useUserScope ? currentUserId : 0);
+            string cacheKey = $"OpSamples:{GetCacheCountryScope()}:{companyScope}:{opKey}:{netKey}:{fromKey}:{toKey}";
 
             // =========================================================
             // 3. TRY REDIS
@@ -5576,7 +5600,8 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
             // =========================================================
             string opKey = operatorName?.ToLower() ?? "all";
             string netKey = networkType?.ToLower() ?? "all";
-            string cacheKey = $"OpAvgTpt10:{GetCacheCountryScope()}:{targetCompanyId}:{opKey}:{netKey}:{fromDate:yyyyMMdd}:{toDate:yyyyMMdd}";
+            var companyScope = await GetDashboardCompanyCacheScopeAsync(targetCompanyId);
+            string cacheKey = $"OpAvgTpt10:{GetCacheCountryScope()}:{companyScope}:{opKey}:{netKey}:{fromDate:yyyyMMdd}:{toDate:yyyyMMdd}";
 
             // =========================================================
             // 4. TRY REDIS
@@ -5766,7 +5791,8 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
             string fromKey = from?.ToString("yyyyMMdd") ?? "null";
             string toKey = to?.ToString("yyyyMMdd") ?? "null";
             string opKey = operatorName ?? "ALL";
-            string cacheKey = $"netdist:{GetCacheCountryScope()}:{targetCompanyId}:{opKey}:{fromKey}:{toKey}";
+            var companyScope = await GetDashboardCompanyCacheScopeAsync(targetCompanyId);
+            string cacheKey = $"netdist:{GetCacheCountryScope()}:{companyScope}:{opKey}:{fromKey}:{toKey}";
 
             // =========================================================
             // 3. TRY REDIS
@@ -5929,7 +5955,8 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
             string opKey = operatorName ?? "ALL";
             string netKey = networkType ?? "ALL";
 
-            string cacheKey = $"Avg{metricName}:{GetCacheCountryScope()}:{targetCompanyId}:{opKey}:{netKey}:{fromKey}:{toKey}";
+            var companyScope = await GetDashboardCompanyCacheScopeAsync(targetCompanyId);
+            string cacheKey = $"Avg{metricName}:{GetCacheCountryScope()}:{companyScope}:{opKey}:{netKey}:{fromKey}:{toKey}";
 
             // ---------------------------------------------------------
             // 4. TRY REDIS
@@ -6087,7 +6114,8 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
             string fromKey = hasDateFilter ? effectiveFrom.ToString("yyyyMMdd") : "ALL";
             string toKey = hasDateFilter ? effectiveTo.ToString("yyyyMMdd") : "ALL";
 
-            string cacheKey = $"BandDist:{GetCacheCountryScope()}:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:{opKey}:{netKey}:{fromKey}:{toKey}";
+            var companyScope = await GetDashboardCompanyCacheScopeAsync(targetCompanyId, useUserScope ? currentUserId : 0);
+            string cacheKey = $"BandDist:{GetCacheCountryScope()}:{companyScope}:{opKey}:{netKey}:{fromKey}:{toKey}";
 
             // =========================================================
             // 4. TRY REDIS
@@ -6258,7 +6286,8 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
             }
             string fromKey = hasDateFilter ? effectiveFrom.ToString("yyyyMMdd") : "ALL";
             string toKey = hasDateFilter ? effectiveTo.ToString("yyyyMMdd") : "ALL";
-            string cacheKey = $"HandsetDist:MakeOnly:{GetCacheCountryScope()}:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:{fromKey}:{toKey}";
+            var companyScope = await GetDashboardCompanyCacheScopeAsync(targetCompanyId, useUserScope ? currentUserId : 0);
+            string cacheKey = $"HandsetDist:MakeOnly:{GetCacheCountryScope()}:{companyScope}:{fromKey}:{toKey}";
 
             var totalSw = System.Diagnostics.Stopwatch.StartNew();
 
@@ -6403,7 +6432,8 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
                 effectiveTo = tmp;
             }
 
-            string cacheKey = $"op-indoor-outdoor-avg:{GetCacheCountryScope()}:{targetCompanyId}:{effectiveFrom:yyyyMMdd}:{effectiveTo:yyyyMMdd}:raw:v3";
+            var companyScope = await GetDashboardCompanyCacheScopeAsync(targetCompanyId);
+            string cacheKey = $"op-indoor-outdoor-avg:{GetCacheCountryScope()}:{companyScope}:{effectiveFrom:yyyyMMdd}:{effectiveTo:yyyyMMdd}:raw:v3";
 
             if (_redis != null && _redis.IsConnected)
             {
@@ -6621,7 +6651,8 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
             // =====================================================
             // 5. CACHE KEY (Includes Company ID)
             // =====================================================
-            string cacheKey = $"boxplot:v7:{GetCacheCountryScope()}:{targetCompanyId}:{metric}:{op ?? "ALL"}:{effectiveFrom:yyyyMMdd}:{effectiveTo:yyyyMMdd}";
+            var companyScope = await GetDashboardCompanyCacheScopeAsync(targetCompanyId);
+            string cacheKey = $"boxplot:v7:{GetCacheCountryScope()}:{companyScope}:{metric}:{op ?? "ALL"}:{effectiveFrom:yyyyMMdd}:{effectiveTo:yyyyMMdd}";
 
             if (_redis != null && _redis.IsConnected)
             {
@@ -6799,7 +6830,8 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
             var effectiveFrom = from ?? effectiveTo.AddDays(-30);
             string fromKey = effectiveFrom.ToString("yyyyMMdd");
             string toKey = effectiveTo.ToString("yyyyMMdd");
-            string cacheKey = $"AppKPIs:{GetCacheCountryScope()}:{targetCompanyId}:{fromKey}:{toKey}";
+            var companyScope = await GetDashboardCompanyCacheScopeAsync(targetCompanyId);
+            string cacheKey = $"AppKPIs:{GetCacheCountryScope()}:{companyScope}:{fromKey}:{toKey}";
 
             // =========================================================
             // 3. TRY REDIS
@@ -7006,7 +7038,8 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
 }
 
     // 2. CACHE KEY
-    string cacheKey = $"OperatorsList:{GetCacheCountryScope()}:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}";
+    var companyScope = await GetDashboardCompanyCacheScopeAsync(targetCompanyId, useUserScope ? currentUserId : 0);
+    string cacheKey = $"OperatorsList:{GetCacheCountryScope()}:{companyScope}";
 
             
             if (_redis != null && _redis.IsConnected)
@@ -7086,7 +7119,8 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
     return Unauthorized(new { Status = 0, Message = "Unauthorized. Invalid Company." });
 }
     // 2. CACHE KEY
-    string cacheKey = $"NetworksList:{GetCacheCountryScope()}:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}";
+    var companyScope = await GetDashboardCompanyCacheScopeAsync(targetCompanyId, useUserScope ? currentUserId : 0);
+    string cacheKey = $"NetworksList:{GetCacheCountryScope()}:{companyScope}";
 
            
             if (_redis != null && _redis.IsConnected)
