@@ -212,6 +212,7 @@ namespace SignalTracker.Controllers
                 l3Rows,
                 eventRows,
                 userId,
+                null,
                 status,
                 cancellationToken);
 
@@ -242,6 +243,7 @@ namespace SignalTracker.Controllers
             [FromForm] int? projectId = null,
             [FromForm] int? sessionId = null,
             [FromForm] long? historyId = null,
+            [FromForm] string? remarks = null,
             [FromForm] string? dataType = null,
             [FromForm] IFormFile? zipFile = null,
             [FromForm] IFormFile? l3File = null,
@@ -251,8 +253,11 @@ namespace SignalTracker.Controllers
             var userId = GetCurrentUserId();
             if (userId <= 0)
                 return Unauthorized(new { status = 0, message = "Unable to resolve logged-in user." });
+            if (string.IsNullOrWhiteSpace(remarks))
+                return BadRequest(new { status = 0, message = "Remarks is required for L3/Event upload." });
 
             await EnsureL3EventSchemaAsync(cancellationToken);
+            remarks = remarks.Trim();
 
             int? linkedProjectId = projectId.GetValueOrDefault() > 0 ? projectId.Value : null;
             ProjectInfo? linkedProjectInfo = null;
@@ -358,6 +363,7 @@ namespace SignalTracker.Controllers
                                 0,
                                 0,
                                 userId,
+                                remarks,
                                 1,
                                 cancellationToken);
                             uploadHistoryId = checked((int)createdHistoryId);
@@ -387,6 +393,7 @@ namespace SignalTracker.Controllers
                             insertedL3Rows,
                             insertedEventRows,
                             userId,
+                            remarks,
                             1,
                             cancellationToken);
 
@@ -1469,16 +1476,17 @@ namespace SignalTracker.Controllers
             int l3Rows,
             int eventRows,
             int uploadedBy,
+            string? remarks,
             short status,
             CancellationToken cancellationToken)
         {
             var insertedId = await ExecuteScalarAsync(@"
                 INSERT INTO tbl_l3_event_history
                     (project_id, tbl_upload_id, session_id, original_file_name, l3_rows, events_rows,
-                     uploaded_by, uploaded_on, status)
+                     uploaded_by, uploaded_on, remarks, status)
                 VALUES
                     (@projectId, @uploadId, @sessionId, @originalFileName, @l3Rows, @eventRows,
-                     @uploadedBy, @uploadedOn, @status);
+                     @uploadedBy, @uploadedOn, @remarks, @status);
                 SELECT LAST_INSERT_ID();",
                 cancellationToken,
                 ("@projectId", projectId),
@@ -1489,6 +1497,7 @@ namespace SignalTracker.Controllers
                 ("@eventRows", eventRows),
                 ("@uploadedBy", uploadedBy),
                 ("@uploadedOn", DateTime.Now),
+                ("@remarks", string.IsNullOrWhiteSpace(remarks) ? DBNull.Value : remarks.Trim()),
                 ("@status", status));
 
             return Convert.ToInt64(insertedId, CultureInfo.InvariantCulture);
@@ -1503,6 +1512,7 @@ namespace SignalTracker.Controllers
             int l3Rows,
             int eventRows,
             int uploadedBy,
+            string? remarks,
             short status,
             CancellationToken cancellationToken)
         {
@@ -1516,6 +1526,7 @@ namespace SignalTracker.Controllers
                     events_rows = @eventRows,
                     uploaded_by = @uploadedBy,
                     uploaded_on = @uploadedOn,
+                    remarks = @remarks,
                     status = @status
                 WHERE id = @historyId;",
                 cancellationToken,
@@ -1528,6 +1539,7 @@ namespace SignalTracker.Controllers
                 ("@eventRows", eventRows),
                 ("@uploadedBy", uploadedBy),
                 ("@uploadedOn", DateTime.Now),
+                ("@remarks", string.IsNullOrWhiteSpace(remarks) ? DBNull.Value : remarks.Trim()),
                 ("@status", status));
         }
 
@@ -1537,6 +1549,7 @@ namespace SignalTracker.Controllers
             string originalFileName,
             int uploadedBy,
             int? projectId = null,
+            string? remarks = null,
             CancellationToken cancellationToken = default)
         {
             await EnsureL3EventSchemaAsync(cancellationToken);
@@ -1570,6 +1583,7 @@ namespace SignalTracker.Controllers
                     l3Rows,
                     eventRows,
                     uploadedBy,
+                    remarks,
                     1,
                     cancellationToken);
             }
@@ -1584,6 +1598,7 @@ namespace SignalTracker.Controllers
                     l3Rows,
                     eventRows,
                     uploadedBy,
+                    remarks,
                     1,
                     cancellationToken);
             }
@@ -1714,7 +1729,7 @@ namespace SignalTracker.Controllers
             AddParam(cmd, "@take", take);
             cmd.CommandText = $@"
                 SELECT h.id, h.project_id, h.tbl_upload_id, p.project_name, h.session_id, h.original_file_name,
-                       h.l3_rows, h.events_rows, h.uploaded_by, h.uploaded_on,
+                       h.l3_rows, h.events_rows, h.remarks, h.uploaded_by, h.uploaded_on,
                        h.status, u.name AS uploaded_by_name
                 FROM tbl_l3_event_history h
                 LEFT JOIN tbl_project p ON p.id = h.project_id
@@ -1734,7 +1749,8 @@ namespace SignalTracker.Controllers
                     session_id = ReadDb<int?>(reader, "session_id"),
                     uploaded_on = ReadDb<DateTime>(reader, "uploaded_on"),
                     status = ReadDb<short>(reader, "status"),
-                    original_file_name = ReadDb<string>(reader, "original_file_name")
+                    original_file_name = ReadDb<string>(reader, "original_file_name"),
+                    remarks = ReadDb<string>(reader, "remarks")
                 });
             }
 
@@ -1817,6 +1833,7 @@ namespace SignalTracker.Controllers
                     original_file_name VARCHAR(500) NOT NULL,
                     l3_rows INT NOT NULL DEFAULT 0,
                     events_rows INT NOT NULL DEFAULT 0,
+                    remarks LONGTEXT NULL,
                     uploaded_by INT NOT NULL,
                     uploaded_on DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     status SMALLINT NOT NULL DEFAULT 1,
@@ -1830,6 +1847,7 @@ namespace SignalTracker.Controllers
             await EnsureColumnAsync("tbl_l3_event_history", "tbl_upload_id", "INT NULL", cancellationToken);
             await EnsureColumnAsync("tbl_l3_event_history", "l3_rows", "INT NOT NULL DEFAULT 0", cancellationToken);
             await EnsureColumnAsync("tbl_l3_event_history", "events_rows", "INT NOT NULL DEFAULT 0", cancellationToken);
+            await EnsureColumnAsync("tbl_l3_event_history", "remarks", "LONGTEXT NULL", cancellationToken);
             if (await ColumnExistsAsync("tbl_l3_event_history", "l3_rows_imported", cancellationToken))
                 await ExecuteNonQueryAsync("UPDATE tbl_l3_event_history SET l3_rows = l3_rows_imported;", cancellationToken);
             if (await ColumnExistsAsync("tbl_l3_event_history", "event_rows_imported", cancellationToken))
@@ -1838,7 +1856,7 @@ namespace SignalTracker.Controllers
             foreach (var column in new[]
             {
                 "data_type", "has_l3", "has_event", "l3_file_name",
-                "event_file_name", "total_file_size", "l3_rows_imported", "event_rows_imported", "remarks"
+                "event_file_name", "total_file_size", "l3_rows_imported", "event_rows_imported"
             })
                 await DropColumnIfExistsAsync("tbl_l3_event_history", column, cancellationToken);
 

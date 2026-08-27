@@ -464,7 +464,8 @@ namespace SignalTracker.Controllers
                         uploadHistoryId,
                         originalFileName,
                         userId,
-                        projectId > 0 ? projectId : null);
+                        projectId > 0 ? projectId : null,
+                        remarks);
                 }
             }
             catch (Exception ex)

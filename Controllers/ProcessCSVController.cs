@@ -911,7 +911,7 @@ public IActionResult UploadSitePrediction(
                             if (l3Rows > 0 || eventRows > 0)
                             {
                                 UpdateSessionDiagnosticFlags(sessionId, l3Rows > 0, eventRows > 0);
-                                UpsertL3EventHistory(projectId, excelID, sessionId, originalFileName, l3Rows, eventRows, uploadedByUserId);
+                                UpsertL3EventHistory(projectId, excelID, sessionId, originalFileName, l3Rows, eventRows, uploadedByUserId, Remarks);
                             }
                         }
 
@@ -2336,6 +2336,7 @@ public IActionResult UploadSitePrediction(
                         original_file_name VARCHAR(500) NOT NULL,
                         l3_rows INT NOT NULL DEFAULT 0,
                         events_rows INT NOT NULL DEFAULT 0,
+                        remarks LONGTEXT NULL,
                         uploaded_by INT NOT NULL,
                         uploaded_on DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                         status SMALLINT NOT NULL DEFAULT 1,
@@ -2345,6 +2346,7 @@ public IActionResult UploadSitePrediction(
                         INDEX ix_tbl_l3_event_history_session (session_id)
                     );";
                 history.ExecuteNonQuery();
+                EnsureColumn("tbl_l3_event_history", "remarks", "LONGTEXT NULL");
             }
             finally
             {
@@ -2440,7 +2442,7 @@ public IActionResult UploadSitePrediction(
             cmd.ExecuteNonQuery();
         }
 
-        private void UpsertL3EventHistory(int projectId, int uploadId, int sessionId, string originalFileName, int l3Rows, int eventRows, int uploadedByUserId)
+        private void UpsertL3EventHistory(int projectId, int uploadId, int sessionId, string originalFileName, int l3Rows, int eventRows, int uploadedByUserId, string? remarks)
         {
             var resolvedUserId = uploadedByUserId > 0 ? uploadedByUserId : cf.UserId;
             if (resolvedUserId <= 0 || uploadId <= 0 || sessionId <= 0)
@@ -2459,15 +2461,16 @@ public IActionResult UploadSitePrediction(
             cmd.Transaction = db.Database.CurrentTransaction?.GetDbTransaction();
             cmd.CommandText = @"
                 INSERT INTO tbl_l3_event_history
-                    (project_id, tbl_upload_id, session_id, original_file_name, l3_rows, events_rows, uploaded_by, status)
+                    (project_id, tbl_upload_id, session_id, original_file_name, l3_rows, events_rows, remarks, uploaded_by, status)
                 VALUES
-                    (@projectId, @uploadId, @sessionId, @originalFileName, @l3Rows, @eventRows, @uploadedBy, 1);";
+                    (@projectId, @uploadId, @sessionId, @originalFileName, @l3Rows, @eventRows, @remarks, @uploadedBy, 1);";
             AddDiagnosticParam(cmd, "@projectId", projectId > 0 ? projectId : DBNull.Value);
             AddDiagnosticParam(cmd, "@uploadId", uploadId);
             AddDiagnosticParam(cmd, "@sessionId", sessionId);
             AddDiagnosticParam(cmd, "@originalFileName", Path.GetFileName(originalFileName));
             AddDiagnosticParam(cmd, "@l3Rows", l3Rows);
             AddDiagnosticParam(cmd, "@eventRows", eventRows);
+            AddDiagnosticParam(cmd, "@remarks", string.IsNullOrWhiteSpace(remarks) ? DBNull.Value : remarks.Trim());
             AddDiagnosticParam(cmd, "@uploadedBy", resolvedUserId);
             cmd.ExecuteNonQuery();
         }
