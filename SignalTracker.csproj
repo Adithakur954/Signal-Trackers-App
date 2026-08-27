@@ -7,8 +7,8 @@
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
     <UserSecretsId>SignalTracker.LocalDevelopment</UserSecretsId>
-    <DefaultItemExcludes>$(DefaultItemExcludes);buildcheck_*\**;**\buildcheck_*\**;build_*\**;**\build_*\**;tmpout_*\**;**\tmpout_*\**;build_obj\**;**\build_obj\**;build_out\**;**\build_out\**;artifacts\**;**\artifacts\**;bin_temp\**;**\bin_temp\**;bin_temp_check\**;**\bin_temp_check\**;_build_check\**;_build_check3\**</DefaultItemExcludes>
-    <DefaultExcludesInProjectFolder>$(DefaultExcludesInProjectFolder);buildcheck_*\**;**\buildcheck_*\**;build_*\**;**\build_*\**;tmpout_*\**;**\tmpout_*\**;build_obj\**;**\build_obj\**;build_out\**;**\build_out\**;artifacts\**;**\artifacts\**;bin_temp\**;**\bin_temp\**;bin_temp_check\**;**\bin_temp_check\**;_build_check\**;_build_check3\**</DefaultExcludesInProjectFolder>
+    <DefaultItemExcludes>$(DefaultItemExcludes);buildcheck_*\**;**\buildcheck_*\**;build_*\**;**\build_*\**;tmpout_*\**;**\tmpout_*\**;build_obj\**;**\build_obj\**;build_out\**;**\build_out\**;artifacts\**;**\artifacts\**;bin_temp\**;**\bin_temp\**;bin_temp_check\**;**\bin_temp_check\**;_build_check\**;_build_check3\**;_codex_tmp_index\**;Tools\CiProbe\**</DefaultItemExcludes>
+    <DefaultExcludesInProjectFolder>$(DefaultExcludesInProjectFolder);buildcheck_*\**;**\buildcheck_*\**;build_*\**;**\build_*\**;tmpout_*\**;**\tmpout_*\**;build_obj\**;**\build_obj\**;build_out\**;**\build_out\**;artifacts\**;**\artifacts\**;bin_temp\**;**\bin_temp\**;bin_temp_check\**;**\bin_temp_check\**;_build_check\**;_build_check3\**;_codex_tmp_index\**;Tools\CiProbe\**</DefaultExcludesInProjectFolder>
   </PropertyGroup>
 
   <!-- Remove old/unused files -->

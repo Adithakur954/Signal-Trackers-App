@@ -16583,6 +16583,453 @@ public async Task<JsonResult> GetDominanceDetails([FromQuery] MapFilter1 filters
         return Json(new { success = false, message = "Server Error", details = SafeException.Get(ex) });
     }
 }
+
+[HttpGet, Route("Get2GCiAnalysis")]
+public Task<JsonResult> Get2GCiAnalysis([FromQuery] MapFilter1 filters)
+    => Get2GCiAnalysisCore(filters);
+
+[HttpPost, Route("Get2GCiAnalysis")]
+public Task<JsonResult> Get2GCiAnalysisPost([FromBody] MapFilter1 filters)
+    => Get2GCiAnalysisCore(filters);
+
+private async Task<JsonResult> Get2GCiAnalysisCore(MapFilter1 filters)
+{
+    var sessionIds = filters?.GetSessionIds() ?? new List<long>();
+    if (sessionIds.Count == 0)
+        return Json(new { status = 0, success = false, message = "No valid session IDs provided." });
+
+    try
+    {
+        var limit = Math.Clamp(filters?.limit ?? 20000, 1, 50000);
+        var cacheKey = BuildMapViewCacheKey(
+            "2g-ci-analysis-v16",
+            sessionIds,
+            filters?.StartDate,
+            filters?.EndDate,
+            limit);
+        if (filters?.force_refresh != true && filters?.ForceRefresh != true)
+        {
+            var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
+            if (cached != null)
+                return Json(cached);
+        }
+
+        await using var conn = new MySqlConnection(db.Database.GetConnectionString());
+        await conn.OpenAsync();
+        await using (var isolation = new MySqlCommand("SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;", conn))
+            await isolation.ExecuteNonQueryAsync();
+
+        await using var cmd = conn.CreateCommand();
+        var idParams = new List<string>();
+        for (var i = 0; i < sessionIds.Count; i++)
+        {
+            var name = $"@sid{i}";
+            idParams.Add(name);
+            Add(cmd, name, sessionIds[i]);
+        }
+
+        var dateFilter = string.Empty;
+        if (filters?.StartDate.HasValue == true)
+        {
+            dateFilter += " AND t1.timestamp >= @startDate";
+            Add(cmd, "@startDate", filters.StartDate.Value);
+        }
+        if (filters?.EndDate.HasValue == true)
+        {
+            dateFilter += " AND t1.timestamp <= @endDate";
+            Add(cmd, "@endDate", filters.EndDate.Value);
+        }
+
+        Add(cmd, "@limit", limit);
+        cmd.CommandTimeout = 180;
+        cmd.CommandText = $@"
+            WITH base_serving AS (
+                SELECT
+                    t1.session_id,
+                    t1.id AS log_id,
+                    t1.timestamp,
+                    t1.lat,
+                    t1.lon,
+                    COALESCE(NULLIF(t1.m_alpha_short, ''), NULLIF(t1.m_alpha_long, '')) AS provider,
+                    t1.network,
+                    t1.cell_id AS serving_cell_id,
+                    t1.pci AS serving_pci,
+                    t1.all_neigbor_cell_info,
+                    CASE
+                        WHEN COALESCE(
+                            CASE
+                                WHEN LOCATE('CellSignalStrengthGsm:', COALESCE(t1.primary_cell_info_1, '')) > 0
+                                     AND LOCATE('rssi=', SUBSTRING(t1.primary_cell_info_1, LOCATE('CellSignalStrengthGsm:', t1.primary_cell_info_1))) > 0
+                                THEN CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(SUBSTRING(t1.primary_cell_info_1, LOCATE('CellSignalStrengthGsm:', t1.primary_cell_info_1)), 'rssi=', -1), ' ', 1) AS DECIMAL(10,2))
+                                ELSE NULL
+                            END,
+                            t1.rssi,
+                            t1.rsrp
+                        ) BETWEEN 0 AND 63
+                        THEN COALESCE(
+                            CASE
+                                WHEN LOCATE('CellSignalStrengthGsm:', COALESCE(t1.primary_cell_info_1, '')) > 0
+                                     AND LOCATE('rssi=', SUBSTRING(t1.primary_cell_info_1, LOCATE('CellSignalStrengthGsm:', t1.primary_cell_info_1))) > 0
+                                THEN CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(SUBSTRING(t1.primary_cell_info_1, LOCATE('CellSignalStrengthGsm:', t1.primary_cell_info_1)), 'rssi=', -1), ' ', 1) AS DECIMAL(10,2))
+                                ELSE NULL
+                            END,
+                            t1.rssi,
+                            t1.rsrp
+                        ) - 110
+                        ELSE COALESCE(
+                            CASE
+                                WHEN LOCATE('CellSignalStrengthGsm:', COALESCE(t1.primary_cell_info_1, '')) > 0
+                                     AND LOCATE('rssi=', SUBSTRING(t1.primary_cell_info_1, LOCATE('CellSignalStrengthGsm:', t1.primary_cell_info_1))) > 0
+                                THEN CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(SUBSTRING(t1.primary_cell_info_1, LOCATE('CellSignalStrengthGsm:', t1.primary_cell_info_1)), 'rssi=', -1), ' ', 1) AS DECIMAL(10,2))
+                                ELSE NULL
+                            END,
+                            t1.rssi,
+                            t1.rsrp
+                        )
+                    END AS serving_rssi_dbm
+                FROM tbl_network_log t1
+                WHERE t1.session_id IN ({string.Join(",", idParams)})
+                  AND (
+                      (
+                          LOWER(COALESCE(t1.`primary`, '')) = 'yes'
+                          AND (
+                              UPPER(COALESCE(t1.network, '')) LIKE '%GSM%'
+                              OR UPPER(COALESCE(t1.network, '')) LIKE '%2G%'
+                              OR UPPER(COALESCE(t1.network, '')) LIKE '%EDGE%'
+                              OR UPPER(COALESCE(t1.network, '')) LIKE '%GPRS%'
+                              OR UPPER(CONCAT_WS(' ', COALESCE(t1.band, ''), COALESCE(t1.primary_cell_info_1, ''))) LIKE '%GSM%'
+                              OR UPPER(CONCAT_WS(' ', COALESCE(t1.band, ''), COALESCE(t1.primary_cell_info_1, ''))) LIKE '%GERAN%'
+                          )
+                      )
+                      OR (
+                          t1.primary_cell_info_1 LIKE '%CellInfoGsm:%'
+                          AND t1.primary_cell_info_1 LIKE '%mRegistered=YES%'
+                      )
+                  )
+                  AND COALESCE(
+                      CASE
+                          WHEN LOCATE('CellSignalStrengthGsm:', COALESCE(t1.primary_cell_info_1, '')) > 0
+                               AND LOCATE('rssi=', SUBSTRING(t1.primary_cell_info_1, LOCATE('CellSignalStrengthGsm:', t1.primary_cell_info_1))) > 0
+                          THEN CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(SUBSTRING(t1.primary_cell_info_1, LOCATE('CellSignalStrengthGsm:', t1.primary_cell_info_1)), 'rssi=', -1), ' ', 1) AS DECIMAL(10,2))
+                          ELSE NULL
+                      END,
+                      t1.rssi,
+                      t1.rsrp
+                  ) IS NOT NULL
+                  AND (
+                      UPPER(COALESCE(t1.network, '')) LIKE '%GSM%'
+                      OR UPPER(COALESCE(t1.network, '')) LIKE '%2G%'
+                      OR UPPER(COALESCE(t1.network, '')) LIKE '%EDGE%'
+                      OR UPPER(COALESCE(t1.network, '')) LIKE '%GPRS%'
+                      OR UPPER(CONCAT_WS(' ', COALESCE(t1.band, ''), COALESCE(t1.primary_cell_info_1, ''))) LIKE '%GSM%'
+                      OR UPPER(CONCAT_WS(' ', COALESCE(t1.band, ''), COALESCE(t1.primary_cell_info_1, ''))) LIKE '%GERAN%'
+                  )
+                  {dateFilter}
+                ORDER BY t1.session_id, t1.timestamp, t1.id
+                LIMIT @limit
+            ),
+            filtered_neighbours AS (
+                SELECT
+                    t2.id,
+                    t2.session_id,
+                    t2.timestamp,
+                    t2.lat,
+                    t2.lon,
+                    CASE
+                        WHEN COALESCE(
+                            CASE
+                                WHEN LOCATE('CellSignalStrengthGsm:', COALESCE(t2.primary_cell_info_1, '')) > 0
+                                     AND LOCATE('rssi=', SUBSTRING(t2.primary_cell_info_1, LOCATE('CellSignalStrengthGsm:', t2.primary_cell_info_1))) > 0
+                                THEN CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(SUBSTRING(t2.primary_cell_info_1, LOCATE('CellSignalStrengthGsm:', t2.primary_cell_info_1)), 'rssi=', -1), ' ', 1) AS DECIMAL(10,2))
+                                ELSE NULL
+                            END,
+                            t2.rsrp
+                        ) BETWEEN 0 AND 63
+                        THEN COALESCE(
+                            CASE
+                                WHEN LOCATE('CellSignalStrengthGsm:', COALESCE(t2.primary_cell_info_1, '')) > 0
+                                     AND LOCATE('rssi=', SUBSTRING(t2.primary_cell_info_1, LOCATE('CellSignalStrengthGsm:', t2.primary_cell_info_1))) > 0
+                                THEN CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(SUBSTRING(t2.primary_cell_info_1, LOCATE('CellSignalStrengthGsm:', t2.primary_cell_info_1)), 'rssi=', -1), ' ', 1) AS DECIMAL(10,2))
+                                ELSE NULL
+                            END,
+                            t2.rsrp
+                        ) - 110
+                        ELSE COALESCE(
+                            CASE
+                                WHEN LOCATE('CellSignalStrengthGsm:', COALESCE(t2.primary_cell_info_1, '')) > 0
+                                     AND LOCATE('rssi=', SUBSTRING(t2.primary_cell_info_1, LOCATE('CellSignalStrengthGsm:', t2.primary_cell_info_1))) > 0
+                                THEN CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(SUBSTRING(t2.primary_cell_info_1, LOCATE('CellSignalStrengthGsm:', t2.primary_cell_info_1)), 'rssi=', -1), ' ', 1) AS DECIMAL(10,2))
+                                ELSE NULL
+                            END,
+                            t2.rsrp
+                        )
+                    END AS neighbour_rssi_dbm,
+                    NULLIF(TRIM(t2.cell_id), '') AS neighbour_cell_id
+                FROM tbl_network_log_neighbour t2
+                WHERE t2.session_id IN ({string.Join(",", idParams)})
+                  AND COALESCE(
+                      CASE
+                          WHEN LOCATE('CellSignalStrengthGsm:', COALESCE(t2.primary_cell_info_1, '')) > 0
+                               AND LOCATE('rssi=', SUBSTRING(t2.primary_cell_info_1, LOCATE('CellSignalStrengthGsm:', t2.primary_cell_info_1))) > 0
+                          THEN CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(SUBSTRING(t2.primary_cell_info_1, LOCATE('CellSignalStrengthGsm:', t2.primary_cell_info_1)), 'rssi=', -1), ' ', 1) AS DECIMAL(10,2))
+                          ELSE NULL
+                      END,
+                      t2.rsrp
+                  ) IS NOT NULL
+                  AND (
+                      UPPER(COALESCE(t2.network, '')) LIKE '%GSM%'
+                      OR UPPER(COALESCE(t2.network, '')) LIKE '%2G%'
+                      OR UPPER(COALESCE(t2.network, '')) LIKE '%EDGE%'
+                      OR UPPER(COALESCE(t2.network, '')) LIKE '%GPRS%'
+                      OR UPPER(CONCAT_WS(' ', COALESCE(t2.band, ''), COALESCE(t2.primary_cell_info_1, ''), COALESCE(t2.all_neigbor_cell_info, ''))) LIKE '%GSM%'
+                      OR UPPER(CONCAT_WS(' ', COALESCE(t2.band, ''), COALESCE(t2.primary_cell_info_1, ''), COALESCE(t2.all_neigbor_cell_info, ''))) LIKE '%GERAN%'
+                  )
+                UNION ALL
+                SELECT
+                    t2.id,
+                    t2.session_id,
+                    t2.timestamp,
+                    t2.lat,
+                    t2.lon,
+                    CASE
+                        WHEN COALESCE(
+                            CASE
+                                WHEN LOCATE('CellSignalStrengthGsm:', COALESCE(t2.primary_cell_info_1, '')) > 0
+                                     AND LOCATE('rssi=', SUBSTRING(t2.primary_cell_info_1, LOCATE('CellSignalStrengthGsm:', t2.primary_cell_info_1))) > 0
+                                THEN CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(SUBSTRING(t2.primary_cell_info_1, LOCATE('CellSignalStrengthGsm:', t2.primary_cell_info_1)), 'rssi=', -1), ' ', 1) AS DECIMAL(10,2))
+                                ELSE NULL
+                            END,
+                            t2.rssi,
+                            t2.rsrp
+                        ) BETWEEN 0 AND 63
+                        THEN COALESCE(
+                            CASE
+                                WHEN LOCATE('CellSignalStrengthGsm:', COALESCE(t2.primary_cell_info_1, '')) > 0
+                                     AND LOCATE('rssi=', SUBSTRING(t2.primary_cell_info_1, LOCATE('CellSignalStrengthGsm:', t2.primary_cell_info_1))) > 0
+                                THEN CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(SUBSTRING(t2.primary_cell_info_1, LOCATE('CellSignalStrengthGsm:', t2.primary_cell_info_1)), 'rssi=', -1), ' ', 1) AS DECIMAL(10,2))
+                                ELSE NULL
+                            END,
+                            t2.rssi,
+                            t2.rsrp
+                        ) - 110
+                        ELSE COALESCE(
+                            CASE
+                                WHEN LOCATE('CellSignalStrengthGsm:', COALESCE(t2.primary_cell_info_1, '')) > 0
+                                     AND LOCATE('rssi=', SUBSTRING(t2.primary_cell_info_1, LOCATE('CellSignalStrengthGsm:', t2.primary_cell_info_1))) > 0
+                                THEN CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(SUBSTRING(t2.primary_cell_info_1, LOCATE('CellSignalStrengthGsm:', t2.primary_cell_info_1)), 'rssi=', -1), ' ', 1) AS DECIMAL(10,2))
+                                ELSE NULL
+                            END,
+                            t2.rssi,
+                            t2.rsrp
+                        )
+                    END AS neighbour_rssi_dbm,
+                    NULLIF(TRIM(t2.cell_id), '') AS neighbour_cell_id
+                FROM tbl_network_log t2
+                WHERE t2.session_id IN ({string.Join(",", idParams)})
+                  AND (
+                      LOWER(COALESCE(t2.`primary`, '')) = 'no'
+                      OR t2.primary_cell_info_1 LIKE '%mRegistered=NO%'
+                  )
+                  AND COALESCE(
+                      CASE
+                          WHEN LOCATE('CellSignalStrengthGsm:', COALESCE(t2.primary_cell_info_1, '')) > 0
+                               AND LOCATE('rssi=', SUBSTRING(t2.primary_cell_info_1, LOCATE('CellSignalStrengthGsm:', t2.primary_cell_info_1))) > 0
+                          THEN CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(SUBSTRING(t2.primary_cell_info_1, LOCATE('CellSignalStrengthGsm:', t2.primary_cell_info_1)), 'rssi=', -1), ' ', 1) AS DECIMAL(10,2))
+                          ELSE NULL
+                      END,
+                      t2.rssi,
+                      t2.rsrp
+                  ) IS NOT NULL
+                  AND (
+                      UPPER(COALESCE(t2.network, '')) LIKE '%GSM%'
+                      OR UPPER(COALESCE(t2.network, '')) LIKE '%2G%'
+                      OR UPPER(COALESCE(t2.network, '')) LIKE '%EDGE%'
+                      OR UPPER(COALESCE(t2.network, '')) LIKE '%GPRS%'
+                      OR UPPER(CONCAT_WS(' ', COALESCE(t2.band, ''), COALESCE(t2.primary_cell_info_1, ''), COALESCE(t2.all_neigbor_cell_info, ''))) LIKE '%GSM%'
+                      OR UPPER(CONCAT_WS(' ', COALESCE(t2.band, ''), COALESCE(t2.primary_cell_info_1, ''), COALESCE(t2.all_neigbor_cell_info, ''))) LIKE '%GERAN%'
+                  )
+            )
+            SELECT
+                q.session_id,
+                q.log_id,
+                q.timestamp,
+                q.lat,
+                q.lon,
+                q.provider,
+                q.network,
+                q.serving_cell_id,
+                q.serving_pci,
+                q.serving_rssi_dbm,
+                q.neighbour_count,
+                q.strongest_neighbour_rssi_dbm,
+                q.total_interference_dbm,
+                CASE
+                    WHEN q.strongest_neighbour_rssi_dbm IS NULL THEN NULL
+                    ELSE q.serving_rssi_dbm - q.strongest_neighbour_rssi_dbm
+                END AS ci_db,
+                q.all_neigbor_cell_info
+            FROM (
+                SELECT
+                    b.session_id,
+                    b.log_id,
+                    b.timestamp,
+                    b.lat,
+                    b.lon,
+                    b.provider,
+                    b.network,
+                    b.serving_cell_id,
+                    b.serving_pci,
+                    b.all_neigbor_cell_info,
+                    b.serving_rssi_dbm,
+                    COUNT(t2.id) AS neighbour_count,
+                    MAX(t2.neighbour_rssi_dbm) AS strongest_neighbour_rssi_dbm,
+                    MAX(t2.neighbour_rssi_dbm) AS total_interference_dbm
+                FROM base_serving b
+                LEFT JOIN filtered_neighbours t2
+                    ON t2.session_id = b.session_id
+                   AND t2.timestamp >= DATE_SUB(b.timestamp, INTERVAL 2 SECOND)
+                   AND t2.timestamp <= DATE_ADD(b.timestamp, INTERVAL 2 SECOND)
+                   AND (
+                       (t2.lat IS NULL AND b.lat IS NULL)
+                       OR ROUND(t2.lat, 6) = ROUND(b.lat, 6)
+                   )
+                   AND (
+                       (t2.lon IS NULL AND b.lon IS NULL)
+                       OR ROUND(t2.lon, 6) = ROUND(b.lon, 6)
+                   )
+                   AND (
+                       t2.neighbour_cell_id IS NULL
+                       OR NULLIF(TRIM(b.serving_cell_id), '') IS NULL
+                       OR t2.neighbour_cell_id <> NULLIF(TRIM(b.serving_cell_id), '')
+                   )
+                GROUP BY
+                    b.session_id, b.log_id, b.timestamp, b.lat, b.lon,
+                    b.provider, b.network, b.serving_cell_id, b.serving_pci, b.all_neigbor_cell_info, b.serving_rssi_dbm
+            ) q
+            ORDER BY q.session_id, q.timestamp, q.log_id
+            ;";
+
+        var rows = new List<Dictionary<string, object?>>();
+        var ciValues = new List<double>();
+        await using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            var servingRssi = reader.IsDBNull(9) ? (double?)null : Math.Round(Convert.ToDouble(reader.GetValue(9), CultureInfo.InvariantCulture), 2);
+            var neighbourCount = reader.IsDBNull(10) ? 0 : Convert.ToInt32(reader.GetValue(10), CultureInfo.InvariantCulture);
+            var strongestNeighbour = reader.IsDBNull(11) ? (double?)null : Math.Round(Convert.ToDouble(reader.GetValue(11), CultureInfo.InvariantCulture), 2);
+            var neighbourInfoText = reader.IsDBNull(14) ? null : reader.GetString(14);
+            var embeddedNeighbours = Extract2GGsmNeighbourRssiValues(neighbourInfoText, reader.IsDBNull(7) ? null : reader.GetString(7));
+            if (embeddedNeighbours.Count > 0)
+            {
+                neighbourCount = embeddedNeighbours.Count;
+                strongestNeighbour = Math.Round(embeddedNeighbours.Max(), 2);
+            }
+
+            var totalInterference = strongestNeighbour;
+            var ci = servingRssi.HasValue && strongestNeighbour.HasValue
+                ? Math.Round(servingRssi.Value - strongestNeighbour.Value, 2)
+                : (double?)null;
+            if (ci.HasValue)
+                ciValues.Add(ci.Value);
+
+            rows.Add(new Dictionary<string, object?>
+            {
+                ["session_id"] = reader.IsDBNull(0) ? null : reader.GetValue(0),
+                ["log_id"] = reader.IsDBNull(1) ? null : reader.GetValue(1),
+                ["timestamp"] = reader.IsDBNull(2) ? null : reader.GetValue(2),
+                ["latitude"] = reader.IsDBNull(3) ? null : reader.GetValue(3),
+                ["longitude"] = reader.IsDBNull(4) ? null : reader.GetValue(4),
+                ["provider"] = reader.IsDBNull(5) ? null : reader.GetString(5),
+                ["network"] = reader.IsDBNull(6) ? null : reader.GetString(6),
+                ["serving_cell_id"] = reader.IsDBNull(7) ? null : reader.GetString(7),
+                ["serving_pci"] = reader.IsDBNull(8) ? null : reader.GetString(8),
+                ["serving_rssi_dbm"] = servingRssi,
+                ["neighbour_count"] = neighbourCount,
+                ["strongest_neighbour_rssi_dbm"] = strongestNeighbour,
+                ["total_interference_dbm"] = totalInterference,
+                ["ci_db"] = ci,
+                ["quality"] = Classify2GCiQuality(ci)
+            });
+        }
+
+        var summary = new
+        {
+            average_ci_db = ciValues.Count > 0 ? Math.Round(ciValues.Average(), 2) : (double?)null,
+            minimum_ci_db = ciValues.Count > 0 ? Math.Round(ciValues.Min(), 2) : (double?)null,
+            maximum_ci_db = ciValues.Count > 0 ? Math.Round(ciValues.Max(), 2) : (double?)null,
+            good = rows.Count(x => string.Equals(Convert.ToString(x["quality"], CultureInfo.InvariantCulture), "Good", StringComparison.OrdinalIgnoreCase)),
+            fair = rows.Count(x => string.Equals(Convert.ToString(x["quality"], CultureInfo.InvariantCulture), "Fair", StringComparison.OrdinalIgnoreCase)),
+            poor = rows.Count(x => string.Equals(Convert.ToString(x["quality"], CultureInfo.InvariantCulture), "Poor", StringComparison.OrdinalIgnoreCase)),
+            bad = rows.Count(x => string.Equals(Convert.ToString(x["quality"], CultureInfo.InvariantCulture), "Bad", StringComparison.OrdinalIgnoreCase))
+        };
+
+        var response = new
+        {
+            status = 1,
+            success = true,
+            session_count = sessionIds.Count,
+            count = rows.Count,
+            summary,
+            data = rows
+        };
+        await SetMapViewCacheAsync(cacheKey, response);
+        return Json(response);
+    }
+    catch (Exception ex)
+    {
+        return Json(new { status = 0, success = false, message = "Server Error", details = SafeException.Get(ex) });
+    }
+}
+
+private static string Classify2GCiQuality(double? ciDb)
+{
+    if (!ciDb.HasValue)
+        return "Unknown";
+    if (ciDb.Value >= 18)
+        return "Good";
+    if (ciDb.Value >= 12)
+        return "Fair";
+    if (ciDb.Value >= 9)
+        return "Poor";
+    return "Bad";
+}
+
+private static List<double> Extract2GGsmNeighbourRssiValues(string? neighbourInfoText, string? servingCellId)
+{
+    var values = new List<double>();
+    if (string.IsNullOrWhiteSpace(neighbourInfoText))
+        return values;
+
+    var serving = (servingCellId ?? "").Trim();
+    var blocks = Regex.Matches(
+        neighbourInfoText,
+        @"CellInfoGsm:\{.*?(?=,\s*CellInfo[A-Za-z]+:\{|]$)",
+        RegexOptions.IgnoreCase | RegexOptions.Singleline);
+
+    foreach (Match blockMatch in blocks)
+    {
+        var block = blockMatch.Value;
+        if (!Regex.IsMatch(block, @"mRegistered\s*=\s*NO", RegexOptions.IgnoreCase))
+            continue;
+
+        var cid = Regex.Match(block, @"\bmCid\s*=\s*(?<cid>[-\w*]+)", RegexOptions.IgnoreCase);
+        if (cid.Success && !string.IsNullOrWhiteSpace(serving) && cid.Groups["cid"].Value.Trim() == serving)
+            continue;
+
+        var rssi = Regex.Match(block, @"\brssi\s*=\s*(?<rssi>-?\d+(?:\.\d+)?)", RegexOptions.IgnoreCase);
+        if (!rssi.Success || !double.TryParse(rssi.Groups["rssi"].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed))
+            continue;
+
+        if (parsed >= 0 && parsed <= 63)
+            parsed -= 110;
+
+        if (parsed > -130 && parsed < -20)
+            values.Add(parsed);
+    }
+
+    return values;
+}
+
 [HttpGet, Route("GetPciDistribution")]
 public Task<JsonResult> GetPciDistribution([FromQuery] MapFilter1 filters)
     => GetPciDistributionCore(filters);

@@ -1064,6 +1064,7 @@ public string? level { get; set; }
         public string? rsrp_json { get; set; }
         public string? rsrq_json { get; set; }
         public string? sinr_json { get; set; }
+        public string? c_i_json { get; set; }
         public string? dl_thpt_json { get; set; }
         public string? ul_thpt_json { get; set; }
         public string? volte_call { get; set; }

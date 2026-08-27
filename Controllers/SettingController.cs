@@ -17,6 +17,7 @@ namespace SignalTracker.Controllers
     [Authorize]
     public class SettingController : ControllerBase
     {
+        private const string DefaultCiJson = "[{\"label\":\"Good\",\"min\":18,\"max\":99,\"color\":\"#00c853\"},{\"label\":\"Fair\",\"min\":12,\"max\":18,\"color\":\"#ffd600\"},{\"label\":\"Poor\",\"min\":9,\"max\":12,\"color\":\"#ff9100\"},{\"label\":\"Bad\",\"min\":-99,\"max\":9,\"color\":\"#d50000\"}]";
         private readonly ApplicationDbContext db;
         private readonly CommonFunction cf;
 
@@ -58,6 +59,8 @@ private void EnsureMacDetailThresholdColumns()
     EnsureColumn("thresholds", "mac_grants_json", "LONGTEXT NULL");
     EnsureColumn("thresholds", "mac_tx_power_json", "LONGTEXT NULL");
     EnsureColumn("thresholds", "mac_modulation_pct_json", "LONGTEXT NULL");
+    EnsureColumn("thresholds", "c_i_json", "LONGTEXT NULL");
+    EnsureDefaultCiThreshold();
 }
 
 private void EnsureColumn(string tableName, string columnName, string columnDefinition)
@@ -91,6 +94,35 @@ private void EnsureColumn(string tableName, string columnName, string columnDefi
         using var alter = conn.CreateCommand();
         alter.CommandText = $"ALTER TABLE `{tableName.Replace("`", "``")}` ADD COLUMN `{columnName.Replace("`", "``")}` {columnDefinition};";
         alter.ExecuteNonQuery();
+    }
+    finally
+    {
+        if (shouldClose)
+            conn.Close();
+    }
+}
+
+private void EnsureDefaultCiThreshold()
+{
+    var conn = db.Database.GetDbConnection();
+    var shouldClose = conn.State != ConnectionState.Open;
+    if (shouldClose)
+        conn.Open();
+
+    try
+    {
+        using var update = conn.CreateCommand();
+        update.CommandText = @"
+            UPDATE thresholds
+            SET c_i_json = @defaultCiJson
+            WHERE c_i_json IS NULL OR TRIM(c_i_json) = '';";
+
+        var valueParam = update.CreateParameter();
+        valueParam.ParameterName = "@defaultCiJson";
+        valueParam.Value = DefaultCiJson;
+        update.Parameters.Add(valueParam);
+
+        update.ExecuteNonQuery();
     }
     finally
     {
@@ -200,6 +232,9 @@ public IActionResult SaveThreshold([FromBody] thresholds model)
             existing.rsrp_json = model.rsrp_json;
             existing.rsrq_json = model.rsrq_json;
             existing.sinr_json = model.sinr_json;
+            existing.c_i_json = string.IsNullOrWhiteSpace(model.c_i_json)
+                ? existing.c_i_json ?? DefaultCiJson
+                : model.c_i_json;
             existing.dl_thpt_json = model.dl_thpt_json;
             existing.ul_thpt_json = model.ul_thpt_json;
             existing.num_cells = model.num_cells;
@@ -236,6 +271,9 @@ public IActionResult SaveThreshold([FromBody] thresholds model)
             model.id = 0;
             model.user_id = uid;
             model.is_default = 0;
+            model.c_i_json = string.IsNullOrWhiteSpace(model.c_i_json)
+                ? DefaultCiJson
+                : model.c_i_json;
 
             db.thresholds.Add(model);
         }
