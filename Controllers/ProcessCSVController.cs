@@ -1755,6 +1755,14 @@ public IActionResult UploadSitePrediction(
             return null;
         }
 
+        private static bool ShouldSkipEventDiagnosticRow(Dictionary<string, object?> row)
+        {
+            var eventName = GetDiagnosticValue(row, "event", "event_name", "message");
+            var detail = GetDiagnosticValue(row, "detail", "description");
+            return string.Equals(eventName?.Trim(), "CallState", StringComparison.OrdinalIgnoreCase)
+                && Regex.IsMatch(detail ?? string.Empty, @"^\s*Idle\s*\(ended\)\s*$", RegexOptions.IgnoreCase);
+        }
+
         private static string FormatTelecomDisconnectCause(int cause)
         {
             return cause switch
@@ -1815,17 +1823,22 @@ public IActionResult UploadSitePrediction(
                 });
 
                 var rowNo = 0;
+                var storedRows = 0;
                 foreach (var record in csv.GetRecords<dynamic>())
                 {
                     rowNo++;
                     var row = NormalizeDiagnosticRow((IDictionary<string, object?>)record);
+                    if (ShouldSkipEventDiagnosticRow(row))
+                        continue;
+
                     InsertEventDiagnosticRow(sessionId, excelId, fileName, rowNo, row);
                     rowInserted++;
+                    storedRows++;
                 }
 
-                if (rowNo == 0)
+                if (rowNo == 0 || storedRows == 0)
                 {
-                    errorList.Add($"{fileName} event import warning: file contains headers only; no Event rows were stored.");
+                    errorList.Add($"{fileName} event import warning: no Event diagnostic rows were stored.");
                     return false;
                 }
 

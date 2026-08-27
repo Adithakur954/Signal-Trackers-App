@@ -1006,6 +1006,9 @@ namespace SignalTracker.Controllers
             {
                 rowNo++;
                 var row = NormalizeDiagnosticRow((IDictionary<string, object?>)record);
+                if (ShouldSkipEventDiagnosticRow(row))
+                    continue;
+
                 batch.Add(BuildEventDiagnosticInsertRow(sessionId, uploadId, originalFileName, rowNo, row));
                 inserted++;
                 if (batch.Count >= DiagnosticInsertBatchSize)
@@ -1694,6 +1697,20 @@ namespace SignalTracker.Controllers
                 where.Add($"h.session_id IN ({string.Join(", ", names)})");
             }
 
+            where.Add(@"(
+                EXISTS (SELECT 1 FROM tbl_l3_log l3 WHERE l3.tbl_upload_id = h.tbl_upload_id LIMIT 1)
+                OR EXISTS (
+                    SELECT 1
+                    FROM tbl_event_log event_log
+                    WHERE event_log.tbl_upload_id = h.tbl_upload_id
+                      AND NOT (
+                          UPPER(COALESCE(event_log.event_name, '')) = 'CALLSTATE'
+                          AND LOWER(TRIM(COALESCE(event_log.detail, ''))) = 'idle (ended)'
+                      )
+                    LIMIT 1
+                )
+            )");
+
             AddParam(cmd, "@take", take);
             cmd.CommandText = $@"
                 SELECT h.id, h.project_id, h.tbl_upload_id, p.project_name, h.session_id, h.original_file_name,
@@ -2075,6 +2092,14 @@ namespace SignalTracker.Controllers
             }
 
             return null;
+        }
+
+        private static bool ShouldSkipEventDiagnosticRow(Dictionary<string, object?> row)
+        {
+            var eventName = GetDiagnosticValue(row, "event_name", "eventname", "event_type", "eventtype", "event", "name", "type", "message");
+            var detail = GetDiagnosticValue(row, "value", "detail", "details", "description", "info", "message", "data");
+            return string.Equals(eventName?.Trim(), "CallState", StringComparison.OrdinalIgnoreCase)
+                && Regex.IsMatch(detail ?? string.Empty, @"^\s*Idle\s*\(ended\)\s*$", RegexOptions.IgnoreCase);
         }
 
         private static string FormatTelecomDisconnectCause(int cause)
