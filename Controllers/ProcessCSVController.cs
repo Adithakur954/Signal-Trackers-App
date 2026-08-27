@@ -1713,6 +1713,83 @@ public IActionResult UploadSitePrediction(
                 : null;
         }
 
+        private static string? ExtractDiagnosticCause(params string?[] texts)
+        {
+            foreach (var text in texts)
+            {
+                if (string.IsNullOrWhiteSpace(text))
+                    continue;
+
+                foreach (var pattern in DiagnosticCausePatterns)
+                {
+                    var match = Regex.Match(text, pattern, RegexOptions.IgnoreCase);
+                    if (!match.Success)
+                        continue;
+
+                    var cause = Regex.Replace(match.Groups["cause"].Value, @"\s+", " ").Trim();
+                    cause = cause.Trim(' ', '.', ',', ';', '|', '}', ']', ')', '"', '\'');
+                    if (!string.IsNullOrWhiteSpace(cause))
+                        return cause.Length > 255 ? cause[..255] : cause;
+                }
+            }
+
+            return null;
+        }
+
+        private static string? ExtractEventDiagnosticCause(string? eventName, string? detail)
+        {
+            if (string.IsNullOrWhiteSpace(detail))
+                return null;
+
+            var telecomMatch = Regex.Match(detail, @"\bgetDisconnectCause\s*:\s*cause\s*=\s*(?<cause>\d+)\b", RegexOptions.IgnoreCase);
+            if (telecomMatch.Success && int.TryParse(telecomMatch.Groups["cause"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var telecomCause))
+                return FormatTelecomDisconnectCause(telecomCause);
+
+            if (string.Equals(eventName?.Trim(), "CALL_DISCONNECT_NONZERO_CAUSE", StringComparison.OrdinalIgnoreCase))
+            {
+                var causeMatch = Regex.Match(detail, @"(?:^|[^\w])\.?cause\s*[:=]\s*(?<cause>\d+)\b", RegexOptions.IgnoreCase);
+                if (causeMatch.Success && int.TryParse(causeMatch.Groups["cause"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var cause))
+                    return FormatTelecomDisconnectCause(cause);
+            }
+
+            return null;
+        }
+
+        private static string FormatTelecomDisconnectCause(int cause)
+        {
+            return cause switch
+            {
+                0 => "0 - NOT_DISCONNECTED",
+                1 => "1 - INCOMING_MISSED",
+                2 => "2 - NORMAL (Remote hangup)",
+                3 => "3 - LOCAL (Local hangup)",
+                4 => "4 - BUSY",
+                5 => "5 - CONGESTION",
+                7 => "7 - INVALID_NUMBER",
+                8 => "8 - NUMBER_UNREACHABLE",
+                9 => "9 - SERVER_UNREACHABLE",
+                13 => "13 - TIMED_OUT",
+                14 => "14 - LOST_SIGNAL",
+                16 => "16 - INCOMING_REJECTED",
+                17 => "17 - POWER_OFF",
+                18 => "18 - OUT_OF_SERVICE",
+                20 => "20 - CALL_BARRED",
+                21 => "21 - FDN_BLOCKED",
+                43 => "43 - OUTGOING_FAILURE",
+                44 => "44 - OUTGOING_CANCELED",
+                65 => "65 - NORMAL_UNSPECIFIED",
+                _ => $"{cause} - TELECOM_DISCONNECT_CAUSE"
+            };
+        }
+
+        private static readonly string[] DiagnosticCausePatterns =
+        {
+            @"\besmCause\s*[:=]\s*(?<cause>[^|,;\r\n]+)",
+            @"\bgetDisconnectCause\s*:\s*cause\s*=\s*(?<cause>[^|,;\s}\]\)]+)",
+            @"\b(?:disconnectCause|releaseCause|failureCause|rejectCause|restrictCause|mRestrictCause)\s*[:=]\s*(?<cause>[^|,;\s}\]\)]+)",
+            @"(?:^|[^\w])\.?cause\s*[:=]\s*(?<cause>[^|,;\s}\]\)]+)"
+        };
+
         private void AddDiagnosticParam(IDbCommand cmd, string name, object? value)
         {
             var param = cmd.CreateParameter();
@@ -1867,10 +1944,10 @@ public IActionResult UploadSitePrediction(
             cmd.CommandText = @"
                 INSERT INTO tbl_event_log
                     (tbl_upload_id, session_id, source_file_name, row_no, timestamp_text, latitude, longitude,
-                     category, event_name, detail, source, severity, raw_json)
+                     category, event_name, detail, cause, source, severity, raw_json)
                 VALUES
                     (@uploadId, @sessionId, @fileName, @rowNo, @timestampText, @latitude, @longitude,
-                     @category, @eventName, @detail, @source, @severity, @rawJson);";
+                     @category, @eventName, @detail, @cause, @source, @severity, @rawJson);";
             AddDiagnosticParam(cmd, "@uploadId", excelId);
             AddDiagnosticParam(cmd, "@sessionId", sessionId);
             AddDiagnosticParam(cmd, "@fileName", fileName);
@@ -1879,8 +1956,11 @@ public IActionResult UploadSitePrediction(
             AddDiagnosticParam(cmd, "@latitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "latitude", "lat")));
             AddDiagnosticParam(cmd, "@longitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "longitude", "lon", "lng")));
             AddDiagnosticParam(cmd, "@category", GetDiagnosticValue(row, "category"));
-            AddDiagnosticParam(cmd, "@eventName", GetDiagnosticValue(row, "event", "event_name", "message"));
-            AddDiagnosticParam(cmd, "@detail", GetDiagnosticValue(row, "detail", "description"));
+            var eventName = GetDiagnosticValue(row, "event", "event_name", "message");
+            AddDiagnosticParam(cmd, "@eventName", eventName);
+            var detail = GetDiagnosticValue(row, "detail", "description");
+            AddDiagnosticParam(cmd, "@detail", detail);
+            AddDiagnosticParam(cmd, "@cause", ExtractEventDiagnosticCause(eventName, detail));
             AddDiagnosticParam(cmd, "@source", GetDiagnosticValue(row, "source"));
             AddDiagnosticParam(cmd, "@severity", GetDiagnosticValue(row, "severity", "level"));
             AddDiagnosticParam(cmd, "@rawJson", DBNull.Value);
@@ -1894,10 +1974,10 @@ public IActionResult UploadSitePrediction(
             cmd.CommandText = @"
                 INSERT INTO tbl_l3_log
                     (tbl_upload_id, session_id, source_file_name, source_file_type, row_no, timestamp_text, latitude, longitude,
-                     category, message, detail, source, severity, raw_text, raw_json)
+                     category, message, detail, cause, source, severity, raw_text, raw_json)
                 VALUES
                     (@uploadId, @sessionId, @fileName, @sourceFileType, @rowNo, @timestampText, @latitude, @longitude,
-                     @category, @message, @detail, @source, @severity, @rawText, @rawJson);";
+                     @category, @message, @detail, @cause, @source, @severity, @rawText, @rawJson);";
             AddDiagnosticParam(cmd, "@uploadId", excelId);
             AddDiagnosticParam(cmd, "@sessionId", sessionId);
             AddDiagnosticParam(cmd, "@fileName", fileName);
@@ -1916,6 +1996,7 @@ public IActionResult UploadSitePrediction(
             AddDiagnosticParam(cmd, "@category", category);
             AddDiagnosticParam(cmd, "@message", message);
             AddDiagnosticParam(cmd, "@detail", storedDetail);
+            AddDiagnosticParam(cmd, "@cause", ExtractDiagnosticCause(storedDetail, storedRawText));
             AddDiagnosticParam(cmd, "@source", GetDiagnosticValue(row, "source"));
             AddDiagnosticParam(cmd, "@severity", GetDiagnosticValue(row, "severity", "level"));
             AddDiagnosticParam(cmd, "@rawText", storedRawText);
@@ -2192,6 +2273,7 @@ public IActionResult UploadSitePrediction(
                         category VARCHAR(128) NULL,
                         message VARCHAR(512) NULL,
                         detail LONGTEXT NULL,
+                        cause VARCHAR(255) NULL,
                         source VARCHAR(128) NULL,
                         severity VARCHAR(64) NULL,
                         raw_text LONGTEXT NULL,
@@ -2217,6 +2299,7 @@ public IActionResult UploadSitePrediction(
                         category VARCHAR(128) NULL,
                         event_name VARCHAR(512) NULL,
                         detail LONGTEXT NULL,
+                        cause VARCHAR(255) NULL,
                         source VARCHAR(128) NULL,
                         severity VARCHAR(64) NULL,
                         raw_json LONGTEXT NULL,
@@ -2225,6 +2308,9 @@ public IActionResult UploadSitePrediction(
                         INDEX ix_tbl_event_log_upload (tbl_upload_id)
                     );";
                 events.ExecuteNonQuery();
+
+                EnsureColumn("tbl_l3_log", "cause", "VARCHAR(255) NULL");
+                EnsureColumn("tbl_event_log", "cause", "VARCHAR(255) NULL");
 
                 using var history = conn.CreateCommand();
                 history.Transaction = db.Database.CurrentTransaction?.GetDbTransaction();

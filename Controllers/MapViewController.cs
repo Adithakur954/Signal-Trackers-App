@@ -2421,6 +2421,7 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                             x.Category,
                             event_name = x.EventName,
                             x.Detail,
+                            x.Cause,
                             x.Source,
                             x.Severity
                         }),
@@ -2438,6 +2439,7 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                             x.Category,
                             x.Message,
                             x.Detail,
+                            x.Cause,
                             x.Source,
                             x.Severity,
                             raw_text = x.RawText
@@ -3087,10 +3089,11 @@ public class AvailablePolygonsResponse
             public string? Category { get; init; }
             public string? EventName { get; init; }
             public string? Detail { get; init; }
+            public string? Cause { get; init; }
             public string? Source { get; init; }
             public string? Severity { get; init; }
             public TimeSpan? EventTime => ParseDiagnosticTime(TimestampText);
-            public string Text => string.Join(" ", new[] { Category, EventName, Detail, Source, Severity }.Where(x => !string.IsNullOrWhiteSpace(x)));
+            public string Text => string.Join(" ", new[] { Category, EventName, Detail, Cause, Source, Severity }.Where(x => !string.IsNullOrWhiteSpace(x)));
         }
 
         private sealed class DiagnosticL3Row
@@ -3107,11 +3110,12 @@ public class AvailablePolygonsResponse
             public string? Category { get; init; }
             public string? Message { get; init; }
             public string? Detail { get; init; }
+            public string? Cause { get; init; }
             public string? Source { get; init; }
             public string? Severity { get; init; }
             public string? RawText { get; init; }
             public TimeSpan? EventTime => ParseDiagnosticTime(TimestampText);
-            public string Text => string.Join(" ", new[] { Category, Message, Detail, RawText, Source, Severity }.Where(x => !string.IsNullOrWhiteSpace(x)));
+            public string Text => string.Join(" ", new[] { Category, Message, Detail, Cause, RawText, Source, Severity }.Where(x => !string.IsNullOrWhiteSpace(x)));
         }
 
         private sealed class DiagnosticCallRow
@@ -3154,6 +3158,7 @@ public class AvailablePolygonsResponse
             public string Message { get; init; } = string.Empty;
             public string Summary { get; init; } = string.Empty;
             public string RawMessage { get; init; } = string.Empty;
+            public string? Cause { get; init; }
             public string? OriginSource { get; init; }
             public string Severity { get; init; } = "info";
             public string Technology { get; init; } = "Unknown";
@@ -3247,6 +3252,23 @@ public class AvailablePolygonsResponse
             return result != null && result != DBNull.Value;
         }
 
+        private static async Task<bool> DiagnosticColumnExistsAsync(DbConnection conn, string tableName, string columnName, DbTransaction? transaction = null)
+        {
+            await using var cmd = conn.CreateCommand();
+            cmd.Transaction = transaction;
+            cmd.CommandText = @"
+                SELECT 1
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = @tableName
+                  AND COLUMN_NAME = @columnName
+                LIMIT 1;";
+            AddParam(cmd, "@tableName", tableName);
+            AddParam(cmd, "@columnName", columnName);
+            var result = await cmd.ExecuteScalarAsync();
+            return result != null && result != DBNull.Value;
+        }
+
         private static async Task<int> CountDiagnosticRowsAsync(
             DbConnection conn,
             string tableName,
@@ -3305,6 +3327,9 @@ public class AvailablePolygonsResponse
             var rows = new List<DiagnosticEventRow>();
             if (!await DiagnosticTableExistsAsync(conn, "tbl_event_log", transaction))
                 return rows;
+            var causeSql = await DiagnosticColumnExistsAsync(conn, "tbl_event_log", "cause", transaction)
+                ? "cause"
+                : "NULL AS cause";
 
             await using var cmd = conn.CreateCommand();
             cmd.Transaction = transaction;
@@ -3345,6 +3370,7 @@ public class AvailablePolygonsResponse
                            JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.message')),
                            JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.data'))
                        ) END) AS detail,
+                       " + causeSql + @",
                        source, severity
                 FROM tbl_event_log" + whereSql + @"
                 ORDER BY session_id, id
@@ -3366,8 +3392,9 @@ public class AvailablePolygonsResponse
                     Category = ReadString(reader, 8),
                     EventName = ReadString(reader, 9),
                     Detail = ReadString(reader, 10),
-                    Source = ReadString(reader, 11),
-                    Severity = ReadString(reader, 12)
+                    Cause = ReadString(reader, 11),
+                    Source = ReadString(reader, 12),
+                    Severity = ReadString(reader, 13)
                 });
             }
 
@@ -3384,6 +3411,9 @@ public class AvailablePolygonsResponse
             var rows = new List<DiagnosticL3Row>();
             if (!await DiagnosticTableExistsAsync(conn, "tbl_l3_log", transaction))
                 return rows;
+            var causeSql = await DiagnosticColumnExistsAsync(conn, "tbl_l3_log", "cause", transaction)
+                ? "cause"
+                : "NULL AS cause";
 
             await using var cmd = conn.CreateCommand();
             cmd.Transaction = transaction;
@@ -3428,6 +3458,7 @@ public class AvailablePolygonsResponse
                            JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.info')),
                            JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.description'))
                        ) END) AS detail,
+                       " + causeSql + @",
                        source, severity, raw_text
                 FROM tbl_l3_log" + whereSql + @"
                 ORDER BY session_id, id
@@ -3450,9 +3481,10 @@ public class AvailablePolygonsResponse
                     Category = ReadString(reader, 9),
                     Message = ReadString(reader, 10),
                     Detail = ReadString(reader, 11),
-                    Source = ReadString(reader, 12),
-                    Severity = ReadString(reader, 13),
-                    RawText = ReadString(reader, 14)
+                    Cause = ReadString(reader, 12),
+                    Source = ReadString(reader, 13),
+                    Severity = ReadString(reader, 14),
+                    RawText = ReadString(reader, 15)
                 });
             }
 
@@ -3671,6 +3703,7 @@ public class AvailablePolygonsResponse
                     Message = FirstNonEmpty(x.EventName, x.Detail, x.Category, "Event"),
                     Summary = FirstNonEmpty(x.Detail, x.EventName, x.Category, string.Empty),
                     RawMessage = FirstNonEmpty(x.Detail, x.EventName, x.Category, string.Empty),
+                    Cause = x.Cause,
                     OriginSource = x.Source,
                     Severity = NormalizeDiagnosticSeverity(x.Severity, text),
                     Technology = ResolveDiagnosticTechnology(text, l3Rows, x.SessionId, time),
@@ -3711,6 +3744,7 @@ public class AvailablePolygonsResponse
                     Message = FirstNonEmpty(x.Message, x.Category, "L3 Message"),
                     Summary = summary,
                     RawMessage = rawMessage,
+                    Cause = x.Cause,
                     OriginSource = x.Source,
                     Severity = NormalizeDiagnosticSeverity(x.Severity, text),
                     Technology = ResolveDiagnosticTechnology(text, l3Rows, x.SessionId, time),
@@ -3751,7 +3785,7 @@ public class AvailablePolygonsResponse
                 var attemptMs = call.StartSeconds.HasValue && call.EndSeconds.HasValue
                     ? ToMilliseconds(SecondsBetween(TimeSpan.FromSeconds(call.StartSeconds.Value), TimeSpan.FromSeconds(call.EndSeconds.Value)))
                     : null;
-                var causeCode = ExtractCauseCode(callRows.Select(x => x.RawMessage).Concat(new[] { call.Reason }));
+                var causeCode = ExtractCauseCode(callRows.Select(x => x.Cause).Concat(callRows.Select(x => x.RawMessage)).Concat(new[] { call.Reason }));
 
                 return new FrontendDiagnosticCall
                 {
@@ -4258,6 +4292,13 @@ public class AvailablePolygonsResponse
             {
                 if (string.IsNullOrWhiteSpace(text))
                     continue;
+
+                if (int.TryParse(text.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var directCause))
+                    return directCause;
+
+                var labeledMatch = Regex.Match(text, @"^\s*(\d+)\s*-");
+                if (labeledMatch.Success && int.TryParse(labeledMatch.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var labeledCause))
+                    return labeledCause;
 
                 var match = Regex.Match(text, @"cause\s*=\s*(\d+)", RegexOptions.IgnoreCase);
                 if (match.Success && int.TryParse(match.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var cause))

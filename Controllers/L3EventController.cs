@@ -1066,6 +1066,9 @@ namespace SignalTracker.Controllers
             int rowNo,
             Dictionary<string, object?> row)
         {
+            var eventName = GetDiagnosticValue(row, "event_name", "eventname", "event_type", "eventtype", "event", "name", "type", "message");
+            var detail = GetDiagnosticValue(row, "value", "detail", "details", "description", "info", "message", "data");
+
             return new EventDiagnosticInsertRow(
                 uploadId,
                 sessionId > 0 ? sessionId : null,
@@ -1075,8 +1078,9 @@ namespace SignalTracker.Controllers
                 ParseDiagnosticDouble(GetDiagnosticValue(row, "latitude", "lat", "y")),
                 ParseDiagnosticDouble(GetDiagnosticValue(row, "longitude", "long", "lon", "lng", "x")),
                 GetDiagnosticValue(row, "category", "event_category", "class", "group"),
-                GetDiagnosticValue(row, "event_name", "eventname", "event_type", "eventtype", "event", "name", "type", "message"),
-                GetDiagnosticValue(row, "value", "detail", "details", "description", "info", "message", "data"),
+                eventName,
+                detail,
+                ExtractEventDiagnosticCause(eventName, detail),
                 GetDiagnosticValue(row, "source", "origin", "producer"),
                 GetDiagnosticValue(row, "severity", "level", "priority"),
                 null);
@@ -1096,7 +1100,7 @@ namespace SignalTracker.Controllers
             var sql = new StringBuilder(@"
                 INSERT INTO tbl_event_log
                     (tbl_upload_id, session_id, source_file_name, row_no, timestamp_text, latitude, longitude,
-                     category, event_name, detail, source, severity, raw_json)
+                     category, event_name, detail, cause, source, severity, raw_json)
                 VALUES ");
             for (var index = 0; index < rows.Count; index++)
             {
@@ -1114,6 +1118,7 @@ namespace SignalTracker.Controllers
                 AddParam(cmd, $"@category{index}", row.Category);
                 AddParam(cmd, $"@eventName{index}", row.EventName);
                 AddParam(cmd, $"@detail{index}", row.Detail);
+                AddParam(cmd, $"@cause{index}", row.Cause);
                 AddParam(cmd, $"@source{index}", row.Source);
                 AddParam(cmd, $"@severity{index}", row.Severity);
                 AddParam(cmd, $"@rawJson{index}", row.RawJson);
@@ -1124,7 +1129,7 @@ namespace SignalTracker.Controllers
 
         private static void AppendEventRowSql(StringBuilder sql, int index)
         {
-            sql.Append(CultureInfo.InvariantCulture, $"(@uploadId{index}, @sessionId{index}, @fileName{index}, @rowNo{index}, @timestampText{index}, @latitude{index}, @longitude{index}, @category{index}, @eventName{index}, @detail{index}, @source{index}, @severity{index}, @rawJson{index})");
+            sql.Append(CultureInfo.InvariantCulture, $"(@uploadId{index}, @sessionId{index}, @fileName{index}, @rowNo{index}, @timestampText{index}, @latitude{index}, @longitude{index}, @category{index}, @eventName{index}, @detail{index}, @cause{index}, @source{index}, @severity{index}, @rawJson{index})");
         }
 
         private static L3DiagnosticInsertRow BuildL3DiagnosticInsertRow(
@@ -1155,6 +1160,7 @@ namespace SignalTracker.Controllers
                 category,
                 message,
                 storedDetail,
+                ExtractDiagnosticCause(storedDetail, storedRawText),
                 GetDiagnosticValue(row, "source", "origin", "producer"),
                 GetDiagnosticValue(row, "severity", "level", "priority"),
                 storedRawText,
@@ -1175,7 +1181,7 @@ namespace SignalTracker.Controllers
             var sql = new StringBuilder(@"
                 INSERT INTO tbl_l3_log
                     (tbl_upload_id, session_id, source_file_name, source_file_type, row_no, timestamp_text, latitude, longitude,
-                     category, message, detail, source, severity, raw_text, raw_json)
+                     category, message, detail, cause, source, severity, raw_text, raw_json)
                 VALUES ");
             for (var index = 0; index < rows.Count; index++)
             {
@@ -1194,6 +1200,7 @@ namespace SignalTracker.Controllers
                 AddParam(cmd, $"@category{index}", row.Category);
                 AddParam(cmd, $"@message{index}", row.Message);
                 AddParam(cmd, $"@detail{index}", row.Detail);
+                AddParam(cmd, $"@cause{index}", row.Cause);
                 AddParam(cmd, $"@source{index}", row.Source);
                 AddParam(cmd, $"@severity{index}", row.Severity);
                 AddParam(cmd, $"@rawText{index}", row.RawText);
@@ -1205,7 +1212,7 @@ namespace SignalTracker.Controllers
 
         private static void AppendL3RowSql(StringBuilder sql, int index)
         {
-            sql.Append(CultureInfo.InvariantCulture, $"(@uploadId{index}, @sessionId{index}, @fileName{index}, @sourceFileType{index}, @rowNo{index}, @timestampText{index}, @latitude{index}, @longitude{index}, @category{index}, @message{index}, @detail{index}, @source{index}, @severity{index}, @rawText{index}, @rawJson{index})");
+            sql.Append(CultureInfo.InvariantCulture, $"(@uploadId{index}, @sessionId{index}, @fileName{index}, @sourceFileType{index}, @rowNo{index}, @timestampText{index}, @latitude{index}, @longitude{index}, @category{index}, @message{index}, @detail{index}, @cause{index}, @source{index}, @severity{index}, @rawText{index}, @rawJson{index})");
         }
 
         private async Task UpdateSessionL3EventFlagsAsync(int sessionId, bool hasL3, bool hasEvent, CancellationToken cancellationToken)
@@ -1746,6 +1753,7 @@ namespace SignalTracker.Controllers
                     category VARCHAR(128) NULL,
                     message VARCHAR(512) NULL,
                     detail LONGTEXT NULL,
+                    cause VARCHAR(255) NULL,
                     source VARCHAR(128) NULL,
                     severity VARCHAR(64) NULL,
                     raw_text LONGTEXT NULL,
@@ -1768,6 +1776,7 @@ namespace SignalTracker.Controllers
                     category VARCHAR(128) NULL,
                     event_name VARCHAR(512) NULL,
                     detail LONGTEXT NULL,
+                    cause VARCHAR(255) NULL,
                     source VARCHAR(128) NULL,
                     severity VARCHAR(64) NULL,
                     raw_json LONGTEXT NULL,
@@ -1775,6 +1784,9 @@ namespace SignalTracker.Controllers
                     INDEX ix_tbl_event_log_session (session_id),
                     INDEX ix_tbl_event_log_upload (tbl_upload_id)
                 );", cancellationToken);
+
+            await EnsureColumnAsync("tbl_l3_log", "cause", "VARCHAR(255) NULL", cancellationToken);
+            await EnsureColumnAsync("tbl_event_log", "cause", "VARCHAR(255) NULL", cancellationToken);
         }
 
         private async Task EnsureDiagnosticHistoryTablesAsync(CancellationToken cancellationToken)
@@ -2023,6 +2035,83 @@ namespace SignalTracker.Controllers
             return null;
         }
 
+        private static string? ExtractDiagnosticCause(params string?[] texts)
+        {
+            foreach (var text in texts)
+            {
+                if (string.IsNullOrWhiteSpace(text))
+                    continue;
+
+                foreach (var pattern in DiagnosticCausePatterns)
+                {
+                    var match = Regex.Match(text, pattern, RegexOptions.IgnoreCase);
+                    if (!match.Success)
+                        continue;
+
+                    var cause = Regex.Replace(match.Groups["cause"].Value, @"\s+", " ").Trim();
+                    cause = cause.Trim(' ', '.', ',', ';', '|', '}', ']', ')', '"', '\'');
+                    if (!string.IsNullOrWhiteSpace(cause))
+                        return cause.Length > 255 ? cause[..255] : cause;
+                }
+            }
+
+            return null;
+        }
+
+        private static string? ExtractEventDiagnosticCause(string? eventName, string? detail)
+        {
+            if (string.IsNullOrWhiteSpace(detail))
+                return null;
+
+            var telecomMatch = Regex.Match(detail, @"\bgetDisconnectCause\s*:\s*cause\s*=\s*(?<cause>\d+)\b", RegexOptions.IgnoreCase);
+            if (telecomMatch.Success && int.TryParse(telecomMatch.Groups["cause"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var telecomCause))
+                return FormatTelecomDisconnectCause(telecomCause);
+
+            if (string.Equals(eventName?.Trim(), "CALL_DISCONNECT_NONZERO_CAUSE", StringComparison.OrdinalIgnoreCase))
+            {
+                var causeMatch = Regex.Match(detail, @"(?:^|[^\w])\.?cause\s*[:=]\s*(?<cause>\d+)\b", RegexOptions.IgnoreCase);
+                if (causeMatch.Success && int.TryParse(causeMatch.Groups["cause"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var cause))
+                    return FormatTelecomDisconnectCause(cause);
+            }
+
+            return null;
+        }
+
+        private static string FormatTelecomDisconnectCause(int cause)
+        {
+            return cause switch
+            {
+                0 => "0 - NOT_DISCONNECTED",
+                1 => "1 - INCOMING_MISSED",
+                2 => "2 - NORMAL (Remote hangup)",
+                3 => "3 - LOCAL (Local hangup)",
+                4 => "4 - BUSY",
+                5 => "5 - CONGESTION",
+                7 => "7 - INVALID_NUMBER",
+                8 => "8 - NUMBER_UNREACHABLE",
+                9 => "9 - SERVER_UNREACHABLE",
+                13 => "13 - TIMED_OUT",
+                14 => "14 - LOST_SIGNAL",
+                16 => "16 - INCOMING_REJECTED",
+                17 => "17 - POWER_OFF",
+                18 => "18 - OUT_OF_SERVICE",
+                20 => "20 - CALL_BARRED",
+                21 => "21 - FDN_BLOCKED",
+                43 => "43 - OUTGOING_FAILURE",
+                44 => "44 - OUTGOING_CANCELED",
+                65 => "65 - NORMAL_UNSPECIFIED",
+                _ => $"{cause} - TELECOM_DISCONNECT_CAUSE"
+            };
+        }
+
+        private static readonly string[] DiagnosticCausePatterns =
+        {
+            @"\besmCause\s*[:=]\s*(?<cause>[^|,;\r\n]+)",
+            @"\bgetDisconnectCause\s*:\s*cause\s*=\s*(?<cause>[^|,;\s}\]\)]+)",
+            @"\b(?:disconnectCause|releaseCause|failureCause|rejectCause|restrictCause|mRestrictCause)\s*[:=]\s*(?<cause>[^|,;\s}\]\)]+)",
+            @"(?:^|[^\w])\.?cause\s*[:=]\s*(?<cause>[^|,;\s}\]\)]+)"
+        };
+
         private static string? NormalizeUnavailableNrArfcn(string? value)
         {
             if (string.IsNullOrWhiteSpace(value))
@@ -2175,6 +2264,7 @@ namespace SignalTracker.Controllers
             string? Category,
             string? EventName,
             string? Detail,
+            string? Cause,
             string? Source,
             string? Severity,
             string? RawJson);
@@ -2190,6 +2280,7 @@ namespace SignalTracker.Controllers
             string? Category,
             string? Message,
             string? Detail,
+            string? Cause,
             string? Source,
             string? Severity,
             string? RawText,
