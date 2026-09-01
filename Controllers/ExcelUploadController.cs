@@ -311,9 +311,7 @@ namespace SignalTracker.Controllers
             Directory.CreateDirectory(uploadsDir);
 
             string originalMainName = Path.GetFileName(uploadFile.FileName);
-            string savedMainName = string.IsNullOrWhiteSpace(originalMainName)
-                ? BuildCompactUploadFileName("U_", nowIst, uploadFile.FileName)
-                : originalMainName;
+            string savedMainName = BuildCompactUploadFileName("U_", nowIst, originalMainName);
             string mainPath = Path.Combine(uploadsDir, savedMainName);
 
             using (var stream = System.IO.File.Create(mainPath))
@@ -324,6 +322,7 @@ namespace SignalTracker.Controllers
             return await ProcessStoredUploadAsync(
                 mainPath,
                 savedMainName,
+                originalMainName,
                 remarks,
                 polygonPath,
                 polygonFile,
@@ -336,6 +335,7 @@ namespace SignalTracker.Controllers
         private async Task<(int UploadHistoryId, bool Success, string? ErrorMessage, bool ProcessingStarted)> ProcessStoredUploadAsync(
             string mainPath,
             string savedMainName,
+            string originalFileName,
             string remarks,
             string polygonPath,
             string polygonFile,
@@ -348,7 +348,6 @@ namespace SignalTracker.Controllers
             {
                 remarks = remarks,
                 file_name = savedMainName,
-                original_file_name = savedMainName,
                 polygon_file = polygonFile,
                 file_type = uploadFileType,
                 status = 2,
@@ -358,7 +357,7 @@ namespace SignalTracker.Controllers
 
             db.tbl_upload_history.Add(excelDetails);
             await db.SaveChangesAsync();
-            await SaveOriginalUploadFileNameAsync(excelDetails.id, savedMainName);
+            await SaveOriginalUploadFileNameAsync(excelDetails.id, originalFileName);
 
             if (uploadFileType == 1)
             {
@@ -996,6 +995,7 @@ namespace SignalTracker.Controllers
                 var result = await ProcessStoredUploadAsync(
                     mainPath,
                     savedMainName,
+                    Path.GetFileName(manifest.FileName),
                     FirstNonBlank(remarks, manifest.Remarks) ?? string.Empty,
                     polygonPath,
                     polygonFile,
