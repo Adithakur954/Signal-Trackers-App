@@ -97,6 +97,12 @@ public class AddSitePredictionModel
     [JsonPropertyName("site")]
     public string? Site { get; set; }
 
+    [JsonPropertyName("siteName")]
+    public string? SiteName { get; set; }
+
+    [JsonPropertyName("site_name")]
+    public string? SiteNameSnake { get; set; }
+
     [JsonPropertyName("nodeId")]
     public string? NodeId { get; set; }
 

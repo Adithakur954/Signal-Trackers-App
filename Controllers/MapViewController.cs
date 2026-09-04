@@ -15588,6 +15588,10 @@ public async Task<IActionResult> AddSitePrediction([FromBody] AddSitePredictionM
                 : model.NodeIdSnake
             : model.NodeId;
         nodeId = string.IsNullOrWhiteSpace(nodeId) ? null : nodeId.Trim();
+        var siteName = string.IsNullOrWhiteSpace(model.SiteName)
+            ? model.SiteNameSnake
+            : model.SiteName;
+        siteName = string.IsNullOrWhiteSpace(siteName) ? null : siteName.Trim();
         var providerValue = ResolveSitePredictionProviderInput(
             model.Provider,
             model.OperatorName,
@@ -15626,11 +15630,11 @@ public async Task<IActionResult> AddSitePrediction([FromBody] AddSitePredictionM
         // 1. ADDED missing columns: cluster, earfcn
         string sql = $@"
         INSERT INTO site_prediction (
-            tbl_project_id, site, cluster, sector, cell_id,
+            tbl_project_id, site, site_name, cluster, sector, cell_id,
             latitude, longitude, pci, azimuth, band, earfcn,
             Technology, height, m_tilt, e_tilt{nodeInsertColumn}
         ) VALUES (
-            @pid, @site, @cluster, @sec, @cid, @lat, @lon,
+            @pid, @site, @siteName, @cluster, @sec, @cid, @lat, @lon,
             @pci, @azi, @band, @earfcn, @tech, @h, @mt, @et{nodeInsertValue}
         );";
 
@@ -15662,6 +15666,7 @@ public async Task<IActionResult> AddSitePrediction([FromBody] AddSitePredictionM
 
                     AddParam(cmd, "@pid", model.ProjectId);
                     AddParam(cmd, "@site", model.Site);
+                    AddParam(cmd, "@siteName", siteName ?? (object)DBNull.Value);
                     AddParam(cmd, "@cluster", string.IsNullOrWhiteSpace(providerValue) ? DBNull.Value : providerValue);
                     AddParam(cmd, "@sec", sector);
                     AddParam(cmd, "@cid", cellIdValue);
