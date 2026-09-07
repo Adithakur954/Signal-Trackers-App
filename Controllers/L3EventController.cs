@@ -932,7 +932,7 @@ public L3EventController(
         }
         private MapViewController CreateMapViewController()
         {
-            return new MapViewController(_context, _httpContextAccessor, _env, _redis, _userScope, _connectionProvider, _networkLogData)
+            return new MapViewController(_context, _httpContextAccessor, _env, _redis, _userScope, _connectionProvider, _networkLogData, _configuration)
             {
                 ControllerContext = ControllerContext
             };
@@ -2502,6 +2502,7 @@ public L3EventController(
             short Status);
     }
 }
+
 
 
 

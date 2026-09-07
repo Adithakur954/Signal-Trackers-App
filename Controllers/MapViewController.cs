@@ -36,12 +36,14 @@ namespace SignalTracker.Controllers
     {
         private const int DiagnosticCallAnalysisVersion = 5;
         private readonly IWebHostEnvironment _env;
+        private readonly IHttpContextAccessor _httpContextAccessor;
         private readonly ApplicationDbContext db;
         private readonly CommonFunction cf;
         private readonly RedisService _redis;
         private readonly UserScopeService _userScope;
         private readonly IDbConnectionProvider _connectionProvider;
         private readonly NetworkLogDataService _networkLogData;
+        private readonly IConfiguration _configuration;
         private const int MapViewCacheTtlSeconds = 300;
         private static volatile bool NetworkLogUpdatedAtColumnEnsured;
         private static volatile bool ObsoleteNetworkLogCachesInvalidated;
@@ -67,21 +69,54 @@ namespace SignalTracker.Controllers
             "daterangelog:*"
         };
 
-        public MapViewController(ApplicationDbContext context, IHttpContextAccessor httpContextAccessor, IWebHostEnvironment env, RedisService redis,UserScopeService userScope, IDbConnectionProvider connectionProvider, NetworkLogDataService networkLogData)
+        public MapViewController(ApplicationDbContext context, IHttpContextAccessor httpContextAccessor, IWebHostEnvironment env, RedisService redis, UserScopeService userScope, IDbConnectionProvider connectionProvider, NetworkLogDataService networkLogData, IConfiguration configuration)
         {
             db = context;
+            _httpContextAccessor = httpContextAccessor;
             _env = env;
             cf = new CommonFunction(context, httpContextAccessor);
             _redis = redis;
             _userScope = userScope;
             _connectionProvider = connectionProvider;
             _networkLogData = networkLogData;
+            _configuration = configuration;
         }
 
         private string BuildMapViewCacheKey(string endpoint, params object?[] parts)
         {
             var tokens = parts.Select(NormalizeCacheKeyPart);
             return $"mapview:{GetProjectListCacheScope()}:{NormalizeCacheKeyPart(endpoint)}:{string.Join(":", tokens)}";
+        }
+
+        private async Task<IActionResult?> EnsureSessionDiagnosticDataAsync(List<int> sessionIds, CancellationToken cancellationToken)
+        {
+            if (sessionIds.Count != 1 || sessionIds[0] <= 0)
+                return null;
+
+            var importer = new L3EventController(
+                db,
+                _httpContextAccessor,
+                _env,
+                _redis,
+                _userScope,
+                _connectionProvider,
+                _networkLogData,
+                _configuration)
+            {
+                ControllerContext = ControllerContext
+            };
+            var result = await importer.ImportSessionDiagnosticData(
+                sessionIds[0],
+                null,
+                "Automatic L3/Event import",
+                cancellationToken);
+
+            // Existing data is a normal read outcome, not an error for this endpoint.
+            if (result is ConflictObjectResult)
+                return null;
+            if (result is ObjectResult objectResult && objectResult.StatusCode is >= 200 and < 300)
+                return null;
+            return result;
         }
 
         private static string BuildSessionIdsCachePart(List<int> sessionIds)
@@ -2730,6 +2765,10 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                 if (request.Error != null)
                     return request.Error;
 
+                var importResult = await EnsureSessionDiagnosticDataAsync(request.SessionIds, HttpContext.RequestAborted);
+                if (importResult != null)
+                    return importResult;
+
                 var conn = await OpenDiagnosticConnectionAsync();
                 var rows = await LoadDiagnosticL3RowsAsync(conn, request.SessionIds, request.UploadId, request.Take);
                 return Json(new { status = 1, count = rows.Count, l3 = rows });
@@ -2753,6 +2792,10 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                 var request = ParseDiagnosticQuery(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
                 if (request.Error != null)
                     return request.Error;
+
+                var importResult = await EnsureSessionDiagnosticDataAsync(request.SessionIds, HttpContext.RequestAborted);
+                if (importResult != null)
+                    return importResult;
 
                 var conn = await OpenDiagnosticConnectionAsync();
                 var rows = await LoadDiagnosticEventRowsAsync(conn, request.SessionIds, request.UploadId, request.Take);
@@ -18497,4 +18540,8 @@ public class LocationStats
         }
     }
 }
+
+
+
+
 
