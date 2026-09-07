@@ -1241,6 +1241,8 @@ public L3EventController(
         {
             var eventName = GetDiagnosticValue(row, "event_name", "eventname", "event_type", "eventtype", "event", "name", "type", "message");
             var detail = GetDiagnosticValue(row, "value", "detail", "details", "description", "info", "message", "data");
+            var direction = GetDiagnosticValue(row, "direction", "dir", "call_direction");
+            var channel = GetDiagnosticValue(row, "channel", "chan", "channel_name", "channel_number", "earfcn");
 
             return new EventDiagnosticInsertRow(
                 uploadId,
@@ -1251,6 +1253,8 @@ public L3EventController(
                 ParseDiagnosticDouble(GetDiagnosticValue(row, "latitude", "lat", "y")),
                 ParseDiagnosticDouble(GetDiagnosticValue(row, "longitude", "long", "lon", "lng", "x")),
                 GetDiagnosticValue(row, "category", "event_category", "class", "group"),
+                direction,
+                channel,
                 eventName,
                 detail,
                 ExtractEventDiagnosticCause(eventName, detail),
@@ -1273,7 +1277,7 @@ public L3EventController(
             var sql = new StringBuilder(@"
                 INSERT INTO tbl_event_log
                     (tbl_upload_id, session_id, source_file_name, row_no, timestamp_text, latitude, longitude,
-                     category, event_name, detail, cause, source, severity, raw_json)
+                     category, direction, channel, event_name, detail, cause, source, severity, raw_json)
                 VALUES ");
             for (var index = 0; index < rows.Count; index++)
             {
@@ -1289,6 +1293,8 @@ public L3EventController(
                 AddParam(cmd, $"@latitude{index}", row.Latitude);
                 AddParam(cmd, $"@longitude{index}", row.Longitude);
                 AddParam(cmd, $"@category{index}", row.Category);
+                AddParam(cmd, $"@direction{index}", row.Direction);
+                AddParam(cmd, $"@channel{index}", row.Channel);
                 AddParam(cmd, $"@eventName{index}", row.EventName);
                 AddParam(cmd, $"@detail{index}", row.Detail);
                 AddParam(cmd, $"@cause{index}", row.Cause);
@@ -1302,7 +1308,7 @@ public L3EventController(
 
         private static void AppendEventRowSql(StringBuilder sql, int index)
         {
-            sql.Append(CultureInfo.InvariantCulture, $"(@uploadId{index}, @sessionId{index}, @fileName{index}, @rowNo{index}, @timestampText{index}, @latitude{index}, @longitude{index}, @category{index}, @eventName{index}, @detail{index}, @cause{index}, @source{index}, @severity{index}, @rawJson{index})");
+            sql.Append(CultureInfo.InvariantCulture, $"(@uploadId{index}, @sessionId{index}, @fileName{index}, @rowNo{index}, @timestampText{index}, @latitude{index}, @longitude{index}, @category{index}, @direction{index}, @channel{index}, @eventName{index}, @detail{index}, @cause{index}, @source{index}, @severity{index}, @rawJson{index})");
         }
 
         private static L3DiagnosticInsertRow BuildL3DiagnosticInsertRow(
@@ -1317,6 +1323,8 @@ public L3EventController(
             var category = GetDiagnosticValue(row, "category", "layer", "protocol", "stack", "channel");
             var message = GetDiagnosticValue(row, "message_name", "messagename", "msg_name", "message_type", "messagetype", "message", "msg", "name", "event");
             var detail = GetDiagnosticValue(row, "decode", "decoded", "decoded_text", "detail", "details", "text", "content", "info", "description");
+            var direction = GetDiagnosticValue(row, "direction", "dir", "call_direction");
+            var channel = GetDiagnosticValue(row, "channel", "chan", "channel_name", "channel_number", "earfcn");
             var decodedNrRrcSummary = NrRrcOtaDecoder.TryDecodeSummary(category, message, detail, rawText, sourceFileType);
             var storedDetail = NormalizeUnavailableNrArfcn(decodedNrRrcSummary ?? detail);
             var storedRawText = NormalizeUnavailableNrArfcn(decodedNrRrcSummary ?? rawText);
@@ -1331,6 +1339,8 @@ public L3EventController(
                 ParseDiagnosticDouble(GetDiagnosticValue(row, "latitude", "lat", "y")),
                 ParseDiagnosticDouble(GetDiagnosticValue(row, "longitude", "long", "lon", "lng", "x")),
                 category,
+                direction,
+                FirstNonBlank(channel, ExtractDiagnosticChannel(storedDetail, storedRawText)),
                 message,
                 storedDetail,
                 ExtractDiagnosticCause(storedDetail, storedRawText),
@@ -1354,7 +1364,7 @@ public L3EventController(
             var sql = new StringBuilder(@"
                 INSERT INTO tbl_l3_log
                     (tbl_upload_id, session_id, source_file_name, source_file_type, row_no, timestamp_text, latitude, longitude,
-                     category, message, detail, cause, source, severity, raw_text, raw_json)
+                     category, direction, channel, message, detail, cause, source, severity, raw_text, raw_json)
                 VALUES ");
             for (var index = 0; index < rows.Count; index++)
             {
@@ -1371,6 +1381,8 @@ public L3EventController(
                 AddParam(cmd, $"@latitude{index}", row.Latitude);
                 AddParam(cmd, $"@longitude{index}", row.Longitude);
                 AddParam(cmd, $"@category{index}", row.Category);
+                AddParam(cmd, $"@direction{index}", row.Direction);
+                AddParam(cmd, $"@channel{index}", row.Channel);
                 AddParam(cmd, $"@message{index}", row.Message);
                 AddParam(cmd, $"@detail{index}", row.Detail);
                 AddParam(cmd, $"@cause{index}", row.Cause);
@@ -1385,7 +1397,7 @@ public L3EventController(
 
         private static void AppendL3RowSql(StringBuilder sql, int index)
         {
-            sql.Append(CultureInfo.InvariantCulture, $"(@uploadId{index}, @sessionId{index}, @fileName{index}, @sourceFileType{index}, @rowNo{index}, @timestampText{index}, @latitude{index}, @longitude{index}, @category{index}, @message{index}, @detail{index}, @cause{index}, @source{index}, @severity{index}, @rawText{index}, @rawJson{index})");
+            sql.Append(CultureInfo.InvariantCulture, $"(@uploadId{index}, @sessionId{index}, @fileName{index}, @sourceFileType{index}, @rowNo{index}, @timestampText{index}, @latitude{index}, @longitude{index}, @category{index}, @direction{index}, @channel{index}, @message{index}, @detail{index}, @cause{index}, @source{index}, @severity{index}, @rawText{index}, @rawJson{index})");
         }
 
         private async Task UpdateSessionL3EventFlagsAsync(int sessionId, bool hasL3, bool hasEvent, CancellationToken cancellationToken)
@@ -1947,6 +1959,8 @@ public L3EventController(
                     latitude DOUBLE NULL,
                     longitude DOUBLE NULL,
                     category VARCHAR(128) NULL,
+                    direction VARCHAR(64) NULL,
+                    channel VARCHAR(128) NULL,
                     message VARCHAR(512) NULL,
                     detail LONGTEXT NULL,
                     cause VARCHAR(255) NULL,
@@ -1970,6 +1984,8 @@ public L3EventController(
                     latitude DOUBLE NULL,
                     longitude DOUBLE NULL,
                     category VARCHAR(128) NULL,
+                    direction VARCHAR(64) NULL,
+                    channel VARCHAR(128) NULL,
                     event_name VARCHAR(512) NULL,
                     detail LONGTEXT NULL,
                     cause VARCHAR(255) NULL,
@@ -1983,6 +1999,10 @@ public L3EventController(
 
             await EnsureColumnAsync("tbl_l3_log", "cause", "VARCHAR(255) NULL", cancellationToken);
             await EnsureColumnAsync("tbl_event_log", "cause", "VARCHAR(255) NULL", cancellationToken);
+            await EnsureColumnAsync("tbl_l3_log", "direction", "VARCHAR(64) NULL", cancellationToken);
+            await EnsureColumnAsync("tbl_l3_log", "channel", "VARCHAR(128) NULL", cancellationToken);
+            await EnsureColumnAsync("tbl_event_log", "direction", "VARCHAR(64) NULL", cancellationToken);
+            await EnsureColumnAsync("tbl_event_log", "channel", "VARCHAR(128) NULL", cancellationToken);
         }
 
         private async Task EnsureDiagnosticHistoryTablesAsync(CancellationToken cancellationToken)
@@ -2233,6 +2253,19 @@ public L3EventController(
             return null;
         }
 
+        private static string? ExtractDiagnosticChannel(params string?[] texts)
+        {
+            const string pattern = @"(?<![A-Za-z0-9])(?:DL-|UL-)?(?:BCCH|PCCH|CCCH|DCCH|DTCH|BCH|PCH|SCH)(?![A-Za-z0-9])";
+            foreach (var text in texts)
+            {
+                if (string.IsNullOrWhiteSpace(text))
+                    continue;
+                var match = Regex.Match(text, pattern, RegexOptions.IgnoreCase);
+                if (match.Success)
+                    return match.Value.ToUpperInvariant();
+            }
+            return null;
+        }
         private static string? ExtractDiagnosticCause(params string?[] texts)
         {
             foreach (var text in texts)
@@ -2279,6 +2312,8 @@ public L3EventController(
         {
             var eventName = GetDiagnosticValue(row, "event_name", "eventname", "event_type", "eventtype", "event", "name", "type", "message");
             var detail = GetDiagnosticValue(row, "value", "detail", "details", "description", "info", "message", "data");
+            var direction = GetDiagnosticValue(row, "direction", "dir", "call_direction");
+            var channel = GetDiagnosticValue(row, "channel", "chan", "channel_name", "channel_number", "earfcn");
             return string.Equals(eventName?.Trim(), "CallState", StringComparison.OrdinalIgnoreCase)
                 && Regex.IsMatch(detail ?? string.Empty, @"^\s*Idle\s*\(ended\)\s*$", RegexOptions.IgnoreCase);
         }
@@ -2468,6 +2503,8 @@ public L3EventController(
             double? Latitude,
             double? Longitude,
             string? Category,
+            string? Direction,
+            string? Channel,
             string? EventName,
             string? Detail,
             string? Cause,
@@ -2484,6 +2521,8 @@ public L3EventController(
             double? Latitude,
             double? Longitude,
             string? Category,
+            string? Direction,
+            string? Channel,
             string? Message,
             string? Detail,
             string? Cause,
@@ -2502,6 +2541,9 @@ public L3EventController(
             short Status);
     }
 }
+
+
+
 
 
 

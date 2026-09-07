@@ -414,6 +414,8 @@ public class tbl_company_license_grant_history
         public string? pci { get; set; }
         public string? tac { get; set; }
         public string? earfcn { get; set; }
+        public string? direction { get; set; }
+        public string? channel { get; set; }
         public float? rssi { get; set; }
         public float? rsrp { get; set; }
         public float? rsrq { get; set; }
@@ -534,6 +536,8 @@ public class N78NeighbourSimpleDto
         public string? pci { get; set; }
         public string? tac { get; set; }
         public string? earfcn { get; set; }
+        public string? direction { get; set; }
+        public string? channel { get; set; }
         public float? rssi { get; set; }
         public float? rsrp { get; set; }
         public float? rsrq { get; set; }
@@ -698,6 +702,8 @@ public class IndoorOutdoorLogDto
         public string? pci { get; set; }
         public string? tac { get; set; }
         public string? earfcn { get; set; }
+        public string? direction { get; set; }
+        public string? channel { get; set; }
         public string? rssi { get; set; }
         public string? rsrp { get; set; }
         public string? rsrq { get; set; }
@@ -1393,3 +1399,5 @@ public class LogFilterModel
 
     
 }
+
+

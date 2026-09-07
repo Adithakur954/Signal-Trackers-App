@@ -148,6 +148,12 @@ namespace SignalTracker.Controllers
             [Name("EARFCN", "EARFCN (5G - NARFCN 4G - ERAFCN 3G - UARFCN 2G - ARFCN)", "EARFCN (5G - NARFCN 4G - ERAFCN 3G - UARFCN 2G - BCCH)")]
             public string? EARFCN { get; set; }
 
+            [Name("Direction", "direction", "dir", "call_direction")]
+            public string? Direction { get; set; }
+
+            [Name("Channel", "channel", "chan", "channel_name", "channel_number") ]
+            public string? Channel { get; set; }
+
             [Name("VOLTE CALL", "volte_call")]
             public string? volte_call { get; set; }
 
@@ -1421,6 +1427,8 @@ public IActionResult UploadSitePrediction(
                 entity.pci           = row.PCI;
                 entity.tac           = row.TAC;
                 entity.earfcn        = row.EARFCN;
+                entity.direction    = row.Direction;
+                entity.channel      = string.IsNullOrWhiteSpace(row.Channel) ? row.EARFCN : row.Channel;
 
                 bool valid;
                 entity.rsrp = ValidParseFloat(row.RSRP, out valid);
@@ -2250,6 +2258,8 @@ public IActionResult UploadSitePrediction(
             EnsureTextColumn("tbl_network_log", "extra_json");
             EnsureTextColumn("tbl_network_log_neighbour", "extra_json");
             EnsureColumn("tbl_network_log", "altitude", "DOUBLE NULL");
+            EnsureColumn("tbl_network_log", "direction", "VARCHAR(64) NULL");
+            EnsureColumn("tbl_network_log", "channel", "VARCHAR(128) NULL");
             EnsureColumn("tbl_network_log_neighbour", "altitude", "DOUBLE NULL");
             EnsureColumn("tbl_network_log", "tbl_sub_session_ps_id", "BIGINT NULL");
             EnsureColumn("tbl_network_log", "tbl_sub_session_cs_id", "BIGINT NULL");
@@ -3421,3 +3431,4 @@ public bool ProcessSitePredictionSheet(
         }
     }
 }
+

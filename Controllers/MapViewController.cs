@@ -3131,6 +3131,8 @@ public class AvailablePolygonsResponse
             public double? Latitude { get; init; }
             public double? Longitude { get; init; }
             public string? Category { get; init; }
+            public string? Direction { get; init; }
+            public string? Channel { get; init; }
             public string? EventName { get; init; }
             public string? Detail { get; init; }
             public string? Cause { get; init; }
@@ -3152,6 +3154,8 @@ public class AvailablePolygonsResponse
             public double? Latitude { get; init; }
             public double? Longitude { get; init; }
             public string? Category { get; init; }
+            public string? Direction { get; init; }
+            public string? Channel { get; init; }
             public string? Message { get; init; }
             public string? Detail { get; init; }
             public string? Cause { get; init; }
@@ -3396,6 +3400,7 @@ public class AvailablePolygonsResponse
                            JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.class')),
                            JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.group'))
                        ) END) AS category,
+                       direction, channel,
                        COALESCE(NULLIF(event_name, ''), CASE WHEN JSON_VALID(raw_json) THEN COALESCE(
                            JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.event_name')),
                            JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.eventname')),
@@ -3434,11 +3439,13 @@ public class AvailablePolygonsResponse
                     Latitude = ReadDouble(reader, 6),
                     Longitude = ReadDouble(reader, 7),
                     Category = ReadString(reader, 8),
-                    EventName = ReadString(reader, 9),
-                    Detail = ReadString(reader, 10),
-                    Cause = ReadString(reader, 11),
-                    Source = ReadString(reader, 12),
-                    Severity = ReadString(reader, 13)
+                    Direction = ReadString(reader, 9),
+                    Channel = ReadString(reader, 10),
+                    EventName = ReadString(reader, 11),
+                    Detail = ReadString(reader, 12),
+                    Cause = ReadString(reader, 13),
+                    Source = ReadString(reader, 14),
+                    Severity = ReadString(reader, 15)
                 });
             }
 
@@ -3481,6 +3488,7 @@ public class AvailablePolygonsResponse
                            JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.stack')),
                            JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.channel'))
                        ) END) AS category,
+                       direction, channel,
                        COALESCE(NULLIF(message, ''), CASE WHEN JSON_VALID(raw_json) THEN COALESCE(
                            JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.message_name')),
                            JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.messagename')),
@@ -3523,12 +3531,14 @@ public class AvailablePolygonsResponse
                     Latitude = ReadDouble(reader, 7),
                     Longitude = ReadDouble(reader, 8),
                     Category = ReadString(reader, 9),
-                    Message = ReadString(reader, 10),
-                    Detail = ReadString(reader, 11),
-                    Cause = ReadString(reader, 12),
-                    Source = ReadString(reader, 13),
-                    Severity = ReadString(reader, 14),
-                    RawText = ReadString(reader, 15)
+                    Direction = ReadString(reader, 10),
+                    Channel = ReadString(reader, 11),
+                    Message = ReadString(reader, 12),
+                    Detail = ReadString(reader, 13),
+                    Cause = ReadString(reader, 14),
+                    Source = ReadString(reader, 15),
+                    Severity = ReadString(reader, 16),
+                    RawText = ReadString(reader, 17)
                 });
             }
 
@@ -7941,6 +7951,8 @@ public class NetworkLogCacheRow
     public string nodeb_id { get; set; } = "";
     public string cell_id { get; set; } = "";
     public string earfcn { get; set; } = "";
+    public string direction { get; set; } = "";
+    public string channel { get; set; } = "";
     [Newtonsoft.Json.JsonIgnore]
     [System.Text.Json.Serialization.JsonIgnore]
     public string primary_cell_info_1 { get; set; } = "";
@@ -12073,6 +12085,8 @@ public JsonResult GetPredictionLog(
                         pci = item.pci,
                         tac = item.tac,
                         earfcn = item.earfcn,
+                        direction = item.direction,
+                        channel = string.IsNullOrWhiteSpace(item.channel) ? item.earfcn : item.channel,
 
                         rssi = float.TryParse(item.rssi, NumberStyles.Float, ci, out var rssiVal)
                             ? rssiVal : (float?)null,
@@ -18540,6 +18554,10 @@ public class LocationStats
         }
     }
 }
+
+
+
+
 
 
 
