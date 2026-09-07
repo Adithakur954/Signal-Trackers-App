@@ -2100,9 +2100,7 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                 if (projectPolygonColumn != null && requestedSessionIds.Count > 0 && polygonProjectParamNames.Count > 0)
                 {
                     sql += $@"
-                      AND (
-                        ss.session_id NOT IN ({string.Join(", ", polygonSessionParamNames)})
-                        OR EXISTS (
+                      AND EXISTS (
                             SELECT 1
                             FROM tbl_project p
                             WHERE p.id IN ({string.Join(", ", polygonProjectParamNames)})
@@ -2128,16 +2126,7 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                 else if (projectPolygonColumn != null && requestedSessionIds.Count == 0)
                 {
                     sql += @"
-                      AND (
-                        NOT EXISTS (
-                            SELECT 1
-                            FROM tbl_project p
-                            WHERE p.ref_session_id IS NOT NULL
-                              AND FIND_IN_SET(CAST(ss.session_id AS CHAR), REPLACE(p.ref_session_id, ' ', '')) > 0
-                              AND p.`polygon` IS NOT NULL
-                              AND NOT ST_IsEmpty(p.`polygon`)
-                        )
-                        OR EXISTS (
+                      AND EXISTS (
                             SELECT 1
                             FROM tbl_project p
                             WHERE p.ref_session_id IS NOT NULL
@@ -18554,6 +18543,7 @@ public class LocationStats
         }
     }
 }
+
 
 
 

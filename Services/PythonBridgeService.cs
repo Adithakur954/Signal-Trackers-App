@@ -1,4 +1,4 @@
-using System.Data;
+﻿using System.Data;
 using System.Data.Common;
 using System.Globalization;
 using System.Text;
@@ -2384,6 +2384,7 @@ namespace SignalTracker.Services
             }
 
             await using var transaction = await conn.BeginTransactionAsync(cancellationToken);
+            await EnsureLteOptimizationScenarioNotesColumnAsync(conn, transaction, cancellationToken);
             await PruneOldestLteOptimizationScenariosIfNeededAsync(
                 conn,
                 transaction,
@@ -2411,13 +2412,13 @@ namespace SignalTracker.Services
             command.Transaction = transaction;
             command.CommandText = @"
                 INSERT INTO lte_optimization_scenarios (
-                    project_id, scenario_id, baseline_job_id, scenario_name, scenario_description,
+                    project_id, scenario_id, baseline_job_id, scenario_name, scenario_description, notes,
                     region, operator, target_type, target_id, impact_radius_m,
                     neighbor_site_count, max_interference_sites, delta_lat, delta_lon,
                     delta_azimuth, delta_electrical_tilt, delta_mechanical_tilt,
                     delta_tx_power, delta_antenna_height, status, created_by
                 ) VALUES (
-                    @project_id, @scenario_id, @baseline_job_id, @scenario_name, @scenario_description,
+                    @project_id, @scenario_id, @baseline_job_id, @scenario_name, @scenario_description, @notes,
                     @region, @operator, @target_type, @target_id, @impact_radius_m,
                     @neighbor_site_count, @max_interference_sites, @delta_lat, @delta_lon,
                     @delta_azimuth, @delta_electrical_tilt, @delta_mechanical_tilt,
@@ -2429,6 +2430,7 @@ namespace SignalTracker.Services
             PythonBridgeDbTool.AddParam(command, "@baseline_job_id", request.BaselineJobId);
             PythonBridgeDbTool.AddParam(command, "@scenario_name", request.ScenarioName);
             PythonBridgeDbTool.AddParam(command, "@scenario_description", request.ScenarioDescription);
+            PythonBridgeDbTool.AddParam(command, "@notes", request.Notes);
             PythonBridgeDbTool.AddParam(command, "@region", request.Region ?? "india");
             PythonBridgeDbTool.AddParam(command, "@operator", request.Operator);
             PythonBridgeDbTool.AddParam(command, "@target_type", request.TargetType);
@@ -2454,6 +2456,19 @@ namespace SignalTracker.Services
             var rowId = await idCommand.ExecuteScalarAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
             return (Convert.ToInt64(rowId), scenarioId);
+        }
+
+        private static async Task EnsureLteOptimizationScenarioNotesColumnAsync(DbConnection conn, DbTransaction transaction, CancellationToken cancellationToken)
+        {
+            await using var check = conn.CreateCommand();
+            check.Transaction = transaction;
+            check.CommandText = @"SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'lte_optimization_scenarios' AND COLUMN_NAME = 'notes';";
+            var exists = Convert.ToInt32(await check.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture) > 0;
+            if (exists) return;
+            await using var alter = conn.CreateCommand();
+            alter.Transaction = transaction;
+            alter.CommandText = "ALTER TABLE lte_optimization_scenarios ADD COLUMN notes LONGTEXT NULL;";
+            await alter.ExecuteNonQueryAsync(cancellationToken);
         }
 
         private static async Task<int> GetNextAvailableLteOptimizationScenarioIdAsync(
@@ -3014,5 +3029,7 @@ namespace SignalTracker.Services
         }
     }
 }
+
+
 
 

@@ -49,6 +49,7 @@
         public string? BaselineJobId { get; set; }
         public string? ScenarioName { get; set; }
         public string? ScenarioDescription { get; set; }
+        public string? Notes { get; set; }
         public string? Region { get; set; }
         public string? Operator { get; set; }
         public string? TargetType { get; set; }
@@ -74,5 +75,6 @@
         public string? BaselineJobId { get; set; }
     }
 }
+
 
 
