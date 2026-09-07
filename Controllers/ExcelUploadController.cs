@@ -451,6 +451,7 @@ namespace SignalTracker.Controllers
                     var scopedUserScope = scope.ServiceProvider.GetRequiredService<UserScopeService>();
                     var scopedConnectionProvider = scope.ServiceProvider.GetRequiredService<IDbConnectionProvider>();
                     var scopedNetworkLogData = scope.ServiceProvider.GetRequiredService<NetworkLogDataService>();
+                    var scopedConfiguration = scope.ServiceProvider.GetRequiredService<IConfiguration>();
                     var l3EventController = new L3EventController(
                         scopedDb,
                         httpContextAccessor,
@@ -458,7 +459,8 @@ namespace SignalTracker.Controllers
                         redis,
                         scopedUserScope,
                         scopedConnectionProvider,
-                        scopedNetworkLogData);
+                        scopedNetworkLogData,
+                        scopedConfiguration);
                     await l3EventController.RegisterCompletedUploadAsync(
                         uploadHistoryId,
                         originalFileName,
@@ -1786,3 +1788,4 @@ namespace SignalTracker.Controllers
 //         }
 //     }
 // }
+

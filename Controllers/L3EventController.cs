@@ -1,4 +1,5 @@
-﻿using Microsoft.AspNetCore.Authorization;
+﻿using System.Collections.Concurrent;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
@@ -31,6 +32,8 @@ namespace SignalTracker.Controllers
         private readonly IDbConnectionProvider _connectionProvider;
         private readonly NetworkLogDataService _networkLogData;
         private const int DiagnosticInsertBatchSize = 200;
+        private static readonly ConcurrentDictionary<int, SemaphoreSlim> SessionImportLocks = new();
+        private readonly IConfiguration _configuration;
 public L3EventController(
             ApplicationDbContext context,
             IHttpContextAccessor httpContextAccessor,
@@ -38,7 +41,8 @@ public L3EventController(
             RedisService redis,
             UserScopeService userScope,
             IDbConnectionProvider connectionProvider,
-            NetworkLogDataService networkLogData)
+            NetworkLogDataService networkLogData,
+            IConfiguration configuration)
         {
             _context = context;
             _httpContextAccessor = httpContextAccessor;
@@ -47,6 +51,7 @@ public L3EventController(
             _userScope = userScope;
             _connectionProvider = connectionProvider;
             _networkLogData = networkLogData;
+            _configuration = configuration;
         }
 
         [HttpGet("GetDiagnosticCallSummary")]
@@ -127,7 +132,14 @@ public L3EventController(
             [FromQuery] int take = 20000)
         {
             var denied = await ValidateDiagnosticAccessAsync(sessionId, sessionIds, sessionIdsAlt, uploadId, HttpContext.RequestAborted);
-            return denied ?? await CreateMapViewController().GetDiagnosticL3Messages(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
+            if (denied != null)
+                return denied;
+
+            var importResult = await EnsureSessionDiagnosticDataAsync(sessionId, HttpContext.RequestAborted);
+            if (importResult != null)
+                return importResult;
+
+            return await CreateMapViewController().GetDiagnosticL3Messages(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
         }
 
         [HttpGet("GetDiagnosticEvents")]
@@ -139,7 +151,14 @@ public L3EventController(
             [FromQuery] int take = 20000)
         {
             var denied = await ValidateDiagnosticAccessAsync(sessionId, sessionIds, sessionIdsAlt, uploadId, HttpContext.RequestAborted);
-            return denied ?? await CreateMapViewController().GetDiagnosticEvents(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
+            if (denied != null)
+                return denied;
+
+            var importResult = await EnsureSessionDiagnosticDataAsync(sessionId, HttpContext.RequestAborted);
+            if (importResult != null)
+                return importResult;
+
+            return await CreateMapViewController().GetDiagnosticEvents(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
         }
 
         [HttpGet("GenerateDiagnosticEventAnalyzerPdf")]
@@ -170,6 +189,40 @@ public L3EventController(
             return denied ?? await CreateMapViewController().GenerateDiagnosticL3SummaryPdf(sessionId, sessionIds, sessionIdsAlt, uploadId, take, reportRows, sourceFileName);
         }
 
+        [HttpPost("ImportSessionDiagnosticData")]
+        [RequestFormLimits(MultipartBodyLengthLimit = 512L * 1024 * 1024)]
+        public async Task<IActionResult> ImportSessionDiagnosticData(
+            [FromForm] int sessionId,
+            [FromForm] int? projectId = null,
+            [FromForm] string? remarks = null,
+            CancellationToken cancellationToken = default)
+        {
+            if (sessionId <= 0)
+                return BadRequest(new { status = 0, message = "A valid sessionId is required." });
+
+            var denied = await ValidateDiagnosticAccessAsync(sessionId, null, null, null, cancellationToken);
+            if (denied != null)
+                return denied;
+
+            var uploadId = await _context.tbl_session
+                .AsNoTracking()
+                .Where(session => session.id == sessionId)
+                .Select(session => session.tbl_upload_id)
+                .FirstOrDefaultAsync(cancellationToken);
+
+            if (!int.TryParse(uploadId, NumberStyles.Integer, CultureInfo.InvariantCulture, out var logId) || logId <= 0)
+            {
+                return NotFound(new
+                {
+                    status = 0,
+                    message = "No source log ZIP is linked to this session.",
+                    sessionId
+                });
+            }
+
+            var remoteUrl = $"https://apistracer.vinfocom.co.in/uploaded_zippedlogs/log_{logId}.zip";
+            return await ImportZipFromUrl(remoteUrl, projectId, sessionId, null, remarks, cancellationToken);
+        }
         [HttpPost("ImportZipFromUrl")]
         [RequestFormLimits(MultipartBodyLengthLimit = 512L * 1024 * 1024)]
         public async Task<IActionResult> ImportZipFromUrl(
@@ -851,6 +904,32 @@ public L3EventController(
             });
         }
 
+        private async Task<IActionResult?> EnsureSessionDiagnosticDataAsync(int? sessionId, CancellationToken cancellationToken)
+        {
+            if (sessionId.GetValueOrDefault() <= 0)
+                return null;
+
+            await EnsureL3EventSchemaAsync(cancellationToken);
+            var l3Rows = await CountDiagnosticRowsAsync("tbl_l3_log", null, sessionId, null, cancellationToken);
+            var eventRows = await CountDiagnosticRowsAsync("tbl_event_log", null, sessionId, null, cancellationToken);
+            if (l3Rows > 0 || eventRows > 0)
+                return null;
+
+            var result = await ImportSessionDiagnosticData(
+                sessionId.Value,
+                null,
+                "Automatic L3/Event import",
+                cancellationToken);
+
+            // A concurrent request may have completed the import first.
+            if (result is ConflictObjectResult)
+                return null;
+
+            if (result is ObjectResult objectResult && objectResult.StatusCode is >= 200 and < 300)
+                return null;
+
+            return result;
+        }
         private MapViewController CreateMapViewController()
         {
             return new MapViewController(_context, _httpContextAccessor, _env, _redis, _userScope, _connectionProvider, _networkLogData)
@@ -2423,6 +2502,13 @@ public L3EventController(
             short Status);
     }
 }
+
+
+
+
+
+
+
 
 
 
