@@ -31,9 +31,7 @@ namespace SignalTracker.Controllers
         private readonly IDbConnectionProvider _connectionProvider;
         private readonly NetworkLogDataService _networkLogData;
         private const int DiagnosticInsertBatchSize = 200;
-        private const string DefaultRemoteZipUrl = "https://apistracer.vinfocom.co.in/uploaded_zippedlogs/log_7548.zip";
-
-        public L3EventController(
+public L3EventController(
             ApplicationDbContext context,
             IHttpContextAccessor httpContextAccessor,
             IWebHostEnvironment env,
@@ -183,7 +181,7 @@ namespace SignalTracker.Controllers
             CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(url))
-                url = DefaultRemoteZipUrl;
+                return BadRequest(new { status = 0, message = "ZIP URL is required." });
 
             if (sessionId.GetValueOrDefault() > 0)
             {
@@ -2425,6 +2423,8 @@ namespace SignalTracker.Controllers
             short Status);
     }
 }
+
+
 
 
 
