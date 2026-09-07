@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Authorization;
+﻿using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
@@ -11,6 +11,7 @@ using SignalTracker.Services;
 using System.Data;
 using System.Globalization;
 using System.IO.Compression;
+using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -30,6 +31,7 @@ namespace SignalTracker.Controllers
         private readonly IDbConnectionProvider _connectionProvider;
         private readonly NetworkLogDataService _networkLogData;
         private const int DiagnosticInsertBatchSize = 200;
+        private const string DefaultRemoteZipUrl = "https://apistracer.vinfocom.co.in/uploaded_zippedlogs/log_7548.zip";
 
         public L3EventController(
             ApplicationDbContext context,
@@ -170,6 +172,95 @@ namespace SignalTracker.Controllers
             return denied ?? await CreateMapViewController().GenerateDiagnosticL3SummaryPdf(sessionId, sessionIds, sessionIdsAlt, uploadId, take, reportRows, sourceFileName);
         }
 
+        [HttpPost("ImportZipFromUrl")]
+        [RequestFormLimits(MultipartBodyLengthLimit = 512L * 1024 * 1024)]
+        public async Task<IActionResult> ImportZipFromUrl(
+            [FromForm] string url,
+            [FromForm] int? projectId = null,
+            [FromForm] int? sessionId = null,
+            [FromForm] long? historyId = null,
+            [FromForm] string? remarks = null,
+            CancellationToken cancellationToken = default)
+        {
+            if (string.IsNullOrWhiteSpace(url))
+                url = DefaultRemoteZipUrl;
+
+            if (sessionId.GetValueOrDefault() > 0)
+            {
+                var denied = await ValidateDiagnosticAccessAsync(sessionId.Value, null, null, null, cancellationToken);
+                if (denied != null)
+                    return denied;
+
+                await EnsureL3EventSchemaAsync(cancellationToken);
+                var existingL3Rows = await CountDiagnosticRowsAsync("tbl_l3_log", null, sessionId, null, cancellationToken);
+                var existingEventRows = await CountDiagnosticRowsAsync("tbl_event_log", null, sessionId, null, cancellationToken);
+                if (existingL3Rows > 0 || existingEventRows > 0)
+                {
+                    return Conflict(new
+                    {
+                        status = 2,
+                        alreadyAvailable = true,
+                        message = "L3/Event data is already available for this session.",
+                        sessionId,
+                        rows = new { l3 = existingL3Rows, events = existingEventRows }
+                    });
+                }
+            }
+            if (!Uri.TryCreate(url.Trim(), UriKind.Absolute, out var uri)
+                || !string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(uri.Host, "apistracer.vinfocom.co.in", StringComparison.OrdinalIgnoreCase)
+                || !uri.AbsolutePath.StartsWith("/uploaded_zippedlogs/", StringComparison.OrdinalIgnoreCase)
+                || !uri.AbsolutePath.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+            {
+                return BadRequest(new { status = 0, message = "Only HTTPS ZIP URLs from the uploaded_zippedlogs path are allowed." });
+            }
+
+            var tempPath = Path.Combine(Path.GetTempPath(), "signaltracker_l3_event_upload", $"{Guid.NewGuid():N}.zip");
+            Directory.CreateDirectory(Path.GetDirectoryName(tempPath)!);
+
+            try
+            {
+                using var httpClient = new HttpClient(new HttpClientHandler { AllowAutoRedirect = true });
+                using var response = await httpClient.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                if (!response.IsSuccessStatusCode)
+                    return StatusCode((int)response.StatusCode, new { status = 0, message = "Unable to download the ZIP from the supplied URL." });
+
+                if (response.Content.Headers.ContentLength is > 512L * 1024 * 1024)
+                    return BadRequest(new { status = 0, message = "ZIP file exceeds the 512 MB limit." });
+
+                await using (var output = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1024 * 128, useAsync: true))
+                await using (var input = await response.Content.ReadAsStreamAsync(cancellationToken))
+                {
+                    await input.CopyToAsync(output, cancellationToken);
+                }
+
+                await using var zipStream = new FileStream(tempPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                var zipFile = new FormFile(zipStream, 0, zipStream.Length, "zipFile", Path.GetFileName(uri.LocalPath))
+                {
+                    Headers = new HeaderDictionary(),
+                    ContentType = "application/zip"
+                };
+
+                return await AddSessionUpload(
+                    projectId,
+                    sessionId,
+                    historyId,
+                    remarks,
+                    "L3Event",
+                    zipFile,
+                    null,
+                    null,
+                    cancellationToken);
+            }
+            catch (HttpRequestException ex)
+            {
+                return StatusCode(502, new { status = 0, message = "Unable to reach the ZIP URL.", details = SafeException.Get(ex) });
+            }
+            finally
+            {
+                TryDeleteFile(tempPath);
+            }
+        }
         [HttpPost("SaveL3EventHistory")]
         public async Task<IActionResult> SaveL3EventHistory(
             [FromBody] Dictionary<string, JsonElement>? payload,
@@ -378,10 +469,6 @@ namespace SignalTracker.Controllers
                         var insertedEventRows = 0;
                         foreach (var file in preparedEventFiles)
                             insertedEventRows += await ImportEventFileAsync(targetSessionId, uploadHistoryId, file.FilePath, file.FileName, cancellationToken);
-                        if (hasL3 && insertedL3Rows == 0)
-                            throw new InvalidDataException("No L3 rows could be parsed from the ZIP.");
-                        if (hasEvent && insertedEventRows == 0)
-                            throw new InvalidDataException("No Event rows could be parsed from the ZIP.");
 
                         var l3EventHistoryId = replaceHistory?.Id ?? uploadHistoryId;
                         await UpdateL3EventHistoryAsync(
@@ -968,8 +1055,7 @@ namespace SignalTracker.Controllers
                 .Where(entry => Path.GetFileNameWithoutExtension(entry.Name).Contains("Event", StringComparison.OrdinalIgnoreCase))
                 .ToList();
 
-            if (l3Entries.Count == 0 || eventEntries.Count == 0)
-                throw new InvalidDataException("ZIP must contain an L3 .csv file and Event .csv/.txt files whose filenames contain 'L3' and 'Event'. L3 .txt files are not allowed.");
+            // Missing L3/Event files are allowed; the upload history is still stored with zero rows.
 
             var selectedEntries = l3Entries.Concat(eventEntries).Distinct().ToList();
             if (selectedEntries.Any(entry => entry.Length > maxUncompressedBytes) || selectedEntries.Sum(entry => entry.Length) > maxUncompressedBytes)
@@ -2339,3 +2425,8 @@ namespace SignalTracker.Controllers
             short Status);
     }
 }
+
+
+
+
+

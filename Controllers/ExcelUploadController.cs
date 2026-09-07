@@ -709,7 +709,7 @@ namespace SignalTracker.Controllers
         on h.uploaded_by equals u.id into gu
     from u in gu.DefaultIfEmpty()
 
-    // ✅ FIX: Use SqlFunctions or Convert to ensure types match
+    //  FIX: Use SqlFunctions or Convert to ensure types match
     // Depending on your EF version, h.id.ToString() is the standard way
     join s in db.tbl_session.AsNoTracking()
         on h.id.ToString() equals s.tbl_upload_id into gs
@@ -724,7 +724,7 @@ namespace SignalTracker.Controllers
     {
         id = h.id,
         file_type = h.file_type,
-        // ✅ Use s.id since session_id column is missing in your DB schema
+        //  Use s.id since session_id column is missing in your DB schema
         session_id = s != null ? s.id.ToString() : null,
         file_name = h.file_name,
         stored_file_name = h.file_name,
