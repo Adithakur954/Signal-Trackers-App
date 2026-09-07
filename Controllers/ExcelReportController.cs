@@ -25,7 +25,7 @@ namespace SignalTracker.Controllers
         private const string ImageBaseUrl = "https://apistracer.vinfocom.co.in/uploaded_images";
         private static readonly HashSet<string> UniqueValueHeaders = new(StringComparer.OrdinalIgnoreCase)
         {
-            "PCI", "NODEB_ID", "CELL_ID", "CI", "CELLID", "CID"
+            "PCI", "NODEB_ID", "CELL_ID", "CI", "CELLID", "CID", "EARFCN"
         };
 
         private static bool IsUniqueValueHeader(string? header) =>
@@ -62,14 +62,24 @@ namespace SignalTracker.Controllers
                 "PCI"      => targetRows.Select(r => r.Pci),
                 "NODEB_ID" => targetRows.Select(r => r.NodeBId),
                 "CELL_ID" or "CI" or "CELLID" or "CID" => targetRows.Select(r => r.CellId),
+                "EARFCN"   => targetRows.Select(r => r.Earfcn),
                 _          => Enumerable.Empty<string?>()
             };
 
-            return rawValues
+            var list = rawValues
                 .Where(v => !string.IsNullOrWhiteSpace(v))
                 .Select(v => v!.Trim())
                 .Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(v => v, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (headerUpper == "EARFCN" && list.Count > 1)
+            {
+                list = list.Where(v => v != "0" && v != "-1").ToList();
+            }
+
+            return list
+                .OrderBy(v => double.TryParse(v, NumberStyles.Any, CultureInfo.InvariantCulture, out var n) ? n : double.MaxValue)
+                .ThenBy(v => v, StringComparer.OrdinalIgnoreCase)
                 .ToList();
         }
 
@@ -737,6 +747,12 @@ namespace SignalTracker.Controllers
                         metricColors["NODEB_ID"] = nodebColor;
                         metricColors["NodeB ID"] = nodebColor;
                         metricColors["NodeB_ID"] = nodebColor;
+                    }
+
+                    var earfcnColor = GetColorVal(cols, earfcnIdx);
+                    if (earfcnColor != null)
+                    {
+                        metricColors["EARFCN"] = earfcnColor;
                     }
 
                     var row = new WalkTestLogRow
@@ -3125,6 +3141,47 @@ namespace SignalTracker.Controllers
                     }
                 }
 
+                var headerUpper = (header ?? "").ToUpperInvariant().Trim();
+                if (headerUpper == "EARFCN")
+                {
+                    var numMatch = Regex.Match(trimmedValue, @"\b\d+\b");
+                    if (numMatch.Success && double.TryParse(numMatch.Value, NumberStyles.Any, CultureInfo.InvariantCulture, out var numVal))
+                    {
+                        foreach (var r in ranges)
+                        {
+                            if (string.IsNullOrWhiteSpace(r.ValueMatch) && numVal >= r.Min && numVal <= r.Max)
+                            {
+                                return r.ColorHex;
+                            }
+                        }
+                    }
+
+                    var resolvedBand = ResolveBandFromEarfcn(trimmedValue);
+                    if (!string.IsNullOrWhiteSpace(resolvedBand))
+                    {
+                        foreach (var r in ranges)
+                        {
+                            if (!string.IsNullOrWhiteSpace(r.ValueMatch) &&
+                                r.ValueMatch.Equals(resolvedBand, StringComparison.OrdinalIgnoreCase))
+                            {
+                                return r.ColorHex;
+                            }
+                            if (!string.IsNullOrWhiteSpace(r.Label) &&
+                                (r.Label.StartsWith(resolvedBand, StringComparison.OrdinalIgnoreCase) ||
+                                 r.Label.Contains(resolvedBand, StringComparison.OrdinalIgnoreCase)))
+                            {
+                                return r.ColorHex;
+                            }
+                            if (!string.IsNullOrWhiteSpace(r.Display) &&
+                                (r.Display.StartsWith(resolvedBand, StringComparison.OrdinalIgnoreCase) ||
+                                 r.Display.Contains(resolvedBand, StringComparison.OrdinalIgnoreCase)))
+                            {
+                                return r.ColorHex;
+                            }
+                        }
+                    }
+                }
+
                 return null;
             }
 
@@ -3486,27 +3543,49 @@ namespace SignalTracker.Controllers
                         {
                             "PCI" => r.Pci,
                             "NODEB_ID" => r.NodeBId,
+                            "EARFCN" => r.Earfcn,
                             _ => r.CellId
                         }, val, StringComparison.OrdinalIgnoreCase)).ToList();
 
                     int valCount = matchingRows.Count;
 
                     double pct = totalCount > 0 ? (valCount * 100.0 / totalCount) : 0;
+
+                    string valDisplay = val;
+                    if (isEarfcn && !val.Contains('('))
+                    {
+                        var band = ResolveBandFromEarfcn(val);
+                        if (!string.IsNullOrWhiteSpace(band))
+                        {
+                            valDisplay = $"{val} ({band})";
+                        }
+                    }
+
                     string lineLabel = showSampleCount
-                        ? $"{headerUpper} {val}  ({valCount} | {pct:0.00}%)"
-                        : $"{headerUpper} {val}  ({pct:0.00}%)";
+                        ? $"{headerUpper} {valDisplay}  ({valCount} | {pct:0.00}%)"
+                        : $"{headerUpper} {valDisplay}  ({pct:0.00}%)";
 
-                    // Strict 2-step color lookup:
-                    // 1. From Image Name (MetricColors) of matching rows
-                    string? hexColor = GetHexColorFromRows(matchingRows, headerUpper);
+                    // Strict color lookup:
+                    // 1. For discrete IDs (CI, PCI, NodeB ID): from Image Name (MetricColors) of matching rows
+                    string? hexColor = null;
+                    if (!isEarfcn)
+                    {
+                        hexColor = GetHexColorFromRows(matchingRows, headerUpper);
+                    }
 
-                    // 2. From ColorSettings / thresholds
+                    // 2. From ColorSettings / thresholds (for EARFCN and fallback for others)
                     if (string.IsNullOrWhiteSpace(hexColor))
                     {
                         hexColor = thresholds.GetColorForValue(headerUpper, val);
                     }
 
-                    // 3. Fallback to distinct palette color per unique value
+                    // 3. Fallback to image_plot MetricColors if EARFCN
+                    if (string.IsNullOrWhiteSpace(hexColor) && isEarfcn)
+                    {
+                        hexColor = GetHexColorFromRows(matchingRows, headerUpper);
+                    }
+
+                    // 4. Fallback to distinct palette color per unique value
                     if (string.IsNullOrWhiteSpace(hexColor))
                     {
                         var palette = new[]
