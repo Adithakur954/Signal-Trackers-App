@@ -261,6 +261,7 @@ internal class Program
         builder.Services.AddScoped<SitePredictionService>();
         builder.Services.AddScoped<NetworkLogDataService>();
         builder.Services.AddScoped<ZipImportService>();
+        builder.Services.AddScoped<ThresholdDefaultsService>();
         builder.Services.AddScoped<IOtpService, OtpService>();
         builder.Services.AddScoped<IUserDeletionService, UserDeletionService>();
         builder.Services.AddHttpClient<ISmsService, SmsService>();
@@ -550,3 +551,4 @@ internal class Program
         app.Run();
     }
 }
+

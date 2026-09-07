@@ -456,6 +456,7 @@ namespace SignalTracker.Controllers
 
                 db.tbl_user.Add(newUser);
                 await db.SaveChangesAsync();
+                await new ThresholdDefaultsService(db).EnsureForUserAsync(newUser.id);
 
                 message.Status = 1;
                 message.Message = "User saved successfully.";
@@ -18496,3 +18497,4 @@ public class LocationStats
         }
     }
 }
+

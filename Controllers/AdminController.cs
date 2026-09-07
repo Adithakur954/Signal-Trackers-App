@@ -866,6 +866,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
                             users.isactive = 1;
                             db.tbl_user.Add(users);
                             await db.SaveChangesAsync();
+                            await new ThresholdDefaultsService(db).EnsureForUserAsync(users.id);
                             message.Status = 1;
                             // Assuming DisplayMessage.UserDetailsSaved is a constant
                             message.Message = "User Details Saved";
@@ -7275,3 +7276,4 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
         }
     }
 }
+

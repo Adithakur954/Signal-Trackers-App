@@ -7,6 +7,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
 using SignalTracker.Helper;
 using SignalTracker.Models;
+using SignalTracker.Services;
 using Microsoft.AspNetCore.Authorization;
 
 namespace SignalTracker.Controllers
@@ -20,11 +21,13 @@ namespace SignalTracker.Controllers
         private const string DefaultCiJson = "[{\"label\":\"Good\",\"min\":18,\"max\":99,\"color\":\"#00c853\"},{\"label\":\"Fair\",\"min\":12,\"max\":18,\"color\":\"#ffd600\"},{\"label\":\"Poor\",\"min\":9,\"max\":12,\"color\":\"#ff9100\"},{\"label\":\"Bad\",\"min\":-99,\"max\":9,\"color\":\"#d50000\"}]";
         private readonly ApplicationDbContext db;
         private readonly CommonFunction cf;
+        private readonly ThresholdDefaultsService _thresholdDefaults;
 
         public SettingController(ApplicationDbContext context, IHttpContextAccessor httpContextAccessor)
         {
             db = context;
             cf = new CommonFunction(context, httpContextAccessor);
+            _thresholdDefaults = new ThresholdDefaultsService(context);
         }
 
         /// <summary>
@@ -140,6 +143,7 @@ public IActionResult GetThresholdSettings()
     {
         cf.SessionCheck();
         int uid = cf.UserId;
+        _thresholdDefaults.EnsureForUserAsync(uid).GetAwaiter().GetResult();
         EnsureMacDetailThresholdColumns();
 
         // 1ï¸âƒ£ User-specific threshold (highest priority)
@@ -204,6 +208,7 @@ public IActionResult SaveThreshold([FromBody] thresholds model)
     {
         cf.SessionCheck();
         int uid = cf.UserId;
+        _thresholdDefaults.EnsureForUserAsync(uid).GetAwaiter().GetResult();
         EnsureMacDetailThresholdColumns();
 
         thresholds? existing = null;
@@ -298,5 +303,7 @@ public IActionResult SaveThreshold([FromBody] thresholds model)
     return Ok(response);
 }
    }}
+
+
 
 

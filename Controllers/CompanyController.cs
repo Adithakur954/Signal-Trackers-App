@@ -19,17 +19,20 @@ namespace SignalTracker.Controllers
         private readonly UserScopeService _userScope;
         private readonly LicenseFeatureService _licenseFeatureService;
         private readonly IConfiguration _configuration;
+        private readonly ThresholdDefaultsService _thresholdDefaults;
 
         public CompanyController(
             ApplicationDbContext db,
             UserScopeService userScope,
             LicenseFeatureService licenseFeatureService,
-            IConfiguration configuration)
+            IConfiguration configuration,
+            ThresholdDefaultsService thresholdDefaults)
         {
             _db = db;
             _userScope = userScope;
             _licenseFeatureService = licenseFeatureService;
             _configuration = configuration;
+            _thresholdDefaults = thresholdDefaults;
         }
 
         [HttpGet("GetAll")]
@@ -256,6 +259,7 @@ namespace SignalTracker.Controllers
 
                     _db.tbl_user.Add(user);
                     await _db.SaveChangesAsync();
+                    await _thresholdDefaults.EnsureForUserAsync(user.id);
 
                     // ============================================================
                     //  MULTI-DATABASE SUPPORT: If TW, save to Secondary DB
@@ -845,6 +849,7 @@ public async Task<IActionResult> CreateCompanyUser([FromBody] CreateCompanyUserR
 
         _db.tbl_user.Add(user);
         await _db.SaveChangesAsync();
+        await new ThresholdDefaultsService(_db).EnsureForUserAsync(user.id);
 
         var validityMonths = request.license_validity_in_months
             ?? company.license_validity_in_months
@@ -1357,3 +1362,5 @@ private async Task UpdatePrimaryLoginUsersForCompanyPasswordAsync(
         loginUser.password = hashedPassword;
 }
 }}
+
+
