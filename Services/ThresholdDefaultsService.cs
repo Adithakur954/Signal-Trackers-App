@@ -24,8 +24,57 @@ public sealed class ThresholdDefaultsService
         if (alreadyExists)
             return;
 
-        _db.thresholds.Add(CreateDefaults(userId));
+        var template = await _db.thresholds
+            .AsNoTracking()
+            .Where(x => x.is_default == 1 && (x.user_id == null || x.user_id == 0))
+            .OrderByDescending(x => x.id)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        _db.thresholds.Add(template == null
+            ? CreateDefaults(userId)
+            : CloneTemplate(template, userId));
         await _db.SaveChangesAsync(cancellationToken);
+    }
+
+    private static thresholds CloneTemplate(thresholds template, int userId)
+    {
+        return new thresholds
+        {
+            user_id = userId,
+            is_default = 0,
+            num_cells = template.num_cells,
+            level = template.level,
+            rsrp_json = template.rsrp_json,
+            rsrq_json = template.rsrq_json,
+            sinr_json = template.sinr_json,
+            c_i_json = template.c_i_json,
+            dl_thpt_json = template.dl_thpt_json,
+            ul_thpt_json = template.ul_thpt_json,
+            volte_call = template.volte_call,
+            lte_bler_json = template.lte_bler_json,
+            mos_json = template.mos_json,
+            coveragehole_json = template.coveragehole_json,
+            coveragehole_value = template.coveragehole_value,
+            jitter = template.jitter,
+            packet_loss = template.packet_loss,
+            latency = template.latency,
+            tac = template.tac,
+            dominance = template.dominance,
+            coverage_violation = template.coverage_violation,
+            delta_json = template.delta_json,
+            mac_dl_json = template.mac_dl_json,
+            mac_dl_delivered_json = template.mac_dl_delivered_json,
+            mac_ul_json = template.mac_ul_json,
+            mac_ul_delivered_json = template.mac_ul_delivered_json,
+            mac_bler_json = template.mac_bler_json,
+            mac_bler_init_json = template.mac_bler_init_json,
+            mac_mcs_json = template.mac_mcs_json,
+            mac_retx_json = template.mac_retx_json,
+            mac_rb_json = template.mac_rb_json,
+            mac_grants_json = template.mac_grants_json,
+            mac_tx_power_json = template.mac_tx_power_json,
+            mac_modulation_pct_json = template.mac_modulation_pct_json
+        };
     }
 
     private static thresholds CreateDefaults(int userId)

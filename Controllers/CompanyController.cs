@@ -849,7 +849,7 @@ public async Task<IActionResult> CreateCompanyUser([FromBody] CreateCompanyUserR
 
         _db.tbl_user.Add(user);
         await _db.SaveChangesAsync();
-        await new ThresholdDefaultsService(_db).EnsureForUserAsync(user.id);
+        await _thresholdDefaults.EnsureForUserAsync(user.id);
 
         var validityMonths = request.license_validity_in_months
             ?? company.license_validity_in_months
