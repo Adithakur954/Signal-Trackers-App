@@ -210,18 +210,13 @@ public L3EventController(
                 .Select(session => session.tbl_upload_id)
                 .FirstOrDefaultAsync(cancellationToken);
 
-            if (!int.TryParse(uploadId, NumberStyles.Integer, CultureInfo.InvariantCulture, out var logId) || logId <= 0)
-            {
-                return NotFound(new
-                {
-                    status = 0,
-                    message = "No source log ZIP is linked to this session.",
-                    sessionId
-                });
-            }
+            var logId = int.TryParse(uploadId, NumberStyles.Integer, CultureInfo.InvariantCulture, out var linkedLogId)
+                && linkedLogId > 0
+                ? linkedLogId
+                : sessionId;
 
             var remoteUrl = $"https://apistracer.vinfocom.co.in/uploaded_zippedlogs/log_{logId}.zip";
-            return await ImportZipFromUrl(remoteUrl, projectId, sessionId, null, remarks, cancellationToken);
+            return await ImportZipFromUrl(remoteUrl, projectId, sessionId, null, remarks, cancellationToken, requireL3: true);
         }
 
         [HttpPost("SyncNewSessionDiagnostics")]
@@ -352,13 +347,6 @@ public L3EventController(
                     ? parsedUploadId
                     : (int?)null;
 
-                if (!uploadId.HasValue)
-                {
-                    failed++;
-                    results.Add(new { sessionId = session.Id, status = "skipped", reason = "invalid_upload_id" });
-                    continue;
-                }
-
                 var l3Rows = await CountDiagnosticRowsAsync("tbl_l3_log", null, session.Id, null, cancellationToken);
                 var eventRows = await CountDiagnosticRowsAsync("tbl_event_log", null, session.Id, null, cancellationToken);
                 if (l3Rows > 0 || eventRows > 0)
@@ -387,22 +375,28 @@ public L3EventController(
                 if (importResult is ConflictObjectResult)
                 {
                     alreadyAvailable++;
-                    results.Add(new { sessionId = session.Id, uploadId, status = "already_available" });
+                    results.Add(new { sessionId = session.Id, uploadId, remoteLogId = uploadId ?? session.Id, status = "already_available" });
                 }
                 else if (statusCode == StatusCodes.Status404NotFound)
                 {
                     zipNotFound++;
-                    results.Add(new { sessionId = session.Id, uploadId, status = "zip_not_found" });
+                    results.Add(new { sessionId = session.Id, uploadId, remoteLogId = uploadId ?? session.Id, status = "zip_not_found" });
+                }
+                else if (statusCode == StatusCodes.Status400BadRequest
+                    && importResult is BadRequestObjectResult badRequest
+                    && badRequest.Value?.ToString()?.Contains("does not contain an L3 data file", StringComparison.OrdinalIgnoreCase) == true)
+                {
+                    results.Add(new { sessionId = session.Id, uploadId, remoteLogId = uploadId ?? session.Id, status = "skipped_no_l3_data" });
                 }
                 else if (statusCode is >= 200 and < 300)
                 {
                     imported++;
-                    results.Add(new { sessionId = session.Id, uploadId, status = "imported" });
+                    results.Add(new { sessionId = session.Id, uploadId, remoteLogId = uploadId ?? session.Id, status = "imported" });
                 }
                 else
                 {
                     failed++;
-                    results.Add(new { sessionId = session.Id, uploadId, status = "failed", statusCode });
+                    results.Add(new { sessionId = session.Id, uploadId, remoteLogId = uploadId ?? session.Id, status = "failed", statusCode });
                 }
             }
 
@@ -424,7 +418,8 @@ public L3EventController(
             [FromForm] int? sessionId = null,
             [FromForm] long? historyId = null,
             [FromForm] string? remarks = null,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default,
+            [FromForm] bool requireL3 = false)
         {
             if (string.IsNullOrWhiteSpace(url))
                 return BadRequest(new { status = 0, message = "ZIP URL is required." });
@@ -494,7 +489,8 @@ public L3EventController(
                     zipFile,
                     null,
                     null,
-                    cancellationToken);
+                    cancellationToken,
+                    requireL3);
             }
             catch (HttpRequestException ex)
             {
@@ -583,7 +579,8 @@ public L3EventController(
             [FromForm] IFormFile? zipFile = null,
             [FromForm] IFormFile? l3File = null,
             [FromForm] IFormFile? eventFile = null,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default,
+            [FromForm] bool requireL3 = false)
         {
             var userId = GetCurrentUserId();
             if (userId <= 0)
@@ -637,7 +634,7 @@ public L3EventController(
                     if (!Path.GetExtension(zipFile.FileName).Equals(".zip", StringComparison.OrdinalIgnoreCase))
                         return BadRequest(new { status = 0, message = "Only a .zip file is supported for ZIP upload." });
 
-                    (preparedL3Files, preparedEventFiles) = await PrepareL3EventZipAsync(zipFile, tempFiles, cancellationToken);
+                    (preparedL3Files, preparedEventFiles) = await PrepareL3EventZipAsync(zipFile, tempFiles, cancellationToken, requireL3);
                     originalUploadName = Path.GetFileName(zipFile.FileName);
                 }
                 else
@@ -1315,7 +1312,8 @@ public L3EventController(
         private async Task<(List<PreparedDiagnosticFile> L3Files, List<PreparedDiagnosticFile> EventFiles)> PrepareL3EventZipAsync(
             IFormFile zipFile,
             List<string> tempFiles,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            bool requireL3 = false)
         {
             const long maxUncompressedBytes = 512L * 1024 * 1024;
             const int maxArchiveEntries = 2000;
@@ -1343,6 +1341,9 @@ public L3EventController(
             var eventEntries = supportedEntries
                 .Where(entry => Path.GetFileNameWithoutExtension(entry.Name).Contains("Event", StringComparison.OrdinalIgnoreCase))
                 .ToList();
+
+            if (requireL3 && l3Entries.Count == 0)
+                throw new InvalidDataException("The ZIP does not contain an L3 data file.");
 
             // Missing L3/Event files are allowed; the upload history is still stored with zero rows.
 
