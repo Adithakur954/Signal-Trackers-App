@@ -1883,7 +1883,8 @@ public async Task<IActionResult> DeleteAvailablePolygon(
         public async Task<IActionResult> GetSubSessionAnalytics(
             [FromQuery] int? sessionId = null,
             [FromQuery] string? sessionIds = null,
-            [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null)
+            [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
+            [FromQuery] int? projectId = null)
         {
             try
             {
@@ -1914,8 +1915,9 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                     || string.Equals(Request?.Query["includeStatus"], "1", StringComparison.OrdinalIgnoreCase);
 
                 var cacheKey = BuildMapViewCacheKey(
-                    "subsession-v13",
+                    "subsession-v14",
                     BuildSessionIdsCachePart(requestedSessionIds),
+                    projectId ?? 0,
                     isWithStatusRoute ? "with-status" : "base");
 
                 var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
@@ -2049,27 +2051,8 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                             ELSE NULL
                         END";
 
-                var projectPolygonColumn = await GetFirstExistingColumnAsync(
-                    conn,
-                    "tbl_project",
-                    "polygon");
-                var polygonScope = projectPolygonColumn != null
-                    ? await ResolveSubSessionPolygonScopeAsync(conn, requestedSessionIds, HttpContext.RequestAborted)
-                    : new SubSessionPolygonScope();
                 var requestedSessionParamNames = requestedSessionIds
                     .Select((_, i) => $"@sid{i}")
-                    .ToList();
-                var polygonSessionIds = polygonScope.SessionIdsWithProjectPolygon
-                    .Distinct()
-                    .ToList();
-                var polygonProjectIds = polygonScope.ProjectIds
-                    .Distinct()
-                    .ToList();
-                var polygonSessionParamNames = polygonSessionIds
-                    .Select((_, i) => $"@polySid{i}")
-                    .ToList();
-                var polygonProjectParamNames = polygonProjectIds
-                    .Select((_, i) => $"@polyPid{i}")
                     .ToList();
 
                 var sql = @"
@@ -2097,55 +2080,22 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                     sql += $" AND ss.session_id IN ({string.Join(", ", requestedSessionParamNames)})";
                 }
 
-                if (projectPolygonColumn != null && requestedSessionIds.Count > 0 && polygonProjectParamNames.Count > 0)
-                {
-                    sql += $@"
-                      AND EXISTS (
-                            SELECT 1
-                            FROM tbl_project p
-                            WHERE p.id IN ({string.Join(", ", polygonProjectParamNames)})
-                              AND p.ref_session_id IS NOT NULL
-                              AND FIND_IN_SET(CAST(ss.session_id AS CHAR), REPLACE(p.ref_session_id, ' ', '')) > 0
-                              AND p.`polygon` IS NOT NULL
-                              AND NOT ST_IsEmpty(p.`polygon`)
-                              AND (
-                                (
-                                    ss.start_lat IS NOT NULL
-                                    AND ss.start_lon IS NOT NULL
-                                    AND ST_Contains(p.`polygon`, ST_SRID(POINT(ss.start_lon, ss.start_lat), 4326))
-                                )
-                                OR (
-                                    ss.end_lat IS NOT NULL
-                                    AND ss.end_lon IS NOT NULL
-                                    AND ST_Contains(p.`polygon`, ST_SRID(POINT(ss.end_lon, ss.end_lat), 4326))
-                                )
-                              )
-                        )
-                      )";
-                }
-                else if (projectPolygonColumn != null && requestedSessionIds.Count == 0)
+                if (projectId.HasValue && projectId.Value > 0)
                 {
                     sql += @"
                       AND EXISTS (
-                            SELECT 1
-                            FROM tbl_project p
-                            WHERE p.ref_session_id IS NOT NULL
-                              AND FIND_IN_SET(CAST(ss.session_id AS CHAR), REPLACE(p.ref_session_id, ' ', '')) > 0
-                              AND p.`polygon` IS NOT NULL
-                              AND NOT ST_IsEmpty(p.`polygon`)
-                              AND (
-                                (
-                                    ss.start_lat IS NOT NULL
-                                    AND ss.start_lon IS NOT NULL
-                                    AND ST_Contains(p.`polygon`, ST_SRID(POINT(ss.start_lon, ss.start_lat), 4326))
-                                )
-                                OR (
-                                    ss.end_lat IS NOT NULL
-                                    AND ss.end_lon IS NOT NULL
-                                    AND ST_Contains(p.`polygon`, ST_SRID(POINT(ss.end_lon, ss.end_lat), 4326))
-                                )
-                              )
-                        )
+                          SELECT 1
+                          FROM map_regions p
+                          WHERE p.tbl_project_id = @projectId
+                            AND p.status = 1
+                            AND p.region IS NOT NULL
+                            AND NOT ST_IsEmpty(p.region)
+                            AND ss.start_lat IS NOT NULL
+                            AND ss.start_lon IS NOT NULL
+                            AND ss.end_lat IS NOT NULL
+                            AND ss.end_lon IS NOT NULL
+                            AND ST_Contains(p.region, ST_SRID(POINT(ss.start_lon, ss.start_lat), 4326))
+                            AND ST_Contains(p.region, ST_SRID(POINT(ss.end_lon, ss.end_lat), 4326))
                       )";
                 }
 
@@ -2162,15 +2112,11 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                 {
                     AddParam(cmd, $"@sid{i}", requestedSessionIds[i]);
                 }
-                for (var i = 0; i < polygonSessionIds.Count; i++)
-                {
-                    AddParam(cmd, $"@polySid{i}", polygonSessionIds[i]);
-                }
-                for (var i = 0; i < polygonProjectIds.Count; i++)
-                {
-                    AddParam(cmd, $"@polyPid{i}", polygonProjectIds[i]);
-                }
 
+                if (projectId.HasValue && projectId.Value > 0)
+                {
+                    AddParam(cmd, "@projectId", projectId.Value);
+                }
                 {
                     await using var reader = await cmd.ExecuteReaderAsync();
                     while (await reader.ReadAsync())
@@ -18543,6 +18489,17 @@ public class LocationStats
         }
     }
 }
+
+
+
+
+
+
+
+
+
+
+
 
 
 
