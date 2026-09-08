@@ -1930,9 +1930,13 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                     await conn.OpenAsync();
                 }
 
-                var subSessionTypeColumn = await GetFirstExistingColumnAsync(
-                    conn,
-                    "tbl_sub_session",
+                // Read the table schema once. This endpoint supports multiple legacy column names,
+                // but querying INFORMATION_SCHEMA once per candidate field adds avoidable latency.
+                var subSessionColumns = await GetTableColumnSetAsync(conn, "tbl_sub_session");
+                string? FindSubSessionColumn(params string[] candidates) =>
+                    candidates.FirstOrDefault(subSessionColumns.Contains);
+
+                var subSessionTypeColumn = FindSubSessionColumn(
                     "sub_session_type",
                     "session_type",
                     "type",
@@ -1953,10 +1957,7 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                             ELSE NULL
                         END";
 
-                var resultStatusColumn = await GetFirstExistingColumnAsync(
-                    conn,
-                    "tbl_sub_session",
-                    "status");
+                var resultStatusColumn = FindSubSessionColumn("status");
 
                 var resultStatusSql = resultStatusColumn != null
                     ? @"
@@ -1994,24 +1995,14 @@ public async Task<IActionResult> DeleteAvailablePolygon(
                         ELSE NULL
                     END";
 
-                var durationColumn = await GetFirstExistingColumnAsync(
-                    conn,
-                    "tbl_sub_session",
+                var durationColumn = FindSubSessionColumn(
                     "duration_ms",
                     "duration",
                     "call_duration_ms");
 
-                var speedColumn = await GetFirstExistingColumnAsync(
-                    conn,
-                    "tbl_sub_session",
-                    "speed_kbps",
-                    "speed");
+                var speedColumn = FindSubSessionColumn("speed_kbps", "speed");
 
-                var fileSizeColumn = await GetFirstExistingColumnAsync(
-                    conn,
-                    "tbl_sub_session",
-                    "file_size_bytes",
-                    "file_size");
+                var fileSizeColumn = FindSubSessionColumn("file_size_bytes", "file_size");
 
                 var durationSql = durationColumn != null
                     ? $"NULLIF(TRIM(CAST(`{durationColumn.Replace("`", "``")}` AS CHAR)), '')"
