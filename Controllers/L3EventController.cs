@@ -223,6 +223,160 @@ public L3EventController(
             var remoteUrl = $"https://apistracer.vinfocom.co.in/uploaded_zippedlogs/log_{logId}.zip";
             return await ImportZipFromUrl(remoteUrl, projectId, sessionId, null, remarks, cancellationToken);
         }
+
+        [HttpPost("SyncNewSessionDiagnostics")]
+        public async Task<IActionResult> SyncNewSessionDiagnostics(
+            [FromQuery] int? projectId = null,
+            [FromQuery(Name = "project_id")] int? projectIdAlt = null,
+            [FromQuery] string? sessionIds = null,
+            [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
+            CancellationToken cancellationToken = default)
+        {
+            var selectedProjectId = projectId ?? projectIdAlt;
+            if (selectedProjectId <= 0)
+                selectedProjectId = null;
+
+            var requestedSessionText = FirstNonBlank(sessionIds, sessionIdsAlt);
+            var requestedSessionIds = ParseSessionIds(requestedSessionText);
+            var restrictToSelectedSessions = requestedSessionIds.Count > 0;
+            if (!string.IsNullOrWhiteSpace(requestedSessionText) && requestedSessionIds.Count == 0)
+                return BadRequest(new { status = 0, message = "sessionIds must contain positive numeric session IDs." });
+
+            if (selectedProjectId.HasValue)
+            {
+                var project = await GetAuthorizedProjectInfoAsync(selectedProjectId.Value, GetCurrentUserId(), cancellationToken);
+                if (project == null)
+                    return NotFound(new { status = 0, message = "Project not found or not available for this user." });
+
+                var projectSessionIds = ParseSessionIds(project.RefSessionId);
+                restrictToSelectedSessions = true;
+                requestedSessionIds = requestedSessionIds.Count == 0
+                    ? projectSessionIds
+                    : requestedSessionIds.Intersect(projectSessionIds).ToHashSet();
+            }
+
+            var denied = await ValidateDiagnosticAccessAsync(
+                null,
+                requestedSessionIds.Count > 0 ? string.Join(",", requestedSessionIds) : null,
+                null,
+                null,
+                cancellationToken);
+            if (denied != null)
+                return denied;
+
+            var sessionsQuery = _context.tbl_session
+                .AsNoTracking()
+                .Where(session => session.id.HasValue && !string.IsNullOrWhiteSpace(session.tbl_upload_id));
+
+            if (restrictToSelectedSessions)
+            {
+                sessionsQuery = sessionsQuery.Where(session => requestedSessionIds.Contains(session.id!.Value));
+            }
+            else if (!_userScope.IsSuperAdmin(User))
+            {
+                var currentUserId = GetCurrentUserId();
+                var companyId = await _context.tbl_user
+                    .AsNoTracking()
+                    .Where(user => user.id == currentUserId)
+                    .Select(user => user.company_id)
+                    .FirstOrDefaultAsync(cancellationToken);
+
+                var authorizedSessionIds = from session in _context.tbl_session.AsNoTracking()
+                    join owner in _context.tbl_user.AsNoTracking() on session.user_id equals owner.id
+                    where session.id.HasValue
+                        && !string.IsNullOrWhiteSpace(session.tbl_upload_id)
+                        && (companyId.GetValueOrDefault() > 0
+                            ? owner.company_id == companyId
+                            : session.user_id == currentUserId)
+                    select session.id!.Value;
+
+                sessionsQuery = sessionsQuery.Where(session => authorizedSessionIds.Contains(session.id!.Value));
+            }
+
+            var sessions = await sessionsQuery
+                .Select(session => new { Id = session.id!.Value, session.tbl_upload_id, session.notes })
+                .OrderBy(session => session.Id)
+                .ToListAsync(cancellationToken);
+
+            await EnsureL3EventSchemaAsync(cancellationToken);
+            var results = new List<object>(sessions.Count);
+            var imported = 0;
+            var alreadyAvailable = 0;
+            var zipNotFound = 0;
+            var failed = 0;
+
+            foreach (var session in sessions)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var uploadId = int.TryParse(session.tbl_upload_id, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedUploadId)
+                    && parsedUploadId > 0
+                    ? parsedUploadId
+                    : (int?)null;
+
+                if (!uploadId.HasValue)
+                {
+                    failed++;
+                    results.Add(new { sessionId = session.Id, status = "skipped", reason = "invalid_upload_id" });
+                    continue;
+                }
+
+                var l3Rows = await CountDiagnosticRowsAsync("tbl_l3_log", null, session.Id, null, cancellationToken);
+                var eventRows = await CountDiagnosticRowsAsync("tbl_event_log", null, session.Id, null, cancellationToken);
+                if (l3Rows > 0 || eventRows > 0)
+                {
+                    alreadyAvailable++;
+                    results.Add(new
+                    {
+                        sessionId = session.Id,
+                        uploadId,
+                        status = "already_available",
+                        rows = new { l3 = l3Rows, events = eventRows }
+                    });
+                    continue;
+                }
+
+                var importResult = await ImportSessionDiagnosticData(
+                    session.Id,
+                    selectedProjectId,
+                    string.IsNullOrWhiteSpace(session.notes) ? "Synchronized from remote ZIP" : session.notes.Trim(),
+                    cancellationToken);
+
+                var statusCode = importResult is ObjectResult objectResult
+                    ? objectResult.StatusCode ?? StatusCodes.Status200OK
+                    : StatusCodes.Status200OK;
+
+                if (importResult is ConflictObjectResult)
+                {
+                    alreadyAvailable++;
+                    results.Add(new { sessionId = session.Id, uploadId, status = "already_available" });
+                }
+                else if (statusCode == StatusCodes.Status404NotFound)
+                {
+                    zipNotFound++;
+                    results.Add(new { sessionId = session.Id, uploadId, status = "zip_not_found" });
+                }
+                else if (statusCode is >= 200 and < 300)
+                {
+                    imported++;
+                    results.Add(new { sessionId = session.Id, uploadId, status = "imported" });
+                }
+                else
+                {
+                    failed++;
+                    results.Add(new { sessionId = session.Id, uploadId, status = "failed", statusCode });
+                }
+            }
+
+            return Ok(new
+            {
+                status = 1,
+                message = "New session synchronization completed.",
+                projectId = selectedProjectId,
+                summary = new { checkedSessions = sessions.Count, imported, alreadyAvailable, zipNotFound, failed },
+                data = results
+            });
+        }
+
         [HttpPost("ImportZipFromUrl")]
         [RequestFormLimits(MultipartBodyLengthLimit = 512L * 1024 * 1024)]
         public async Task<IActionResult> ImportZipFromUrl(
