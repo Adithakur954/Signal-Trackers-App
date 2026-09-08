@@ -3134,6 +3134,8 @@ public class AvailablePolygonsResponse
             public string RawMessage { get; init; } = string.Empty;
             public string? Cause { get; init; }
             public string? OriginSource { get; init; }
+            public string? Direction { get; init; }
+            public string? Channel { get; init; }
             public string Severity { get; init; } = "info";
             public string Technology { get; init; } = "Unknown";
             public string? Interface { get; init; }
@@ -3707,6 +3709,8 @@ public class AvailablePolygonsResponse
                     RawMessage = FirstNonEmpty(x.Detail, x.EventName, x.Category, string.Empty),
                     Cause = x.Cause,
                     OriginSource = x.Source,
+                    Direction = x.Direction,
+                    Channel = x.Channel,
                     Severity = NormalizeDiagnosticSeverity(x.Severity, text),
                     Technology = ResolveDiagnosticTechnology(text, l3Rows, x.SessionId, time),
                     Interface = ResolveDiagnosticInterface(text),
@@ -3748,6 +3752,8 @@ public class AvailablePolygonsResponse
                     RawMessage = rawMessage,
                     Cause = x.Cause,
                     OriginSource = x.Source,
+                    Direction = x.Direction,
+                    Channel = x.Channel,
                     Severity = NormalizeDiagnosticSeverity(x.Severity, text),
                     Technology = ResolveDiagnosticTechnology(text, l3Rows, x.SessionId, time),
                     Interface = ResolveDiagnosticInterface(text),
@@ -18502,8 +18508,6 @@ public class LocationStats
         }
     }
 }
-
-
 
 
 
