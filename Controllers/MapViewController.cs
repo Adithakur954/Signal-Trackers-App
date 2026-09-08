@@ -3326,7 +3326,18 @@ public class AvailablePolygonsResponse
                            JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.class')),
                            JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.group'))
                        ) END) AS category,
-                       direction, channel,
+                       COALESCE(NULLIF(direction, ''), CASE WHEN JSON_VALID(raw_json) THEN COALESCE(
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.direction')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.dir')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.call_direction'))
+                       ) END) AS direction,
+                       COALESCE(NULLIF(channel, ''), CASE WHEN JSON_VALID(raw_json) THEN COALESCE(
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.channel')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.chan')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.channel_name')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.channel_number')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.earfcn'))
+                       ) END) AS channel,
                        COALESCE(NULLIF(event_name, ''), CASE WHEN JSON_VALID(raw_json) THEN COALESCE(
                            JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.event_name')),
                            JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.eventname')),
@@ -3414,7 +3425,18 @@ public class AvailablePolygonsResponse
                            JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.stack')),
                            JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.channel'))
                        ) END) AS category,
-                       direction, channel,
+                       COALESCE(NULLIF(direction, ''), CASE WHEN JSON_VALID(raw_json) THEN COALESCE(
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.direction')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.dir')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.call_direction'))
+                       ) END) AS direction,
+                       COALESCE(NULLIF(channel, ''), CASE WHEN JSON_VALID(raw_json) THEN COALESCE(
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.channel')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.chan')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.channel_name')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.channel_number')),
+                           JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.earfcn'))
+                       ) END) AS channel,
                        COALESCE(NULLIF(message, ''), CASE WHEN JSON_VALID(raw_json) THEN COALESCE(
                            JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.message_name')),
                            JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.messagename')),
