@@ -238,26 +238,26 @@ public L3EventController(
 
             var requestedSessionText = FirstNonBlank(sessionIds, sessionIdsAlt);
             var requestedSessionIds = ParseSessionIds(requestedSessionText);
-            var restrictToSelectedSessions = requestedSessionIds.Count > 0;
+            var hasExplicitSessionSelection = requestedSessionIds.Count > 0;
+            var restrictToSelectedSessions = hasExplicitSessionSelection;
             if (!string.IsNullOrWhiteSpace(requestedSessionText) && requestedSessionIds.Count == 0)
                 return BadRequest(new { status = 0, message = "sessionIds must contain positive numeric session IDs." });
 
+            HashSet<int>? projectSessionIds = null;
             if (selectedProjectId.HasValue)
             {
                 var project = await GetAuthorizedProjectInfoAsync(selectedProjectId.Value, GetCurrentUserId(), cancellationToken);
                 if (project == null)
                     return NotFound(new { status = 0, message = "Project not found or not available for this user." });
 
-                var projectSessionIds = ParseSessionIds(project.RefSessionId);
-                restrictToSelectedSessions = true;
-                requestedSessionIds = requestedSessionIds.Count == 0
-                    ? projectSessionIds
-                    : requestedSessionIds.Intersect(projectSessionIds).ToHashSet();
+                projectSessionIds = ParseSessionIds(project.RefSessionId);
+                if (hasExplicitSessionSelection)
+                    requestedSessionIds = requestedSessionIds.Intersect(projectSessionIds).ToHashSet();
             }
 
             var denied = await ValidateDiagnosticAccessAsync(
                 null,
-                requestedSessionIds.Count > 0 ? string.Join(",", requestedSessionIds) : null,
+                hasExplicitSessionSelection && requestedSessionIds.Count > 0 ? string.Join(",", requestedSessionIds) : null,
                 null,
                 null,
                 cancellationToken);
@@ -266,7 +266,7 @@ public L3EventController(
 
             var sessionsQuery = _context.tbl_session
                 .AsNoTracking()
-                .Where(session => session.id.HasValue && !string.IsNullOrWhiteSpace(session.tbl_upload_id));
+                .Where(session => session.id.HasValue);
 
             if (restrictToSelectedSessions)
             {
@@ -284,7 +284,6 @@ public L3EventController(
                 var authorizedSessionIds = from session in _context.tbl_session.AsNoTracking()
                     join owner in _context.tbl_user.AsNoTracking() on session.user_id equals owner.id
                     where session.id.HasValue
-                        && !string.IsNullOrWhiteSpace(session.tbl_upload_id)
                         && (companyId.GetValueOrDefault() > 0
                             ? owner.company_id == companyId
                             : session.user_id == currentUserId)
@@ -293,12 +292,52 @@ public L3EventController(
                 sessionsQuery = sessionsQuery.Where(session => authorizedSessionIds.Contains(session.id!.Value));
             }
 
+            await EnsureL3EventSchemaAsync(cancellationToken);
+            var lastImportedSessionId = await GetLastImportedSessionIdAsync(selectedProjectId, cancellationToken);
+            if (!hasExplicitSessionSelection)
+            {
+                sessionsQuery = sessionsQuery.Where(session => session.id!.Value > lastImportedSessionId);
+                if (projectSessionIds is { Count: > 0 })
+                    sessionsQuery = sessionsQuery.Where(session => projectSessionIds.Contains(session.id!.Value));
+            }
+
             var sessions = await sessionsQuery
-                .Select(session => new { Id = session.id!.Value, session.tbl_upload_id, session.notes })
+                .Select(session => new
+                {
+                    Id = session.id!.Value,
+                    session.tbl_upload_id,
+                    session.notes,
+                    session.start_time,
+                    session.end_time,
+                    session.uploaded_on,
+                    session.start_address,
+                    session.end_address
+                })
                 .OrderBy(session => session.Id)
                 .ToListAsync(cancellationToken);
 
-            await EnsureL3EventSchemaAsync(cancellationToken);
+            if (!hasExplicitSessionSelection)
+            {
+                return Ok(new
+                {
+                    status = 1,
+                    message = sessions.Count == 0 ? "No new sessions found." : "New sessions found. Select sessions to synchronize.",
+                    projectId = selectedProjectId,
+                    lastImportedSessionId,
+                    data = sessions.Select(session => new
+                    {
+                        sessionId = session.Id,
+                        uploadId = int.TryParse(session.tbl_upload_id, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedUploadId) && parsedUploadId > 0 ? parsedUploadId : (int?)null,
+                        session.start_time,
+                        session.end_time,
+                        session.uploaded_on,
+                        session.start_address,
+                        session.end_address,
+                        session.notes
+                    })
+                });
+            }
+
             var results = new List<object>(sessions.Count);
             var imported = 0;
             var alreadyAvailable = 0;
@@ -1056,6 +1095,25 @@ public L3EventController(
                     throw;
                 }
             });
+        }
+
+        private async Task<int> GetLastImportedSessionIdAsync(int? projectId, CancellationToken cancellationToken)
+        {
+            var value = await ExecuteScalarAsync(@"
+                SELECT COALESCE((
+                    SELECT session_id
+                    FROM tbl_l3_event_history
+                    WHERE session_id IS NOT NULL
+                      AND (@projectId = 0 OR project_id = @projectId)
+                    ORDER BY id DESC
+                    LIMIT 1
+                ), 0);",
+                cancellationToken,
+                ("@projectId", projectId.GetValueOrDefault() > 0 ? projectId.Value : 0));
+
+            return value == null || value == DBNull.Value
+                ? 0
+                : Convert.ToInt32(value, CultureInfo.InvariantCulture);
         }
 
         private async Task<IActionResult?> EnsureSessionDiagnosticDataAsync(int? sessionId, CancellationToken cancellationToken)
