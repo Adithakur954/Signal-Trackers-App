@@ -34,7 +34,7 @@ namespace SignalTracker.Controllers
     [Authorize]
     public class MapViewController : BaseController
     {
-        private const int DiagnosticCallAnalysisVersion = 5;
+        private const int DiagnosticCallAnalysisVersion = 8;
         private readonly IWebHostEnvironment _env;
         private readonly IHttpContextAccessor _httpContextAccessor;
         private readonly ApplicationDbContext db;
@@ -5024,9 +5024,11 @@ public class AvailablePolygonsResponse
             var eventText = string.Join(" ", relatedEvents.Select(row => row.Text));
             var allText = $"{eventText} {l3Text}";
 
-            var strongConnect = Regex.IsMatch(allText,
-                @"\b(SIP\s*[/ ]?2\.0\s+200|200\s+OK|CONNECT(?:\s+ACK(?:NOWLEDGE)?)?|CC\s+CONNECT|CALL_CONNECTED|PRECISE_CALL_STATE_ACTIVE|ESTABLISHED DIALOG)\b",
-                RegexOptions.IgnoreCase);
+            var inviteHandshakeTime = FindSuccessfulInviteHandshakeTime(relatedEvents);
+            var strongConnect = inviteHandshakeTime.HasValue
+                || Regex.IsMatch(allText,
+                    @"\b(CONNECT(?:\s+ACK(?:NOWLEDGE)?)?|CC\s+CONNECT|CALL_CONNECTED|PRECISE_CALL_STATE_ACTIVE|ESTABLISHED DIALOG)\b",
+                    RegexOptions.IgnoreCase);
             var attemptSeconds = call.StartTime.HasValue && call.EndTime.HasValue
                 ? SecondsBetween(call.StartTime.Value, call.EndTime.Value)
                 : 0;
@@ -5047,7 +5049,13 @@ public class AvailablePolygonsResponse
             var connected = strongConnect
                 || (!string.Equals(rawCause, "4", StringComparison.Ordinal)
                     && (call.ConnectedTime.HasValue || corroboratedMediaSession || sustainedNormalSession));
-            if (connected && !call.ConnectedTime.HasValue)
+            if (connected && inviteHandshakeTime.HasValue)
+            {
+                // CALL_ACTIVE can be emitted before SIP answer; use the completed
+                // INVITE/200 OK/ACK handshake as the true connection time.
+                call.ConnectedTime = inviteHandshakeTime;
+            }
+            else if (connected && !call.ConnectedTime.HasValue)
             {
                 call.ConnectedTime = call.ActiveHints.FirstOrDefault(time => time.HasValue && (!call.AlertingTime.HasValue || time.Value > call.AlertingTime.Value))
                     ?? call.AlertingTime;
@@ -5058,8 +5066,10 @@ public class AvailablePolygonsResponse
             var userOrNormalEnd = Regex.IsMatch(allText, @"\b(LOCAL_HANGUP|USER_TERMINATED|NORMAL_CLEARING|NORMAL CALL CLEARING|RELEASE COMPLETE|SIP BYE)\b", RegexOptions.IgnoreCase);
             var abnormalLoss = radioFailure && !recovery && !userOrNormalEnd;
 
+            // A vendor disconnect cause by itself does not prove that an answered
+            // call was dropped. Require explicit radio/network failure evidence.
             call.Result = !connected ? (call.EndTime.HasValue ? "Not Connected" : "Unknown")
-                : abnormalLoss || (string.Equals(rawCause, "2", StringComparison.Ordinal) && !userOrNormalEnd) ? "Dropped"
+                : abnormalLoss ? "Dropped"
                 : "Connected";
             call.StatusDetail = ResolveDiagnosticStatusDetail(allText, call.Result);
             call.Reason = call.Result switch
@@ -5114,6 +5124,45 @@ public class AvailablePolygonsResponse
             return (eventKey.Equals("CallState", StringComparison.OrdinalIgnoreCase)
                     || eventKey.Equals("mPreciseCallState", StringComparison.OrdinalIgnoreCase))
                 && Regex.IsMatch(detail, @"\b(connected|established|answered|in[- ]?call)\b", RegexOptions.IgnoreCase);
+        }
+
+        private static TimeSpan? FindSuccessfulInviteHandshakeTime(IReadOnlyList<DiagnosticEventRow> events)
+        {
+            var ordered = events
+                .Where(row => row.EventTime.HasValue)
+                .OrderBy(row => row.EventTime)
+                .ThenBy(row => row.Id)
+                .ToList();
+            var inviteSeen = false;
+
+            foreach (var row in ordered)
+            {
+                var text = row.Text;
+                if (Regex.IsMatch(text, @"\b(?:UL\s+)?SIP\s+INVITE\b", RegexOptions.IgnoreCase))
+                {
+                    inviteSeen = true;
+                    continue;
+                }
+
+                if (!inviteSeen || !Regex.IsMatch(text, @"\bSIP\s*/\s*2\.0\s+200\s+OK\b", RegexOptions.IgnoreCase))
+                    continue;
+
+                var responseTime = row.EventTime!.Value;
+                var ack = ordered.FirstOrDefault(candidate => candidate.EventTime > responseTime
+                    && candidate.EventTime <= responseTime + TimeSpan.FromSeconds(5)
+                    && Regex.IsMatch(candidate.Text, @"\b(?:UL\s+)?SIP\s+ACK\b", RegexOptions.IgnoreCase));
+                if (ack?.EventTime == null)
+                    continue;
+
+                // Some logs contain provisional/repeated 200 responses. The
+                // response immediately preceding ACK is the answer timestamp.
+                if (!ordered.Any(candidate => candidate.EventTime > responseTime
+                        && candidate.EventTime < ack.EventTime
+                        && Regex.IsMatch(candidate.Text, @"\bSIP\s*/\s*2\.0\s+200\s+OK\b", RegexOptions.IgnoreCase)))
+                    return ack.EventTime;
+            }
+
+            return null;
         }
 
         private static bool IsDiagnosticCallEnd(DiagnosticEventRow row)
