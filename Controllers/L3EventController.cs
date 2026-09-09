@@ -33,6 +33,9 @@ namespace SignalTracker.Controllers
         private readonly NetworkLogDataService _networkLogData;
         private const int DiagnosticInsertBatchSize = 200;
         private static readonly ConcurrentDictionary<int, SemaphoreSlim> SessionImportLocks = new();
+        private static readonly SemaphoreSlim DiagnosticSchemaLock = new(1, 1);
+        private static DateTimeOffset DiagnosticSchemaCheckedAtUtc = DateTimeOffset.MinValue;
+        private static readonly TimeSpan DiagnosticSchemaCacheDuration = TimeSpan.FromMinutes(10);
         private readonly IConfiguration _configuration;
 public L3EventController(
             ApplicationDbContext context,
@@ -2147,15 +2150,30 @@ public L3EventController(
 
         private async Task EnsureL3EventSchemaAsync(CancellationToken cancellationToken)
         {
-            await EnsureColumnAsync("tbl_session", "l3", "BOOLEAN NOT NULL DEFAULT FALSE", cancellationToken);
-            await EnsureColumnAsync("tbl_session", "event", "BOOLEAN NOT NULL DEFAULT FALSE", cancellationToken);
-            await EnsureColumnAsync("tbl_project", "l3", "BOOLEAN NOT NULL DEFAULT FALSE", cancellationToken);
-            await EnsureColumnAsync("tbl_project", "event", "BOOLEAN NOT NULL DEFAULT FALSE", cancellationToken);
-            await EnsureColumnAsync("tbl_upload_history", "original_file_name", "LONGTEXT NULL", cancellationToken);
-            await EnsureDiagnosticTablesAsync(cancellationToken);
-            await EnsureDiagnosticHistoryTablesAsync(cancellationToken);
-            await ExecuteNonQueryAsync("ALTER TABLE tbl_l3_event_history MODIFY COLUMN session_id INT NULL;", cancellationToken);
-            await ExecuteNonQueryAsync("ALTER TABLE tbl_l3_event_call_summary MODIFY COLUMN session_id INT NULL;", cancellationToken);
+            if (DateTimeOffset.UtcNow - DiagnosticSchemaCheckedAtUtc < DiagnosticSchemaCacheDuration)
+                return;
+
+            await DiagnosticSchemaLock.WaitAsync(cancellationToken);
+            try
+            {
+                if (DateTimeOffset.UtcNow - DiagnosticSchemaCheckedAtUtc < DiagnosticSchemaCacheDuration)
+                    return;
+
+                await EnsureColumnAsync("tbl_session", "l3", "BOOLEAN NOT NULL DEFAULT FALSE", cancellationToken);
+                await EnsureColumnAsync("tbl_session", "event", "BOOLEAN NOT NULL DEFAULT FALSE", cancellationToken);
+                await EnsureColumnAsync("tbl_project", "l3", "BOOLEAN NOT NULL DEFAULT FALSE", cancellationToken);
+                await EnsureColumnAsync("tbl_project", "event", "BOOLEAN NOT NULL DEFAULT FALSE", cancellationToken);
+                await EnsureColumnAsync("tbl_upload_history", "original_file_name", "LONGTEXT NULL", cancellationToken);
+                await EnsureDiagnosticTablesAsync(cancellationToken);
+                await EnsureDiagnosticHistoryTablesAsync(cancellationToken);
+                await ExecuteNonQueryAsync("ALTER TABLE tbl_l3_event_history MODIFY COLUMN session_id INT NULL;", cancellationToken);
+                await ExecuteNonQueryAsync("ALTER TABLE tbl_l3_event_call_summary MODIFY COLUMN session_id INT NULL;", cancellationToken);
+                DiagnosticSchemaCheckedAtUtc = DateTimeOffset.UtcNow;
+            }
+            finally
+            {
+                DiagnosticSchemaLock.Release();
+            }
         }
 
         private async Task EnsureDiagnosticTablesAsync(CancellationToken cancellationToken)
