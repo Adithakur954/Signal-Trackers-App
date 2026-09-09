@@ -108,6 +108,76 @@ public L3EventController(
             return denied ?? await CreateMapViewController().GetDiagnosticCallSummaryOnly(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
         }
 
+        [HttpGet("GetUploadInsights")]
+        public async Task<IActionResult> GetUploadInsights(
+            [FromQuery] int? sessionId = null,
+            [FromQuery] int? uploadId = null,
+            [FromQuery] string? source = null,
+            [FromQuery] int take = 5000,
+            CancellationToken cancellationToken = default)
+        {
+            if (sessionId.GetValueOrDefault() <= 0 && uploadId.GetValueOrDefault() <= 0)
+                return BadRequest(new { status = 0, message = "sessionId or uploadId is required." });
+
+            var denied = await ValidateDiagnosticAccessAsync(sessionId, null, null, uploadId, cancellationToken);
+            if (denied != null)
+                return denied;
+
+            await EnsureL3EventSchemaAsync(cancellationToken);
+            var conn = _context.Database.GetDbConnection();
+            var shouldClose = conn.State != ConnectionState.Open;
+            if (shouldClose)
+                await conn.OpenAsync(cancellationToken);
+
+            try
+            {
+                await using var command = conn.CreateCommand();
+                command.CommandText = @"
+                    SELECT id, upload_id, session_id, source, source_file_name, severity, title,
+                           insight_time, latitude, longitude, description, details_json, raw_text, uploaded_on
+                    FROM tbl_upload_insight
+                    WHERE (@sessionId = 0 OR session_id = @sessionId)
+                      AND (@uploadId = 0 OR upload_id = @uploadId)
+                      AND (@source = '' OR source = @source)
+                    ORDER BY id
+                    LIMIT @take;";
+                AddParam(command, "@sessionId", sessionId.GetValueOrDefault());
+                AddParam(command, "@uploadId", uploadId.GetValueOrDefault());
+                AddParam(command, "@source", source?.Trim() ?? string.Empty);
+                AddParam(command, "@take", Math.Clamp(take, 1, 20000));
+
+                var insights = new List<object>();
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    insights.Add(new
+                    {
+                        id = reader.GetInt64(0),
+                        uploadId = reader.IsDBNull(1) ? (int?)null : reader.GetInt32(1),
+                        sessionId = reader.IsDBNull(2) ? (int?)null : reader.GetInt32(2),
+                        source = reader.IsDBNull(3) ? null : reader.GetString(3),
+                        sourceFileName = reader.IsDBNull(4) ? null : reader.GetString(4),
+                        severity = reader.IsDBNull(5) ? null : reader.GetString(5),
+                        title = reader.IsDBNull(6) ? null : reader.GetString(6),
+                        insightTime = reader.IsDBNull(7) ? null : reader.GetString(7),
+                        latitude = reader.IsDBNull(8) ? (double?)null : reader.GetDouble(8),
+                        longitude = reader.IsDBNull(9) ? (double?)null : reader.GetDouble(9),
+                        description = reader.IsDBNull(10) ? null : reader.GetString(10),
+                        details = reader.IsDBNull(11) ? null : reader.GetString(11),
+                        rawText = reader.IsDBNull(12) ? null : reader.GetString(12),
+                        uploadedOn = reader.IsDBNull(13) ? (DateTime?)null : reader.GetDateTime(13)
+                    });
+                }
+
+                return Ok(new { status = 1, count = insights.Count, data = insights });
+            }
+            finally
+            {
+                if (shouldClose)
+                    await conn.CloseAsync();
+            }
+        }
+
         [HttpGet("GetDiagnosticAnalyzerSummary")]
         public async Task<IActionResult> GetDiagnosticAnalyzerSummary(
             [FromQuery] int? sessionId = null,
@@ -630,6 +700,7 @@ public L3EventController(
             {
                 List<PreparedDiagnosticFile> preparedL3Files;
                 List<PreparedDiagnosticFile> preparedEventFiles;
+                List<PreparedDiagnosticFile> preparedInsightFiles;
                 string originalUploadName;
 
                 if (zipFile is { Length: > 0 })
@@ -637,7 +708,7 @@ public L3EventController(
                     if (!Path.GetExtension(zipFile.FileName).Equals(".zip", StringComparison.OrdinalIgnoreCase))
                         return BadRequest(new { status = 0, message = "Only a .zip file is supported for ZIP upload." });
 
-                    (preparedL3Files, preparedEventFiles) = await PrepareL3EventZipAsync(zipFile, tempFiles, cancellationToken, requireL3);
+                    (preparedL3Files, preparedEventFiles, preparedInsightFiles) = await PrepareL3EventZipAsync(zipFile, tempFiles, cancellationToken, requireL3);
                     originalUploadName = Path.GetFileName(zipFile.FileName);
                 }
                 else
@@ -663,6 +734,7 @@ public L3EventController(
                     preparedEventFiles = requestedEvent && eventFile != null
                         ? [new PreparedDiagnosticFile(await SaveUploadTempFileAsync(eventFile, tempFiles, cancellationToken), Path.GetFileName(eventFile.FileName), eventFile.Length)]
                         : [];
+                    preparedInsightFiles = [];
                     originalUploadName = string.Join(", ", preparedL3Files.Concat(preparedEventFiles).Select(file => file.FileName));
                 }
 
@@ -684,9 +756,11 @@ public L3EventController(
                             {
                                 await ExecuteDeleteAsync("DELETE FROM tbl_l3_log WHERE tbl_upload_id = @uploadId;", cancellationToken, ("@uploadId", replaceHistory.UploadId.Value));
                                 await ExecuteDeleteAsync("DELETE FROM tbl_event_log WHERE tbl_upload_id = @uploadId;", cancellationToken, ("@uploadId", replaceHistory.UploadId.Value));
+                                await ExecuteDeleteAsync("DELETE FROM tbl_upload_insight WHERE upload_id = @uploadId;", cancellationToken, ("@uploadId", replaceHistory.UploadId.Value));
                             }
                             await ExecuteDeleteAsync("DELETE FROM tbl_l3_log WHERE tbl_upload_id = @uploadId;", cancellationToken, ("@uploadId", uploadHistoryId));
                             await ExecuteDeleteAsync("DELETE FROM tbl_event_log WHERE tbl_upload_id = @uploadId;", cancellationToken, ("@uploadId", uploadHistoryId));
+                            await ExecuteDeleteAsync("DELETE FROM tbl_upload_insight WHERE upload_id = @uploadId;", cancellationToken, ("@uploadId", uploadHistoryId));
                         }
                         else
                         {
@@ -706,6 +780,17 @@ public L3EventController(
 
                         var sessionCreated = false;
                         var targetSessionId = linkedSessionId.GetValueOrDefault();
+
+                        if (preparedInsightFiles.Count > 0)
+                        {
+                            UploadInsightStore.StoreFiles(
+                                _context.Database.GetDbConnection(),
+                                _context.Database.CurrentTransaction?.GetDbTransaction(),
+                                uploadHistoryId,
+                                targetSessionId > 0 ? targetSessionId : null,
+                                "L3Event",
+                                preparedInsightFiles.Select(file => (file.FilePath, file.FileName)));
+                        }
 
                         var insertedL3Rows = 0;
                         foreach (var file in preparedL3Files)
@@ -1312,7 +1397,7 @@ public L3EventController(
             return path;
         }
 
-        private async Task<(List<PreparedDiagnosticFile> L3Files, List<PreparedDiagnosticFile> EventFiles)> PrepareL3EventZipAsync(
+        private async Task<(List<PreparedDiagnosticFile> L3Files, List<PreparedDiagnosticFile> EventFiles, List<PreparedDiagnosticFile> InsightFiles)> PrepareL3EventZipAsync(
             IFormFile zipFile,
             List<string> tempFiles,
             CancellationToken cancellationToken,
@@ -1344,13 +1429,17 @@ public L3EventController(
             var eventEntries = supportedEntries
                 .Where(entry => Path.GetFileNameWithoutExtension(entry.Name).Contains("Event", StringComparison.OrdinalIgnoreCase))
                 .ToList();
+            var insightEntries = supportedEntries
+                .Where(entry => Path.GetFileName(entry.Name).StartsWith("insights", StringComparison.OrdinalIgnoreCase))
+                .Where(entry => Path.GetExtension(entry.Name).Equals(".txt", StringComparison.OrdinalIgnoreCase))
+                .ToList();
 
             if (requireL3 && l3Entries.Count == 0)
                 throw new InvalidDataException("The ZIP does not contain an L3 data file.");
 
             // Missing L3/Event files are allowed; the upload history is still stored with zero rows.
 
-            var selectedEntries = l3Entries.Concat(eventEntries).Distinct().ToList();
+            var selectedEntries = l3Entries.Concat(eventEntries).Concat(insightEntries).Distinct().ToList();
             if (selectedEntries.Any(entry => entry.Length > maxUncompressedBytes) || selectedEntries.Sum(entry => entry.Length) > maxUncompressedBytes)
                 throw new InvalidDataException("The uncompressed L3 and Event files exceed the 512 MB upload limit.");
 
@@ -1371,7 +1460,8 @@ public L3EventController(
 
             return (
                 l3Entries.Select(entry => prepared[entry]).ToList(),
-                eventEntries.Select(entry => prepared[entry]).ToList());
+                eventEntries.Select(entry => prepared[entry]).ToList(),
+                insightEntries.Select(entry => prepared[entry]).ToList());
         }
 
         private async Task<int> ImportEventFileAsync(int sessionId, int uploadId, string filePath, string originalFileName, CancellationToken cancellationToken)
@@ -2234,6 +2324,7 @@ public L3EventController(
             await EnsureColumnAsync("tbl_l3_log", "channel", "VARCHAR(128) NULL", cancellationToken);
             await EnsureColumnAsync("tbl_event_log", "direction", "VARCHAR(64) NULL", cancellationToken);
             await EnsureColumnAsync("tbl_event_log", "channel", "VARCHAR(128) NULL", cancellationToken);
+            UploadInsightStore.EnsureTable(_context.Database.GetDbConnection());
         }
 
         private async Task EnsureDiagnosticHistoryTablesAsync(CancellationToken cancellationToken)

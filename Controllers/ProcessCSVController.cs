@@ -755,12 +755,17 @@ public IActionResult UploadSitePrediction(
                     List<string> files = new();
                     List<string> polygonFiles = new();
                     List<string> imageList = new();
+                    List<string> insightFiles = new();
 
                     bool isZipFile = IsValidZip(directorypath);
 
                     if (isZipFile)
                     {
                         (files, imageList) = ExtractZipAndSeparateFiles(directorypath, extractpath);
+                        insightFiles = Directory.GetFiles(extractpath, "*.*", SearchOption.AllDirectories)
+                            .Where(file => Path.GetFileName(file).StartsWith("insights", StringComparison.OrdinalIgnoreCase)
+                                && Path.GetExtension(file).Equals(".txt", StringComparison.OrdinalIgnoreCase))
+                            .ToList();
                     }
                     else
                     {
@@ -787,6 +792,17 @@ public IActionResult UploadSitePrediction(
 
                         // outer transaction only for fileType=1 to keep session + logs atomic
                         using var outerTx = fileType == 1 ? db.Database.BeginTransaction() : null;
+
+                        if (fileType == 1 && sessionId > 0 && insightFiles.Count > 0)
+                        {
+                            UploadInsightStore.StoreFiles(
+                                db.Database.GetDbConnection(),
+                                outerTx?.GetDbTransaction(),
+                                excelID,
+                                sessionId,
+                                "NetworkLog",
+                                insightFiles.Select(file => (file, Path.GetFileName(file))));
+                        }
 
                         if (fileType == 1)
                         {
@@ -2266,6 +2282,7 @@ public IActionResult UploadSitePrediction(
             EnsureColumn("tbl_network_log_neighbour", "tbl_sub_session_ps_id", "BIGINT NULL");
             EnsureColumn("tbl_network_log_neighbour", "tbl_sub_session_cs_id", "BIGINT NULL");
             EnsureNetworkDiagnosticTables();
+            UploadInsightStore.EnsureTable(db.Database.GetDbConnection());
         }
 
         private void EnsureNetworkDiagnosticTables()
