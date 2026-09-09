@@ -793,17 +793,6 @@ public IActionResult UploadSitePrediction(
                         // outer transaction only for fileType=1 to keep session + logs atomic
                         using var outerTx = fileType == 1 ? db.Database.BeginTransaction() : null;
 
-                        if (fileType == 1 && sessionId > 0 && insightFiles.Count > 0)
-                        {
-                            UploadInsightStore.StoreFiles(
-                                db.Database.GetDbConnection(),
-                                outerTx?.GetDbTransaction(),
-                                excelID,
-                                sessionId,
-                                "NetworkLog",
-                                insightFiles.Select(file => (file, Path.GetFileName(file))));
-                        }
-
                         if (fileType == 1)
                         {
                             var resolvedUserId = uploadedByUserId > 0 ? uploadedByUserId : cf.UserId;
@@ -864,6 +853,17 @@ public IActionResult UploadSitePrediction(
                                 allErrorList.Add("Polygon file path is required for fileType 2.");
                                 IsValidSheet = false;
                             }
+                        }
+
+                        if (fileType == 1 && sessionId > 0 && insightFiles.Count > 0)
+                        {
+                            UploadInsightStore.StoreFiles(
+                                db.Database.GetDbConnection(),
+                                outerTx?.GetDbTransaction(),
+                                excelID,
+                                sessionId,
+                                "NetworkLog",
+                                insightFiles.Select(file => (file, Path.GetFileName(file))));
                         }
 
                         foreach (string file in files)

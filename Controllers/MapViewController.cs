@@ -12057,6 +12057,19 @@ public JsonResult GetPredictionLog(
                 if (conn.State != System.Data.ConnectionState.Open)
                     await conn.OpenAsync();
 
+                // Mobile ingestion can run before the CSV upload schema setup.
+                // Keep older databases compatible with the current EF model.
+                await using (var networkSchemaCmd = conn.CreateCommand())
+                {
+                    networkSchemaCmd.CommandText = "ALTER TABLE tbl_network_log ADD COLUMN IF NOT EXISTS channel VARCHAR(128) NULL;";
+                    await networkSchemaCmd.ExecuteNonQueryAsync();
+                }
+                await using (var neighbourSchemaCmd = conn.CreateCommand())
+                {
+                    neighbourSchemaCmd.CommandText = "ALTER TABLE tbl_network_log_neighbour ADD COLUMN IF NOT EXISTS channel VARCHAR(128) NULL;";
+                    await neighbourSchemaCmd.ExecuteNonQueryAsync();
+                }
+
                 // Pre-prepare polygon lookup command
                 await using var polyCmd = conn.CreateCommand();
                 polyCmd.CommandText = @"

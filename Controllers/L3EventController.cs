@@ -288,7 +288,14 @@ public L3EventController(
                 ? linkedLogId
                 : sessionId;
 
-            var remoteUrl = $"https://apistracer.vinfocom.co.in/uploaded_zippedlogs/log_{logId}.zip";
+            var remoteTemplate = _configuration["L3EventImport:RemoteLogZipUrlTemplate"];
+            if (string.IsNullOrWhiteSpace(remoteTemplate))
+                return Problem("L3EventImport:RemoteLogZipUrlTemplate is not configured.");
+
+            var remoteUrl = remoteTemplate.Replace(
+                "{logId}",
+                logId.ToString(CultureInfo.InvariantCulture),
+                StringComparison.OrdinalIgnoreCase);
             return await ImportZipFromUrl(remoteUrl, projectId, sessionId, null, remarks, cancellationToken, requireL3: true);
         }
 
@@ -409,6 +416,7 @@ public L3EventController(
             var results = new List<object>(sessions.Count);
             var imported = 0;
             var alreadyAvailable = 0;
+            var insightsImported = 0;
             var zipNotFound = 0;
             var failed = 0;
 
@@ -422,8 +430,27 @@ public L3EventController(
 
                 var l3Rows = await CountDiagnosticRowsAsync("tbl_l3_log", null, session.Id, null, cancellationToken);
                 var eventRows = await CountDiagnosticRowsAsync("tbl_event_log", null, session.Id, null, cancellationToken);
+                var insightRows = await CountUploadInsightsAsync(session.Id, cancellationToken);
                 if (l3Rows > 0 || eventRows > 0)
                 {
+                    if (insightRows == 0)
+                    {
+                        var importedInsightRows = await ImportSessionInsightsFromRemoteZipAsync(session.Id, cancellationToken);
+                        if (importedInsightRows > 0)
+                        {
+                            insightsImported += importedInsightRows;
+                            results.Add(new
+                            {
+                                sessionId = session.Id,
+                                uploadId,
+                                status = "insights_imported",
+                                insights = importedInsightRows,
+                                rows = new { l3 = l3Rows, events = eventRows }
+                            });
+                            continue;
+                        }
+                    }
+
                     alreadyAvailable++;
                     results.Add(new
                     {
@@ -478,7 +505,7 @@ public L3EventController(
                 status = 1,
                 message = "New session synchronization completed.",
                 projectId = selectedProjectId,
-                summary = new { checkedSessions = sessions.Count, imported, alreadyAvailable, zipNotFound, failed },
+                summary = new { checkedSessions = sessions.Count, imported, insightsImported, alreadyAvailable, zipNotFound, failed },
                 data = results
             });
         }
@@ -1227,6 +1254,116 @@ public L3EventController(
 
             return result;
         }
+
+        private async Task<int> CountUploadInsightsAsync(int sessionId, CancellationToken cancellationToken)
+        {
+            var value = await ExecuteScalarAsync(
+                "SELECT COUNT(*) FROM tbl_upload_insight WHERE session_id = @sessionId;",
+                cancellationToken,
+                ("@sessionId", sessionId));
+            return value == null || value == DBNull.Value
+                ? 0
+                : Convert.ToInt32(value, CultureInfo.InvariantCulture);
+        }
+
+        private async Task<int> ImportSessionInsightsFromRemoteZipAsync(int sessionId, CancellationToken cancellationToken)
+        {
+            var sessionUploadId = await _context.tbl_session
+                .AsNoTracking()
+                .Where(session => session.id == sessionId)
+                .Select(session => session.tbl_upload_id)
+                .FirstOrDefaultAsync(cancellationToken);
+            var logId = int.TryParse(sessionUploadId, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedLogId)
+                && parsedLogId > 0
+                ? parsedLogId
+                : sessionId;
+            var template = _configuration["L3EventImport:RemoteLogZipUrlTemplate"];
+            if (string.IsNullOrWhiteSpace(template))
+                return 0;
+
+            var remoteUrl = template.Replace("{logId}", logId.ToString(CultureInfo.InvariantCulture), StringComparison.OrdinalIgnoreCase);
+            var tempRoot = Path.Combine(Path.GetTempPath(), "signaltracker_l3_event_insights", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempRoot);
+            var zipPath = Path.Combine(tempRoot, "remote.zip");
+            try
+            {
+                using var httpClient = new HttpClient(new HttpClientHandler { AllowAutoRedirect = true });
+                using var response = await httpClient.GetAsync(remoteUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                if (!response.IsSuccessStatusCode)
+                    return 0;
+                await using (var output = new FileStream(zipPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 128 * 1024, true))
+                await using (var input = await response.Content.ReadAsStreamAsync(cancellationToken))
+                    await input.CopyToAsync(output, cancellationToken);
+
+                var files = new List<(string Path, string FileName)>();
+                using (var archive = ZipFile.OpenRead(zipPath))
+                    ExtractInsightEntries(archive, tempRoot, files, 0);
+                if (files.Count == 0)
+                    return 0;
+
+                var uploadId = int.TryParse(sessionUploadId, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedUploadId)
+                    && parsedUploadId > 0
+                    ? parsedUploadId
+                    : (int?)null;
+                await using var tx = await _context.Database.BeginTransactionAsync(cancellationToken);
+                var inserted = UploadInsightStore.StoreFiles(
+                    _context.Database.GetDbConnection(),
+                    _context.Database.CurrentTransaction?.GetDbTransaction(),
+                    uploadId,
+                    sessionId,
+                    "L3Event",
+                    files);
+                await tx.CommitAsync(cancellationToken);
+                return inserted;
+            }
+            finally
+            {
+                try
+                {
+                    if (Directory.Exists(tempRoot))
+                        Directory.Delete(tempRoot, true);
+                }
+                catch
+                {
+                    // Temporary cleanup must not hide a successful import.
+                }
+            }
+        }
+
+        private static void ExtractInsightEntries(
+            ZipArchive archive,
+            string tempRoot,
+            List<(string Path, string FileName)> files,
+            int depth)
+        {
+            if (depth > 3)
+                return;
+
+            foreach (var entry in archive.Entries.Where(entry => entry.Length > 0 && !string.IsNullOrEmpty(entry.Name)))
+            {
+                if (Path.GetExtension(entry.Name).Equals(".txt", StringComparison.OrdinalIgnoreCase)
+                    && Path.GetFileNameWithoutExtension(entry.Name).Contains("insight", StringComparison.OrdinalIgnoreCase))
+                {
+                    var filePath = Path.Combine(tempRoot, $"{Guid.NewGuid():N}.txt");
+                    using var input = entry.Open();
+                    using var output = System.IO.File.Create(filePath);
+                    input.CopyTo(output);
+                    files.Add((filePath, Path.GetFileName(entry.Name)));
+                    continue;
+                }
+
+                if (!Path.GetExtension(entry.Name).Equals(".zip", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                using var nestedStream = new MemoryStream();
+                using (var input = entry.Open())
+                    input.CopyTo(nestedStream);
+                nestedStream.Position = 0;
+                using var nested = new ZipArchive(nestedStream, ZipArchiveMode.Read, true);
+                ExtractInsightEntries(nested, tempRoot, files, depth + 1);
+            }
+        }
+
         private MapViewController CreateMapViewController()
         {
             return new MapViewController(_context, _httpContextAccessor, _env, _redis, _userScope, _connectionProvider, _networkLogData, _configuration)
