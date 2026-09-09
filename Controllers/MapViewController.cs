@@ -34,7 +34,7 @@ namespace SignalTracker.Controllers
     [Authorize]
     public class MapViewController : BaseController
     {
-        private const int DiagnosticCallAnalysisVersion = 10;
+        private const int DiagnosticCallAnalysisVersion = 12;
         private readonly IWebHostEnvironment _env;
         private readonly IHttpContextAccessor _httpContextAccessor;
         private readonly ApplicationDbContext db;
@@ -5025,7 +5025,14 @@ public class AvailablePolygonsResponse
             var allText = $"{eventText} {l3Text}";
 
             var inviteHandshakeTime = FindSuccessfulInviteHandshakeTime(relatedEvents);
-            var strongConnect = inviteHandshakeTime.HasValue
+            var remoteCapabilityTime = relatedEvents
+                .Where(IsDiagnosticCallConnected)
+                .Select(row => row.EventTime)
+                .Where(time => time.HasValue)
+                .Select(time => time!.Value)
+                .OrderBy(time => time)
+                .LastOrDefault();
+            var strongConnect = inviteHandshakeTime.HasValue || remoteCapabilityTime != default
                 || Regex.IsMatch(allText,
                     @"\b(CONNECT(?:\s+ACK(?:NOWLEDGE)?)?|CC\s+CONNECT|CALL_CONNECTED|PRECISE_CALL_STATE_ACTIVE|ESTABLISHED DIALOG)\b",
                     RegexOptions.IgnoreCase);
@@ -5046,18 +5053,28 @@ public class AvailablePolygonsResponse
                 && attemptSeconds >= 60
                 && sustainedSignaling
                 && string.Equals(rawCause, "3", StringComparison.Ordinal);
-            var connected = strongConnect
-                || (!string.Equals(rawCause, "4", StringComparison.Ordinal)
-                    && (call.ConnectedTime.HasValue || corroboratedMediaSession || sustainedNormalSession));
+            // A setup-failure cause must override a generic capability signal.
+            var connected = !string.Equals(rawCause, "4", StringComparison.Ordinal)
+                && (strongConnect
+                    || call.ConnectedTime.HasValue
+                    || corroboratedMediaSession
+                    || sustainedNormalSession);
             if (connected && inviteHandshakeTime.HasValue)
             {
                 // CALL_ACTIVE can be emitted before SIP answer; use the completed
                 // INVITE/200 OK/ACK handshake as the true connection time.
                 call.ConnectedTime = inviteHandshakeTime;
             }
+            else if (connected && !call.ConnectedTime.HasValue && remoteCapabilityTime != default
+                && (!call.EndTime.HasValue || remoteCapabilityTime <= call.EndTime.Value))
+            {
+                call.ConnectedTime = remoteCapabilityTime;
+            }
             else if (connected && !call.ConnectedTime.HasValue)
             {
-                call.ConnectedTime = call.ActiveHints.FirstOrDefault(time => time.HasValue && (!call.AlertingTime.HasValue || time.Value > call.AlertingTime.Value))
+                call.ConnectedTime = call.ActiveHints.FirstOrDefault(time => time.HasValue
+                        && (!call.AlertingTime.HasValue || time.Value > call.AlertingTime.Value)
+                        && (!call.EndTime.HasValue || time.Value <= call.EndTime.Value))
                     ?? call.AlertingTime;
             }
 
