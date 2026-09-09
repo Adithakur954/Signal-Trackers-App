@@ -34,7 +34,7 @@ namespace SignalTracker.Controllers
     [Authorize]
     public class MapViewController : BaseController
     {
-        private const int DiagnosticCallAnalysisVersion = 8;
+        private const int DiagnosticCallAnalysisVersion = 10;
         private readonly IWebHostEnvironment _env;
         private readonly IHttpContextAccessor _httpContextAccessor;
         private readonly ApplicationDbContext db;
@@ -4978,7 +4978,7 @@ public class AvailablePolygonsResponse
         {
             var eventKey = (row.EventName ?? string.Empty).Trim();
             var text = row.Text;
-            return Regex.IsMatch(eventKey, @"^(CALL_DIAL_INITIATED|CALL_DIALING|CALL_ALERTING|CALL_ACTIVE|CALL_DISCONNECT_NONZERO_CAUSE|CALL_DISCONNECTED|CALL_END|IMS_DIAL_INTERNAL|IMS_CALL_DIAL|MO_CALL|CallState|mPreciseCallState)$", RegexOptions.IgnoreCase)
+            return Regex.IsMatch(eventKey, @"^(CALL_DIAL_INITIATED|CALL_DIALING|CALL_ALERTING|CALL_ACTIVE|CALL_CAPS_REMOTE|CALL_DISCONNECT_NONZERO_CAUSE|CALL_DISCONNECTED|CALL_END|IMS_DIAL_INTERNAL|IMS_CALL_DIAL|MO_CALL|CallState|mPreciseCallState)$", RegexOptions.IgnoreCase)
                 || Regex.IsMatch(text, @"\b(SIP(?:/2\.0)?\s+(?:INVITE|100|180|183|200|ACK|BYE|CANCEL)|CM SERVICE REQUEST|CC SETUP|CC CONNECT|CC DISCONNECT|RELEASE COMPLETE|RADIO LINK FAILURE|RLF|HANDOVER FAILURE|IMS REGISTRATION LOST|BEARER FAILURE)\b", RegexOptions.IgnoreCase);
         }
 
@@ -5113,6 +5113,13 @@ public class AvailablePolygonsResponse
         private static bool IsDiagnosticCallConnected(DiagnosticEventRow row)
         {
             var eventKey = (row.EventName ?? string.Empty).Trim();
+            if (eventKey.Equals("CALL_CAPS_REMOTE", StringComparison.OrdinalIgnoreCase))
+            {
+                // Some device logs omit SIP 200/ACK and expose answer through
+                // the remote media call-type transition instead.
+                return Regex.IsMatch(row.Detail ?? string.Empty, @"\bcallType\s*=\s*3\b", RegexOptions.IgnoreCase);
+            }
+
             if (eventKey.Equals("CALL_ACTIVE", StringComparison.OrdinalIgnoreCase))
             {
                 var activeDetail = row.Detail ?? string.Empty;
