@@ -5667,6 +5667,20 @@ public class AvailablePolygonsResponse
             await EnsureSitePredictionTextColumnAsync(conn, "tbl_project", "ref_session_id", "LONGTEXT NULL");
         }
 
+        private async Task RefreshProjectL3FlagFromSessionsAsync(int projectId)
+        {
+            // Derive the project flag from actual imported L3 rows, not a static value.
+            await db.Database.ExecuteSqlInterpolatedAsync($@"
+                UPDATE tbl_project p
+                SET l3 = EXISTS(
+                    SELECT 1
+                    FROM tbl_l3_log l
+                    WHERE l.session_id IS NOT NULL
+                      AND FIND_IN_SET(CAST(l.session_id AS CHAR), p.ref_session_id) > 0
+                )
+                WHERE p.id = {projectId};");
+        }
+
         private async Task EnsureSitePredictionColorColumnAsync(DbConnection conn)
         {
             await using var existsCmd = conn.CreateCommand();
@@ -5991,6 +6005,7 @@ public async Task<JsonResult> CreateProjectWithPolygons([FromBody] CreateProject
 
                 db.tbl_project.Add(newProj);
                 await db.SaveChangesAsync();
+                await RefreshProjectL3FlagFromSessionsAsync(newProj.id);
 
                 newProjectId = newProj.id; 
                 await TryUpdateProjectGridSizeAsync(newProjectId, model.GridSize ?? model.grid_size);
@@ -8138,6 +8153,7 @@ public async Task<IActionResult> UpdateProjectSessions([FromBody] UpdateProjectS
 
         project.ref_session_id = sessionIds.Any() ? string.Join(",", sessionIds) : null;
         await db.SaveChangesAsync();
+        await RefreshProjectL3FlagFromSessionsAsync(project.id);
         await InvalidateProjectListCachesAsync();
         await InvalidateMapViewCachesAsync();
 
@@ -13982,7 +13998,6 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             if (conn.State != System.Data.ConnectionState.Open)
                 await conn.OpenAsync();
 
-            await EnsureSitePredictionOptimizedTableAsync(conn);
             var sourceColumns = await GetTableColumnSetAsync(conn, "site_prediction");
             var optimizedColumns = await GetTableColumnSetAsync(conn, "site_prediction_optimized");
             var compareScenarioClause = scenario.HasValue && optimizedColumns.Contains("scenario")
@@ -14044,53 +14059,21 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 }));
 
             cmd.CommandText = $@"
-                WITH latest_optimized AS (
-                    SELECT *
-                    FROM (
-                        SELECT
-                            spo.*,
-                            ROW_NUMBER() OVER (
-                                PARTITION BY
-                                    COALESCE(spo.site_prediction_id, 0),
-                                    CONVERT(COALESCE(spo.site, '') USING utf8mb4) COLLATE utf8mb4_unicode_ci,
-                                    CONVERT(COALESCE(spo.sector, '') USING utf8mb4) COLLATE utf8mb4_unicode_ci,
-                                    CONVERT(COALESCE(spo.cell_id, '') USING utf8mb4) COLLATE utf8mb4_unicode_ci
-                                ORDER BY spo.id DESC
-                            ) AS rn
-                        FROM site_prediction_optimized spo
-                        WHERE spo.tbl_project_id = @pid
-                        {compareScenarioClause}
-                    ) ranked
-                    WHERE rn = 1
-                )
                 SELECT
                     {compareSelectColumns}
-                FROM latest_optimized spo
+                FROM site_prediction_optimized spo
                 LEFT JOIN site_prediction sp
                     ON sp.id = spo.site_prediction_id
-                    OR (
-                        sp.tbl_project_id = spo.tbl_project_id
-                        AND CONVERT(sp.site USING utf8mb4) COLLATE utf8mb4_unicode_ci =
-                            CONVERT(spo.site USING utf8mb4) COLLATE utf8mb4_unicode_ci
-                        AND (
-                            spo.sector IS NULL
-                            OR sp.sector IS NULL
-                            OR CONVERT(sp.sector USING utf8mb4) COLLATE utf8mb4_unicode_ci =
-                                CONVERT(spo.sector USING utf8mb4) COLLATE utf8mb4_unicode_ci
-                        )
-                        AND (
-                            spo.cell_id IS NULL
-                            OR sp.cell_id IS NULL
-                            OR CONVERT(sp.cell_id USING utf8mb4) COLLATE utf8mb4_unicode_ci =
-                                CONVERT(spo.cell_id USING utf8mb4) COLLATE utf8mb4_unicode_ci
-                        )
-                    )
                 LEFT JOIN tbl_project p ON p.id = COALESCE(sp.tbl_project_id, spo.tbl_project_id)
-                WHERE COALESCE(sp.tbl_project_id, spo.tbl_project_id) = @pid
+                WHERE spo.tbl_project_id = @pid
+                {compareScenarioClause}
                 {filterClause}
-                ORDER BY COALESCE(sp.id, spo.site_prediction_id, spo.id) DESC;";
+                ORDER BY COALESCE(sp.id, spo.site_prediction_id, spo.id) DESC
+                LIMIT @limit OFFSET @offset;";
 
             Add(cmd, "@pid", projectId);
+            Add(cmd, "@limit", Math.Clamp(limit, 1, 5000));
+            Add(cmd, "@offset", Math.Max(offset, 0));
             if (scenario.HasValue && optimizedColumns.Contains("scenario"))
             {
                 Add(cmd, "@scenario", scenario.Value);
@@ -15398,6 +15381,7 @@ public async Task<IActionResult> CreateSimpleProject([FromBody] CreateProjectMod
         // 4. Save to Database
         db.tbl_project.Add(newProject);
         await db.SaveChangesAsync();
+        await RefreshProjectL3FlagFromSessionsAsync(newProject.id);
         await TryUpdateProjectGridSizeAsync(newProject.id, model.GridSize ?? model.grid_size);
         await TryUpdateProjectLogGridAsync(newProject.id, model.LogGrid ?? model.log_grid);
         await TryUpdateProjectSiteSizeAsync(newProject.id, 1m);
