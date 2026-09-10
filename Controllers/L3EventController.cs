@@ -124,6 +124,33 @@ public L3EventController(
                 return denied;
 
             await EnsureL3EventSchemaAsync(cancellationToken);
+
+            // Insights are loaded automatically when the screen opens. If the
+            // session already has L3 data but its insight rows are missing,
+            // import the insight TXT files from the same remote ZIP used by sync.
+            if (sessionId.GetValueOrDefault() > 0 && uploadId.GetValueOrDefault() <= 0)
+            {
+                var existingInsights = await CountUploadInsightsAsync(sessionId.Value, cancellationToken);
+                if (existingInsights == 0)
+                {
+                    var l3Rows = await CountDiagnosticRowsAsync(
+                        "tbl_l3_log", null, sessionId.Value, null, cancellationToken);
+                    if (l3Rows > 0)
+                    {
+                        try
+                        {
+                            await ImportSessionInsightsFromRemoteZipAsync(sessionId.Value, cancellationToken);
+                        }
+                        catch (Exception ex)
+                        {
+                            // Insight availability must not make the existing
+                            // L3/Event read endpoint fail.
+                            Console.Error.WriteLine($"Automatic insight import failed for session {sessionId}: {SafeException.Get(ex)}");
+                        }
+                    }
+                }
+            }
+
             var conn = _context.Database.GetDbConnection();
             var shouldClose = conn.State != ConnectionState.Open;
             if (shouldClose)
