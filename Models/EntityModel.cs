@@ -854,7 +854,9 @@ public class IndoorOutdoorLogDto
     public double? real_transmit_power_of_resource { get; set; }
     public double? reference_signal_power { get; set; }
     public string? frequency { get; set; }
-    public int? band { get; set; }
+    // Keep the technology prefix (for example B3 or n78) so consumers do not
+    // have to infer LTE versus NR from a numeric band alone.
+    public string? band { get; set; }
     public int? earfcn { get; set; }
 
     // IP network log fields
@@ -923,7 +925,7 @@ public class IndoorOutdoorLogDto
         public double? reference_signal_power { get; set; }
         public string? cellsize { get; set; }
         public string? frequency { get; set; }
-        public int? band { get; set; }
+        public string? band { get; set; }
         public string? uplink_center_frequency { get; set; }
         public string? downlink_frequency { get; set; }
         public int? earfcn { get; set; }
@@ -1233,7 +1235,7 @@ public class CreateProjectRequest
         public double? reference_signal_power { get; set; }
         public string? cellsize { get; set; }
         public string? frequency { get; set; }
-        public int? band { get; set; }
+        public string? band { get; set; }
         public string? uplink_center_frequency { get; set; }
         public string? downlink_frequency { get; set; }
         public int? earfcn { get; set; }

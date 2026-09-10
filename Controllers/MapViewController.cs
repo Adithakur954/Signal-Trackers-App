@@ -5658,6 +5658,50 @@ public class AvailablePolygonsResponse
             await EnsureSitePredictionTextColumnAsync(conn, "site_prediction_optimized", "frequency", "VARCHAR(64) NULL");
         }
 
+        private async Task EnsureSitePredictionBandColumnsAsync(DbConnection conn)
+        {
+            await EnsureSitePredictionTextColumnAsync(conn, "site_prediction", "band", "VARCHAR(50) NULL");
+            var hasOptimizedTable = await DiagnosticTableExistsAsync(conn, "site_prediction_optimized");
+            if (hasOptimizedTable)
+                await EnsureSitePredictionTextColumnAsync(conn, "site_prediction_optimized", "band", "VARCHAR(50) NULL");
+
+            // Older databases stored this column as a number. Once converted to
+            // text, recover or correct the prefix from the row technology for
+            // legacy numeric and prefixed values.
+            var tables = hasOptimizedTable
+                ? new[] { "site_prediction", "site_prediction_optimized" }
+                : new[] { "site_prediction" };
+            foreach (var table in tables)
+            {
+                await using var normalizeCmd = conn.CreateCommand();
+                normalizeCmd.CommandText = $@"
+                    UPDATE `{table}`
+                    SET band = CASE
+                        WHEN TRIM(COALESCE(band, '')) REGEXP '^[bBnN]?[0-9]+$'
+                         AND UPPER(COALESCE(Technology, technology, '')) REGEXP '(^|[^A-Z0-9])(5G|NR)([^A-Z0-9]|$)'
+                            THEN CONCAT('n', CASE WHEN LEFT(TRIM(band), 1) IN ('B', 'b', 'N', 'n') THEN SUBSTRING(TRIM(band), 2) ELSE TRIM(band) END)
+                        WHEN TRIM(COALESCE(band, '')) REGEXP '^[bBnN]?[0-9]+$'
+                         AND UPPER(COALESCE(Technology, technology, '')) REGEXP '(^|[^A-Z0-9])(4G|LTE)([^A-Z0-9]|$)'
+                            THEN CONCAT('B', CASE WHEN LEFT(TRIM(band), 1) IN ('B', 'b', 'N', 'n') THEN SUBSTRING(TRIM(band), 2) ELSE TRIM(band) END)
+                        ELSE TRIM(band)
+                    END
+                    WHERE band IS NOT NULL
+                      AND TRIM(band) <> ''
+                      AND (
+                          TRIM(band) REGEXP '^[0-9]+$'
+                          OR (
+                              UPPER(COALESCE(Technology, technology, '')) REGEXP '(^|[^A-Z0-9])(5G|NR)([^A-Z0-9]|$)'
+                              AND TRIM(band) REGEXP '^[bB][0-9]+$'
+                          )
+                          OR (
+                              UPPER(COALESCE(Technology, technology, '')) REGEXP '(^|[^A-Z0-9])(4G|LTE)([^A-Z0-9]|$)'
+                              AND TRIM(band) REGEXP '^[nN][0-9]+$'
+                          )
+                      );";
+                await normalizeCmd.ExecuteNonQueryAsync();
+            }
+        }
+
         private async Task EnsureProjectRefSessionIdColumnAsync()
         {
             var conn = db.Database.GetDbConnection();
@@ -12269,6 +12313,14 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
     var idxFrequency = Col("frequency");
     var idxCluster  = Col("cluster");
     var idxTech     = Col("technology");
+    var idxSiteName = Col("site_name");
+    var idxTac      = Col("tac");
+    var idxBw       = Col("bw");
+    var idxTxPower  = Col("maximum_transmission_power_of_resource");
+    if (idxTxPower < 0) idxTxPower = Col("tx_power");
+    if (idxTxPower < 0) idxTxPower = Col("transmit power");
+    var idxRealTxPower = Col("real_transmit_power_of_resource");
+    var idxReferenceSignalPower = Col("reference_signal_power");
 
     var idxMTilt    = Col("m_tilt");     // âœ… ADDED
     var idxETilt    = Col("e_tilt");     // âœ… ADDED
@@ -12281,17 +12333,24 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
     await EnsureSitePredictionNameColumnsAsync(conn);
     await EnsureSitePredictionCellIdColumnsAsync(conn);
     await EnsureSitePredictionFrequencyColumnsAsync(conn);
+    await EnsureSitePredictionBandColumnsAsync(conn);
 
     var table = new DataTable();
     table.Columns.Add("site", typeof(string));
     table.Columns.Add("sector", typeof(string));
     table.Columns.Add("cell_id", typeof(string));
+    table.Columns.Add("site_name", typeof(string));
     table.Columns.Add("longitude", typeof(double));
     table.Columns.Add("latitude", typeof(double));
+    table.Columns.Add("tac", typeof(int));
     table.Columns.Add("pci", typeof(int));
     table.Columns.Add("azimuth", typeof(int));
-    table.Columns.Add("band", typeof(int));
+    table.Columns.Add("band", typeof(string));
     table.Columns.Add("earfcn", typeof(int));
+    table.Columns.Add("bw", typeof(int));
+    table.Columns.Add("tx_power", typeof(double));
+    table.Columns.Add("real_transmit_power_of_resource", typeof(double));
+    table.Columns.Add("reference_signal_power", typeof(double));
     table.Columns.Add("frequency", typeof(string));
     table.Columns.Add("cluster", typeof(string));
     table.Columns.Add("Technology", typeof(string));
@@ -12333,12 +12392,18 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             ToDbText(cols[idxSite]),
             ToDbText(cols[idxSector]),
             ToDbText(cols[idxCellId]),
+            idxSiteName >= 0 ? ToDbText(cols[idxSiteName]) : DBNull.Value,
             ToDbValue(ToDouble(cols[idxLon])),
             ToDbValue(ToDouble(cols[idxLat])),
+            idxTac >= 0 ? ToDbValue(ToInt(cols[idxTac])) : DBNull.Value,
             ToDbValue(ToInt(cols[idxPci])),
             ToDbValue(ToInt(cols[idxAz])),
-            ToDbValue(ToInt(cols[idxBand])),
+            ToDbText(NormalizeSitePredictionBand(cols[idxBand], cols[idxTech])),
             ToDbValue(ToInt(cols[idxEarfcn])),
+            idxBw >= 0 ? ToDbValue(ToInt(cols[idxBw])) : DBNull.Value,
+            idxTxPower >= 0 ? ToDbValue(ToDouble(cols[idxTxPower])) : DBNull.Value,
+            idxRealTxPower >= 0 ? ToDbValue(ToDouble(cols[idxRealTxPower])) : DBNull.Value,
+            idxReferenceSignalPower >= 0 ? ToDbValue(ToDouble(cols[idxReferenceSignalPower])) : DBNull.Value,
             idxFrequency >= 0 ? ToDbText(cols[idxFrequency]) : DBNull.Value,
             ToDbText(cols[idxCluster]),
             ToDbText(cols[idxTech]),
@@ -12439,7 +12504,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             string? cellId,
             string? cluster,
             string? technology,
-            int? band,
+            string? band,
             int? pci,
             string siteExpr,
             string cellExpr,
@@ -12455,7 +12520,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             if (!string.IsNullOrWhiteSpace(cellId)) filters.Add($"CONVERT({cellExpr} USING utf8mb4) COLLATE utf8mb4_unicode_ci = @cell");
             if (!string.IsNullOrWhiteSpace(cluster)) filters.Add($"((CONVERT({clusterExpr} USING utf8mb4) COLLATE utf8mb4_unicode_ci = @clus) OR (CONVERT({projectProviderExpr} USING utf8mb4) COLLATE utf8mb4_unicode_ci = @clus))");
             if (!string.IsNullOrWhiteSpace(technology)) filters.Add($"CONVERT({technologyExpr} USING utf8mb4) COLLATE utf8mb4_unicode_ci = @tech");
-            if (band.HasValue) filters.Add($"{bandExpr} = @band");
+            if (!string.IsNullOrWhiteSpace(band)) filters.Add($"CONVERT({bandExpr} USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(@band USING utf8mb4) COLLATE utf8mb4_unicode_ci");
             if (pci.HasValue) filters.Add($"{pciExpr} = @pci");
 
             return filters.Count == 0 ? string.Empty : " AND " + string.Join(" AND ", filters);
@@ -12466,7 +12531,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             string? cellId,
             string? cluster,
             string? technology,
-            int? band,
+            string? band,
             int? pci,
             string originalSiteExpr,
             string updatedSiteExpr,
@@ -12510,9 +12575,9 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 filters.Add($"((CONVERT({updatedTechnologyExpr} USING utf8mb4) COLLATE utf8mb4_unicode_ci = @tech) OR (CONVERT({originalTechnologyExpr} USING utf8mb4) COLLATE utf8mb4_unicode_ci = @tech))");
             }
 
-            if (band.HasValue)
+            if (!string.IsNullOrWhiteSpace(band))
             {
-                filters.Add($"(({updatedBandExpr} = @band) OR ({originalBandExpr} = @band))");
+                filters.Add($"((CONVERT({updatedBandExpr} USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(@band USING utf8mb4) COLLATE utf8mb4_unicode_ci) OR (CONVERT({originalBandExpr} USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(@band USING utf8mb4) COLLATE utf8mb4_unicode_ci))");
             }
 
             if (pci.HasValue)
@@ -12529,14 +12594,14 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             string? cellId,
             string? cluster,
             string? technology,
-            int? band,
+            string? band,
             int? pci)
         {
             if (site.HasValue) Add(cmd, "@site", site.Value);
             if (!string.IsNullOrWhiteSpace(cellId)) Add(cmd, "@cell", cellId.Trim());
             if (!string.IsNullOrWhiteSpace(cluster)) Add(cmd, "@clus", cluster.Trim());
             if (!string.IsNullOrWhiteSpace(technology)) Add(cmd, "@tech", technology.Trim());
-            if (band.HasValue) Add(cmd, "@band", band.Value);
+            if (!string.IsNullOrWhiteSpace(band)) Add(cmd, "@band", band.Trim());
             if (pci.HasValue) Add(cmd, "@pci", pci.Value);
         }
 
@@ -13244,7 +13309,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             [FromQuery] string? cluster = null,
             [FromQuery] string? provider = null,
             [FromQuery] string? technology = null,
-            [FromQuery] int? band = null,
+            [FromQuery] string? band = null,
             [FromQuery] int? pci = null,
             [FromQuery] int limit = 50000,
             [FromQuery] int offset = 0,
@@ -13390,7 +13455,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             [FromQuery] string? cluster = null,
             [FromQuery] string? provider = null,
             [FromQuery] string? technology = null,
-            [FromQuery] int? band = null,
+            [FromQuery] string? band = null,
             [FromQuery] int? pci = null,
             [FromQuery] int limit = 50000,
             [FromQuery] int offset = 0,
@@ -13425,6 +13490,8 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             var conn = db.Database.GetDbConnection();
             if (conn.State != System.Data.ConnectionState.Open)
                 await conn.OpenAsync();
+
+            await EnsureSitePredictionBandColumnsAsync(conn);
 
             if (requestedVersion == "combined")
             {
@@ -13983,7 +14050,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             [FromQuery] string? cell_id = null,
             [FromQuery] string? cluster = null,
             [FromQuery] string? technology = null,
-            [FromQuery] int? band = null,
+            [FromQuery] string? band = null,
             [FromQuery] int? pci = null,
             [FromQuery] int limit = 50000,
             [FromQuery] int offset = 0,
@@ -15639,23 +15706,14 @@ public async Task<IActionResult> AddSitePrediction([FromBody] AddSitePredictionM
     if (model.Technologies == null || !model.Technologies.Any())
         return BadRequest("At least one Technology required.");
 
-    var cleanedBands = (model.Bands ?? new List<string>())
+    var requestedBands = (model.Bands ?? new List<string>())
         .Where(raw => !string.IsNullOrWhiteSpace(raw))
         .Select(raw => raw.Trim())
-        .Select(raw =>
-        {
-            if (raw.StartsWith("B", StringComparison.OrdinalIgnoreCase) ||
-                raw.StartsWith("N", StringComparison.OrdinalIgnoreCase))
-            {
-                return raw.Substring(1).Trim();
-            }
-            return raw;
-        })
         .Where(raw => !string.IsNullOrWhiteSpace(raw))
         .Distinct(StringComparer.OrdinalIgnoreCase)
         .ToList();
 
-    if (cleanedBands.Count == 0)
+    if (requestedBands.Count == 0)
         return BadRequest("At least one valid band is required.");
 
     try
@@ -15663,6 +15721,8 @@ public async Task<IActionResult> AddSitePrediction([FromBody] AddSitePredictionM
         var conn = db.Database.GetDbConnection();
         if (conn.State != System.Data.ConnectionState.Open)
             await conn.OpenAsync();
+
+        await EnsureSitePredictionBandColumnsAsync(conn);
 
         var nodeId = string.IsNullOrWhiteSpace(model.NodeId)
             ? string.IsNullOrWhiteSpace(model.NodeIdSnake)
@@ -15729,7 +15789,7 @@ public async Task<IActionResult> AddSitePrediction([FromBody] AddSitePredictionM
             if (tech.IdValues == null || tech.IdValues.Count != sectorCount)
                 return BadRequest($"idValues count ({tech.IdValues?.Count}) must match sector count ({sectorCount}) for {tech.Technology}");
 
-            foreach (var cleanBand in cleanedBands)
+            foreach (var requestedBand in requestedBands)
             {
                 for (int i = 0; i < sectorCount; i++)
                 {
@@ -15756,7 +15816,7 @@ public async Task<IActionResult> AddSitePrediction([FromBody] AddSitePredictionM
                     AddParam(cmd, "@lon", model.Longitude);
                     AddParam(cmd, "@pci", tech.Technology == "4G" ? pciValue : DBNull.Value);
                     AddParam(cmd, "@azi", azimuth);
-                    AddParam(cmd, "@band", cleanBand);
+                    AddParam(cmd, "@band", NormalizeSitePredictionBand(requestedBand, tech.Technology));
                     AddParam(cmd, "@earfcn", string.IsNullOrWhiteSpace(tech.Earfcn) ? DBNull.Value : tech.Earfcn);
                     AddParam(cmd, "@tech", tech.Technology);
                     
@@ -18463,6 +18523,26 @@ public class LocationStats
             return int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var v)
                 ? v
                 : null;
+        }
+
+        private static string? NormalizeSitePredictionBand(string? rawBand, string? technology)
+        {
+            var value = rawBand?.Trim();
+            if (string.IsNullOrWhiteSpace(value)) return null;
+
+            var match = Regex.Match(value, @"^(?<prefix>[bBnN])?\s*[-_ ]*\s*(?<number>\d{1,3})$", RegexOptions.CultureInvariant);
+            if (!match.Success) return value;
+
+            var number = match.Groups["number"].Value;
+            var prefix = match.Groups["prefix"].Value;
+            var tech = technology?.Trim().ToUpperInvariant() ?? string.Empty;
+            if (tech.Contains("5G", StringComparison.Ordinal) || tech.Contains("NR", StringComparison.Ordinal))
+                return $"n{number}";
+            if (tech.Contains("4G", StringComparison.Ordinal) || tech.Contains("LTE", StringComparison.Ordinal))
+                return $"B{number}";
+            if (prefix.Equals("n", StringComparison.OrdinalIgnoreCase)) return $"n{number}";
+            if (prefix.Equals("b", StringComparison.OrdinalIgnoreCase)) return $"B{number}";
+            return value;
         }
 
         private static object ToDbValue<T>(T? value) where T : struct

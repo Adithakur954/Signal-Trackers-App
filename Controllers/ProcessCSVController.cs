@@ -322,8 +322,11 @@ namespace SignalTracker.Controllers
     public string? bw { get; set; }
     public string? m_tilt { get; set; }
     public string? e_tilt { get; set; }
+    [Name("maximum_transmission_power_of_resource", "tx_power", "transmit power", "transmit_power")]
     public string? maximum_transmission_power_of_resource { get; set; }
+    [Name("real_transmit_power_of_resource", "real transmit power", "real_transmit_power")]
     public string? real_transmit_power_of_resource { get; set; }
+    [Name("reference_signal_power", "reference signal power", "rs_power")]
     public string? reference_signal_power { get; set; }
     public string? cellsize { get; set; }
     public string? frequency { get; set; }
@@ -2510,6 +2513,8 @@ public IActionResult UploadSitePrediction(
             EnsureVarcharColumn("site_prediction_optimized", "site", "VARCHAR(255) NULL");
             EnsureVarcharColumn("site_prediction", "site_name", "VARCHAR(255) NULL");
             EnsureVarcharColumn("site_prediction_optimized", "site_name", "VARCHAR(255) NULL");
+            EnsureVarcharColumn("site_prediction", "band", "VARCHAR(50) NULL");
+            EnsureVarcharColumn("site_prediction_optimized", "band", "VARCHAR(50) NULL");
 
             var textColumns = new[]
             {
@@ -3055,7 +3060,7 @@ public bool ProcessSitePredictionSheet(
                 var temp = new site_prediction
                 {
                     earfcn = TryInt(row.earfcn),
-                    band = TryInt(row.band),
+                    band = NormalizeSitePredictionBand(row.band, row.Technology),
                     frequency = row.frequency
                 };
 
@@ -3090,7 +3095,7 @@ public bool ProcessSitePredictionSheet(
                         TryDouble(row.reference_signal_power),
 
                     frequency = row.frequency,
-                    band      = TryInt(row.band),
+                    band      = NormalizeSitePredictionBand(row.band, row.Technology),
 
                     earfcn                  = TryInt(row.earfcn),
 
@@ -3432,7 +3437,8 @@ public bool ProcessSitePredictionSheet(
                 return opByEar;
 
             // 3) Try by Band mapping
-            if (r.band.HasValue && BandToOp.TryGetValue(r.band.Value, out var opByBand))
+            var bandNumber = ParseBandNumber(r.band);
+            if (bandNumber.HasValue && BandToOp.TryGetValue(bandNumber.Value, out var opByBand))
                 return opByBand;
 
             // 4) Fallback from frequency string
@@ -3445,6 +3451,34 @@ public bool ProcessSitePredictionSheet(
 
             // Unknown
             return null;
+        }
+
+        private static string? NormalizeSitePredictionBand(string? rawBand, string? technology)
+        {
+            var value = rawBand?.Trim();
+            if (string.IsNullOrWhiteSpace(value)) return null;
+
+            var match = Regex.Match(value, @"^(?<prefix>[bBnN])?\s*[-_ ]*\s*(?<number>\d{1,3})$", RegexOptions.CultureInvariant);
+            if (!match.Success) return value;
+
+            var number = match.Groups["number"].Value;
+            var prefix = match.Groups["prefix"].Value;
+            var tech = technology?.Trim().ToUpperInvariant() ?? string.Empty;
+            if (tech.Contains("5G", StringComparison.Ordinal) || tech.Contains("NR", StringComparison.Ordinal))
+                return $"n{number}";
+            if (tech.Contains("4G", StringComparison.Ordinal) || tech.Contains("LTE", StringComparison.Ordinal))
+                return $"B{number}";
+            if (prefix.Equals("n", StringComparison.OrdinalIgnoreCase)) return $"n{number}";
+            if (prefix.Equals("b", StringComparison.OrdinalIgnoreCase)) return $"B{number}";
+            return value;
+        }
+
+        private static int? ParseBandNumber(string? value)
+        {
+            var match = Regex.Match(value ?? string.Empty, @"\d+", RegexOptions.CultureInvariant);
+            return match.Success && int.TryParse(match.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var number)
+                ? number
+                : null;
         }
     }
 }
