@@ -7,6 +7,7 @@ using System.Globalization;
 using System.Linq;
 using System.Net;
 using System.Security.Claims;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Authorization;
@@ -184,6 +185,8 @@ namespace SignalTracker.Controllers
                             max_lon DOUBLE NOT NULL,
                             baseline_point_count INT NOT NULL,
                             optimized_point_count INT NOT NULL,
+                            baseline_bands LONGTEXT NULL,
+                            optimized_bands LONGTEXT NULL,
 
                             baseline_avg_rsrp DOUBLE, baseline_avg_rsrq DOUBLE, baseline_avg_sinr DOUBLE,
                             baseline_median_rsrp DOUBLE, baseline_median_rsrq DOUBLE, baseline_median_sinr DOUBLE,
@@ -234,6 +237,8 @@ namespace SignalTracker.Controllers
                         ["scenario_id"] = "INT NULL",
                         ["public_scenario_id"] = "INT NULL",
                         ["technology"] = "VARCHAR(20) NULL",
+                        ["baseline_bands"] = "LONGTEXT NULL",
+                        ["optimized_bands"] = "LONGTEXT NULL",
                     };
 
                     var existingColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -476,6 +481,8 @@ namespace SignalTracker.Controllers
 
                             baseline_point_count = bData.Count,
                             optimized_point_count = oData.Count,
+                            baseline_bands = JsonSerializer.Serialize(bm.bands),
+                            optimized_bands = JsonSerializer.Serialize(om.bands),
 
                             baseline_avg_rsrp = bm.avg_rsrp, baseline_avg_rsrq = bm.avg_rsrq, baseline_avg_sinr = bm.avg_sinr,
                             baseline_median_rsrp = bm.median_rsrp, baseline_median_rsrq = bm.median_rsrq, baseline_median_sinr = bm.median_sinr,
@@ -828,7 +835,7 @@ namespace SignalTracker.Controllers
                     ? await ResolveScenarioIdAsync(conn, projectId, scenario_id)
                     : null;
                 var normalizedTechnology = NormalizeGridTechnologyScope(technology);
-                string cacheKey = $"gridanalytics:v2:{GetCurrentCountryScope()}:{projectId}:{regionId ?? 0}:{normalizedVersion}:{effectiveScenarioId?.ToString() ?? "none"}:{normalizedTechnology}";
+                string cacheKey = $"gridanalytics:v4:{GetCurrentCountryScope()}:{projectId}:{regionId ?? 0}:{normalizedVersion}:{effectiveScenarioId?.ToString() ?? "none"}:{normalizedTechnology}";
                 if (_redis != null && _redis.IsConnected)
                 {
                     try
@@ -885,6 +892,18 @@ namespace SignalTracker.Controllers
                     cmdAlterTechnologyCol.CommandText =
                         "ALTER TABLE grid_analytics_results ADD COLUMN technology VARCHAR(20) NULL AFTER public_scenario_id;";
                     await cmdAlterTechnologyCol.ExecuteNonQueryAsync();
+                }
+
+                // Older stored generations have no band metadata until recomputed.
+                foreach (var bandColumn in new[] { "baseline_bands", "optimized_bands" })
+                {
+                    if (gridScenarioColumns.Contains(bandColumn))
+                        continue;
+
+                    await using var cmdAlterBands = conn.CreateCommand();
+                    cmdAlterBands.CommandText =
+                        $"ALTER TABLE grid_analytics_results ADD COLUMN `{bandColumn}` LONGTEXT NULL;";
+                    await cmdAlterBands.ExecuteNonQueryAsync();
                 }
 
                 // Fetch directly from DB using EF
@@ -2034,6 +2053,11 @@ WHERE spo.tbl_project_id = @pid{scenarioFilterClause};";
             return new GridMetrics
             {
                 point_count = pts.Count,
+                // Preserve source band values, including repeats, in point order.
+                bands = pts.Select(p => p.Band)
+                    .Where(b => !string.IsNullOrWhiteSpace(b))
+                    .Select(b => b!)
+                    .ToList(),
                 avg_rsrp = Avg(rp), avg_rsrq = Avg(rq), avg_sinr = Avg(sn),
                 median_rsrp = Median(rp), median_rsrq = Median(rq), median_sinr = Median(sn),
                 min_rsrp = Min(rp), min_rsrq = Min(rq), min_sinr = Min(sn),
@@ -2112,6 +2136,7 @@ WHERE spo.tbl_project_id = @pid{scenarioFilterClause};";
                     baseline = new GridMetrics
                     {
                         point_count = s.baseline_point_count,
+                        bands = DeserializeBands(s.baseline_bands),
                         avg_rsrp = s.baseline_avg_rsrp, avg_rsrq = s.baseline_avg_rsrq, avg_sinr = s.baseline_avg_sinr,
                         median_rsrp = s.baseline_median_rsrp, median_rsrq = s.baseline_median_rsrq, median_sinr = s.baseline_median_sinr,
                         min_rsrp = s.baseline_min_rsrp, min_rsrq = s.baseline_min_rsrq, min_sinr = s.baseline_min_sinr,
@@ -2124,6 +2149,7 @@ WHERE spo.tbl_project_id = @pid{scenarioFilterClause};";
                     optimized = new GridMetrics
                     {
                         point_count = s.optimized_point_count,
+                        bands = DeserializeBands(s.optimized_bands),
                         avg_rsrp = s.optimized_avg_rsrp, avg_rsrq = s.optimized_avg_rsrq, avg_sinr = s.optimized_avg_sinr,
                         median_rsrp = s.optimized_median_rsrp, median_rsrq = s.optimized_median_rsrq, median_sinr = s.optimized_median_sinr,
                         min_rsrp = s.optimized_min_rsrp, min_rsrq = s.optimized_min_rsrq, min_sinr = s.optimized_min_sinr,
@@ -2144,6 +2170,13 @@ WHERE spo.tbl_project_id = @pid{scenarioFilterClause};";
                 });
             }
             return res;
+        }
+
+        private static List<string> DeserializeBands(string? value)
+        {
+            return string.IsNullOrWhiteSpace(value)
+                ? new List<string>()
+                : JsonSerializer.Deserialize<List<string>>(value) ?? new List<string>();
         }
 
         private static List<grid_analytics_results> SelectLatestGridGeneration(List<grid_analytics_results> stored)
@@ -2283,6 +2316,7 @@ WHERE spo.tbl_project_id = @pid{scenarioFilterClause};";
         public class GridMetrics
         {
             public int point_count { get; set; }
+            public List<string> bands { get; set; } = new();
             public double? avg_rsrp { get; set; }
             public double? avg_rsrq { get; set; }
             public double? avg_sinr { get; set; }

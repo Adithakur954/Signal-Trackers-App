@@ -57,6 +57,12 @@ namespace SignalTracker.Models
         [Column("optimized_point_count")]
         public int optimized_point_count { get; set; }
 
+        [Column("baseline_bands", TypeName = "longtext")]
+        public string? baseline_bands { get; set; }
+
+        [Column("optimized_bands", TypeName = "longtext")]
+        public string? optimized_bands { get; set; }
+
         // Baseline metrics
         [Column("baseline_avg_rsrp")]   public double? baseline_avg_rsrp { get; set; }
         [Column("baseline_avg_rsrq")]   public double? baseline_avg_rsrq { get; set; }
