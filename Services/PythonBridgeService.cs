@@ -2786,6 +2786,79 @@ namespace SignalTracker.Services
             }
         }
 
+        /// <summary>
+        /// Active terrain DEM registered for a project.
+        /// </summary>
+        /// <remarks>
+        /// The Python prediction backend reads tbl_project_dem_asset to decide which
+        /// elevation raster a project uses. It previously reached that table only
+        /// through a direct MySQL engine, which the packaged desktop client never has
+        /// (it is bridge-only), so the registry was unreachable in production and
+        /// terrain silently fell back to downloaded 30 m SRTM. Exposing it here makes
+        /// the per-project DEM resolvable from an installed client.
+        ///
+        /// Returns an empty list when the table has not been provisioned, so a
+        /// database that predates it degrades instead of erroring.
+        /// </remarks>
+        public async Task<List<Dictionary<string, object?>>> GetProjectDemAssetAsync(
+            long projectId,
+            string? region = null,
+            string? countryCode = null,
+            CancellationToken cancellationToken = default
+        )
+        {
+            var contextToUse = CreateDbContextForRegion(region, countryCode);
+            var ownsContext = contextToUse != _db;
+            try
+            {
+                var conn = contextToUse.Database.GetDbConnection();
+                if (conn.State != ConnectionState.Open)
+                {
+                    await conn.OpenAsync(cancellationToken);
+                }
+
+                await using (var probe = conn.CreateCommand())
+                {
+                    probe.CommandText = @"
+                    SELECT COUNT(*)
+                    FROM information_schema.TABLES
+                    WHERE TABLE_SCHEMA = DATABASE()
+                      AND TABLE_NAME = 'tbl_project_dem_asset';";
+                    var exists = Convert.ToInt64(await probe.ExecuteScalarAsync(cancellationToken) ?? 0L);
+                    if (exists == 0)
+                    {
+                        return new List<Dictionary<string, object?>>();
+                    }
+                }
+
+                await using var command = conn.CreateCommand();
+                command.CommandText = @"
+                SELECT
+                    id,
+                    source_name,
+                    storage_uri,
+                    selected_elevation_band,
+                    crs,
+                    resolution_m,
+                    created_at
+                FROM tbl_project_dem_asset
+                WHERE project_id = @pid
+                  AND is_active = 1
+                ORDER BY created_at DESC, id DESC;";
+                PythonBridgeDbTool.AddParam(command, "@pid", projectId);
+
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                return await PythonBridgeDbTool.ReadRowsAsync(reader, cancellationToken);
+            }
+            finally
+            {
+                if (ownsContext)
+                {
+                    await contextToUse.DisposeAsync();
+                }
+            }
+        }
+
         public async Task<(int Limit, int Offset, List<Dictionary<string, object?>> Rows)> GetFrontendGridCellsAsync(
             long projectId,
             long? scenarioId,

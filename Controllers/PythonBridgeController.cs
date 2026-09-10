@@ -671,6 +671,31 @@ namespace SignalTracker.Controllers
             return Ok(new { Status = 1, Count = rows.Count, Data = rows });
         }
 
+        /// <summary>
+        /// Terrain DEM registered for a project, for the Python prediction backend.
+        /// </summary>
+        [HttpGet("GetProjectDemAsset")]
+        public async Task<IActionResult> GetProjectDemAsset(
+            [FromQuery] long projectId,
+            [FromQuery] string? region,
+            [FromQuery] string? countryCode,
+            [FromQuery(Name = "country_code")] string? countryCodeSnake)
+        {
+            if (projectId <= 0)
+            {
+                return BadRequest(new { Status = 0, Message = "projectId is required." });
+            }
+
+            var rows = await _pythonBridgeService.GetProjectDemAssetAsync(
+                projectId,
+                region,
+                countryCode ?? countryCodeSnake,
+                HttpContext.RequestAborted
+            );
+
+            return Ok(new { Status = 1, Count = rows.Count, Data = rows });
+        }
+
         [HttpPost("GetReportNetworkLogs")]
         public async Task<IActionResult> GetReportNetworkLogs([FromBody] SessionIdsPagedRequest request)
         {
