@@ -1602,6 +1602,17 @@ namespace SignalTracker.Controllers
                 return "ALL";
 
             var upper = raw.ToUpperInvariant();
+            if (upper.Contains(','))
+            {
+                var scopes = upper.Split(',', StringSplitOptions.RemoveEmptyEntries)
+                    .Select(NormalizeGridTechnologyScope)
+                    .Distinct()
+                    .OrderBy(scope => scope, StringComparer.Ordinal)
+                    .ToArray();
+                if (scopes.Length == 0 || scopes.Contains("ALL"))
+                    return "ALL";
+                return string.Join(",", scopes);
+            }
             if (upper == "ALL" || upper == "ANY" || upper == "BOTH")
                 return "ALL";
             if (upper.Contains("5G") || upper.Contains("NR"))
@@ -1631,8 +1642,9 @@ namespace SignalTracker.Controllers
             if (normalized == "ALL")
                 return points ?? new List<PredPoint>();
 
+            var selectedTechnologies = normalized.Split(',').ToHashSet(StringComparer.Ordinal);
             return (points ?? new List<PredPoint>())
-                .Where(point => NormalizePredictionTechnology(point) == normalized)
+                .Where(point => selectedTechnologies.Contains(NormalizePredictionTechnology(point)))
                 .ToList();
         }
 
