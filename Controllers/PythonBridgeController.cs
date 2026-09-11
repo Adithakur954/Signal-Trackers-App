@@ -52,6 +52,46 @@ namespace SignalTracker.Controllers
             });
         }
 
+        [HttpPost("GetL3LogRows")]
+        public async Task<IActionResult> GetL3LogRows([FromBody] L3LogRowsRequest request)
+        {
+            if (request == null || request.SessionIds == null || request.SessionIds.Count == 0)
+            {
+                return BadRequest(new { Status = 0, Message = "SessionIds are required." });
+            }
+
+            if (!PythonBridgeService.TryResolveStrictRegion(request.Region, request.CountryCode, out _, out var regionError))
+            {
+                return BadRequest(new { Status = 0, Message = regionError });
+            }
+
+            var sessionIds = request.SessionIds
+                .Where(id => id > 0)
+                .Distinct()
+                .ToList();
+            if (sessionIds.Count == 0)
+            {
+                return BadRequest(new { Status = 0, Message = "No valid SessionIds provided." });
+            }
+
+            request.SessionIds = sessionIds;
+
+            var result = await _pythonBridgeService.GetL3LogRowsAsync(
+                request,
+                HttpContext.RequestAborted
+            );
+
+            return Ok(new
+            {
+                Status = 1,
+                Region = result.Region,
+                Count = result.Rows.Count,
+                Limit = result.Limit,
+                Offset = result.Offset,
+                Data = result.Rows
+            });
+        }
+
         [HttpGet("GetLteTiltBaselineResults")]
         public async Task<IActionResult> GetLteTiltBaselineResults([FromQuery] LteTiltBaselineRowsRequest request)
         {

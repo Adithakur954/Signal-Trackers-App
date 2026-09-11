@@ -820,6 +820,114 @@ namespace SignalTracker.Services
             }
         }
 
+        private static string? NormalizeStrictRegion(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return null;
+
+            return value.Trim().ToLowerInvariant() switch
+            {
+                "tw" or "twn" or "taiwan" => "taiwan",
+                "in" or "ind" or "india" => "india",
+                _ => "invalid"
+            };
+        }
+
+        // Strict region resolution: no default and no fallback, so a Taiwan request
+        // can never be served from the India database (or the other way round).
+        public static bool TryResolveStrictRegion(
+            string? region,
+            string? countryCode,
+            out string resolvedRegion,
+            out string error)
+        {
+            resolvedRegion = string.Empty;
+            error = string.Empty;
+
+            var fromRegion = NormalizeStrictRegion(region);
+            var fromCountry = NormalizeStrictRegion(countryCode);
+
+            if (fromRegion == null && fromCountry == null)
+            {
+                error = "Region or CountryCode is required (india/IN or taiwan/TW).";
+                return false;
+            }
+            if (fromRegion == "invalid" || fromCountry == "invalid")
+            {
+                error = $"Unsupported Region '{region}' / CountryCode '{countryCode}'. Use india/IN or taiwan/TW.";
+                return false;
+            }
+            if (fromRegion != null && fromCountry != null && fromRegion != fromCountry)
+            {
+                error = $"Region '{region}' and CountryCode '{countryCode}' point to different databases.";
+                return false;
+            }
+
+            resolvedRegion = fromRegion ?? fromCountry!;
+            return true;
+        }
+
+        public async Task<(string Region, int Limit, int Offset, List<Dictionary<string, object?>> Rows)> GetL3LogRowsAsync(
+            L3LogRowsRequest request,
+            CancellationToken cancellationToken = default
+        )
+        {
+            if (!TryResolveStrictRegion(request.Region, request.CountryCode, out var resolvedRegion, out var regionError))
+            {
+                throw new ArgumentException(regionError);
+            }
+
+            var sessionIds = request.SessionIds
+                .Where(id => id > 0)
+                .Distinct()
+                .ToList();
+
+            if (sessionIds.Count == 0)
+            {
+                throw new ArgumentException("No valid SessionIds provided.");
+            }
+
+            var limit = Math.Clamp(request.Limit, 1, 50000);
+            var offset = Math.Max(request.Offset, 0);
+
+            // Always open a dedicated context for the requested region. The injected _db is
+            // not used because it is routed from query/header/claims, not from the JSON body.
+            var connectionName = resolvedRegion == "taiwan" ? "MySqlConnection2" : "MySqlConnection";
+            var regionDb = CreateDbContext(connectionName)
+                ?? throw new InvalidOperationException(
+                    $"Connection string '{connectionName}' for region '{resolvedRegion}' is not configured.");
+
+            await using (regionDb)
+            {
+                var conn = regionDb.Database.GetDbConnection();
+                if (conn.State != ConnectionState.Open)
+                {
+                    await conn.OpenAsync(cancellationToken);
+                }
+
+                await using var command = conn.CreateCommand();
+                var inClause = PythonBridgeDbTool.BuildInClause(command, sessionIds, "sid");
+                command.CommandText = $@"
+                    SELECT id, tbl_upload_id, session_id, row_no, timestamp_text,
+                           latitude, longitude, category, message, detail,
+                           cause, source, severity, uploaded_on
+                    FROM tbl_l3_log
+                    WHERE session_id IN ({inClause})
+                    ORDER BY session_id, id
+                    LIMIT @limit OFFSET @offset;";
+                PythonBridgeDbTool.AddParam(command, "@limit", limit);
+                PythonBridgeDbTool.AddParam(command, "@offset", offset);
+
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                var rows = await PythonBridgeDbTool.ReadRowsAsync(reader, cancellationToken);
+
+                _logger.LogInformation(
+                    "PythonBridge GetL3LogRows region={Region} connection={Connection} sessions={Sessions} offset={Offset} rows={Rows}",
+                    resolvedRegion, connectionName, sessionIds.Count, offset, rows.Count);
+
+                return (resolvedRegion, limit, offset, rows);
+            }
+        }
+
         public async Task<(int Limit, int Offset, List<Dictionary<string, object?>> Rows)> GetLteTiltBaselineResultsAsync(
             LteTiltBaselineRowsRequest request,
             CancellationToken cancellationToken = default
