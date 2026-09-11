@@ -125,7 +125,9 @@ namespace SignalTracker.Controllers
             [FromQuery] int? limit = null,
             [FromQuery] string? reportMode = null,
             [FromQuery] string? sheetMode = null,
-            [FromQuery] string? mode = null)
+            [FromQuery] string? mode = null,
+            [FromQuery] string? earfcnMode = null,
+            [FromQuery] bool? earfcnWise = null)
         {
             var request = new WalkTestExcelReportRequest
             {
@@ -136,7 +138,9 @@ namespace SignalTracker.Controllers
                 StartDate = startDate,
                 EndDate = endDate,
                 Limit = limit,
-                ReportMode = reportMode ?? sheetMode ?? mode
+                ReportMode = reportMode ?? sheetMode ?? mode,
+                EarfcnMode = earfcnMode,
+                EarfcnWise = earfcnWise
             };
 
             return Generate(request);
@@ -163,7 +167,9 @@ namespace SignalTracker.Controllers
             if (sessionIds.Count == 0)
                 return BadRequest(new { Message = "No valid session IDs are available for this report." });
 
-            var rows = await QueryWalkTestRowsAsync(request, sessionIds);
+            var earfcnWise = ResolveEarfcnWise(request.EarfcnMode, request.EarfcnWise, Request.HasFormContentType ? Request.Form : null, Request.Query);
+
+            var rows = await QueryWalkTestRowsAsync(request, sessionIds, earfcnWise);
             if (rows.Count == 0)
                 return BadRequest(new { Message = "No network logs found for the selected sessions." });
 
@@ -186,7 +192,10 @@ namespace SignalTracker.Controllers
                 imageBytesByUrl,
                 thresholds,
                 reportMode,
-                filterByImageName);
+                filterByImageName,
+                showSampleCount: false,
+                customSheetNames: null,
+                earfcnWise: earfcnWise);
 
             var bytes = SimpleXlsxWriter.Write(workbook);
             var filename = $"Walk_Test_Report_{request.ProjectId}_{DateTime.Now:yyyy-MM-dd}.xlsx";
@@ -221,6 +230,7 @@ namespace SignalTracker.Controllers
             try
             {
                 var fileGroups = ResolveLogFileGroups(uploads.Count, Request.HasFormContentType ? Request.Form : null, Request.Query);
+                var earfcnWise = ResolveEarfcnWise(request.EarfcnMode, request.EarfcnWise, Request.HasFormContentType ? Request.Form : null, Request.Query);
 
                 for (int zipIdx = 0; zipIdx < uploads.Count; zipIdx++)
                 {
@@ -233,27 +243,43 @@ namespace SignalTracker.Controllers
                         FileShare.Read, bufferSize: 128 * 1024, useAsync: true);
                     using var archive = new ZipArchive(zipStream, ZipArchiveMode.Read, leaveOpen: true);
 
-                    // Extract map images (preserve session-specific keys)
+                    // Extract map images (preserve file-specific and session-specific keys)
                     var mapImages = ExtractMapImagesFromZip(archive, out var detectedSessionId);
+                    var sid = (int)(request.SessionIdOverride ?? detectedSessionId ?? (zipIdx + 1));
+                    if (sid > 0 && !sessionIds.Contains(sid)) sessionIds.Add(sid);
+
+                    string fileName = Path.GetFileNameWithoutExtension(upload.FileName);
+
                     foreach (var kvp in mapImages)
                     {
-                        if (!mergedImages.ContainsKey(kvp.Key) || kvp.Key.Contains("_"))
+                        // 1. File-index-specific keys (guarantees isolation between uploaded files)
+                        mergedImages[$"file_{zipIdx}_{kvp.Key}"] = kvp.Value;
+                        mergedImages[$"idx_{zipIdx}_{kvp.Key}"] = kvp.Value;
+
+                        // 2. File-name-specific keys
+                        if (!string.IsNullOrWhiteSpace(fileName))
+                        {
+                            mergedImages[$"{fileName}_{kvp.Key}"] = kvp.Value;
+                        }
+
+                        // 3. Session-specific keys
+                        mergedImages[$"{sid}_{kvp.Key}"] = kvp.Value;
+
+                        // 4. Global fallback key (first file wins fallback)
+                        if (!mergedImages.ContainsKey(kvp.Key))
                         {
                             mergedImages[kvp.Key] = kvp.Value;
                         }
                     }
 
-                    var sid = (int)(request.SessionIdOverride ?? detectedSessionId ?? 0);
-                    if (sid > 0 && !sessionIds.Contains(sid)) sessionIds.Add(sid);
-
-                    var zipRows = ExtractNetworkRowsFromZip(archive, sid);
+                    var zipRows = ExtractNetworkRowsFromZip(archive, sid, earfcnWise);
                     int assignedGroup = fileGroups[zipIdx];
-                    string fileName = Path.GetFileNameWithoutExtension(upload.FileName);
                     foreach (var r in zipRows)
                     {
                         r.FileIndex = zipIdx;
                         r.SourceFileName = fileName;
                         r.FileGroup = assignedGroup;
+                        r.SessionId = sid;
                     }
                     allRawRows.AddRange(zipRows);
 
@@ -272,7 +298,7 @@ namespace SignalTracker.Controllers
                 thresholds ??= ReportThresholdConfig.Hardcoded();
 
                 // Merge & deduplicate all rows across all zips
-                var rows = CleanZipRows(allRawRows);
+                var rows = CleanZipRows(allRawRows, earfcnWise);
                 if (rows.Count == 0)
                     return BadRequest(new { Message = "No usable network log rows were found inside the uploaded zip(s)." });
 
@@ -320,7 +346,7 @@ namespace SignalTracker.Controllers
 
                 var workbook = BuildWorkbook(
                     projectName, sessionIds, rows, allSiteRows,
-                    imageBytesByUrl, thresholds, reportMode, filterByImageName, showSampleCount, customSheetNames);
+                    imageBytesByUrl, thresholds, reportMode, filterByImageName, showSampleCount, customSheetNames, earfcnWise);
 
                 var bytes = SimpleXlsxWriter.Write(workbook);
                 var primarySessionId = sessionIds.Count > 0 ? sessionIds[0] : 0;
@@ -352,6 +378,8 @@ namespace SignalTracker.Controllers
             var allRawRows   = new List<WalkTestLogRow>();
             var sessionIds   = new List<int>();
 
+            var earfcnWise = ResolveEarfcnWise(request.EarfcnMode, request.EarfcnWise, Request.HasFormContentType ? Request.Form : null, Request.Query);
+
             try
             {
                 for (int zipIdx = 0; zipIdx < uploads.Count; zipIdx++)
@@ -369,7 +397,7 @@ namespace SignalTracker.Controllers
                     var sid = (int)(request.SessionIdOverride ?? detectedSessionId ?? 0);
                     if (sid > 0 && !sessionIds.Contains(sid)) sessionIds.Add(sid);
 
-                    var zipRows = ExtractNetworkRowsFromZip(archive, sid);
+                    var zipRows = ExtractNetworkRowsFromZip(archive, sid, earfcnWise);
                     string fileName = Path.GetFileNameWithoutExtension(upload.FileName);
                     foreach (var r in zipRows)
                     {
@@ -380,7 +408,7 @@ namespace SignalTracker.Controllers
                 }
 
                 // Merge & deduplicate all rows across all zips
-                var rows = CleanZipRows(allRawRows);
+                var rows = CleanZipRows(allRawRows, earfcnWise);
 
                 var filterByImageName = ResolveFilterByImageName(request, Request.HasFormContentType ? Request.Form : null, Request.Query);
                 var rowsToSummarize = rows;
@@ -583,6 +611,29 @@ namespace SignalTracker.Controllers
                         images[header] = bytes;
                     if (!images.ContainsKey($"MAP_{header}"))
                         images[$"MAP_{header}"] = bytes;
+
+                    // Also extract known KPI suffix if header is compound (e.g. B3_RSRP, 1200_RSRP, map_B3_RSRP)
+                    foreach (var kpi in ImageHeaders)
+                    {
+                        var kpiUpper = kpi.ToUpperInvariant();
+                        if (header.EndsWith($"_{kpiUpper}", StringComparison.OrdinalIgnoreCase) ||
+                            header.Equals(kpiUpper, StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (!images.ContainsKey(kpiUpper))
+                                images[kpiUpper] = bytes;
+                            if (!images.ContainsKey($"MAP_{kpiUpper}"))
+                                images[$"MAP_{kpiUpper}"] = bytes;
+
+                            var prefix = header.Length > kpiUpper.Length + 1
+                                ? header[..^(kpiUpper.Length + 1)].Trim('_')
+                                : "";
+                            if (!string.IsNullOrWhiteSpace(prefix))
+                            {
+                                images[$"{prefix}_{kpiUpper}"] = bytes;
+                                images[$"{prefix}_{kpiUpper.ToLowerInvariant()}"] = bytes;
+                            }
+                        }
+                    }
                 }
                 catch { }
             }
@@ -648,7 +699,7 @@ namespace SignalTracker.Controllers
             return map;
         }
 
-        private static List<WalkTestLogRow> ExtractRowsFromImagePlot(ZipArchive archive, long sessionId, ref int nextId)
+        private static List<WalkTestLogRow> ExtractRowsFromImagePlot(ZipArchive archive, long sessionId, ref int nextId, bool earfcnWise = true)
         {
             var rows = new List<WalkTestLogRow>();
             var entry = archive.Entries.FirstOrDefault(e => e.FullName.EndsWith("image_plot.csv", StringComparison.OrdinalIgnoreCase));
@@ -664,6 +715,8 @@ namespace SignalTracker.Controllers
 
                 var headers = ParseCsvLine(lines[0]).Select(h => h.Trim()).ToList();
                 int tsIdx     = headers.FindIndex(h => h.Equals("timestamp", StringComparison.OrdinalIgnoreCase));
+                int xIdx      = headers.FindIndex(h => h.Equals("x", StringComparison.OrdinalIgnoreCase) || h.Equals("point_x", StringComparison.OrdinalIgnoreCase) || h.Equals("pos_x", StringComparison.OrdinalIgnoreCase));
+                int yIdx      = headers.FindIndex(h => h.Equals("y", StringComparison.OrdinalIgnoreCase) || h.Equals("point_y", StringComparison.OrdinalIgnoreCase) || h.Equals("pos_y", StringComparison.OrdinalIgnoreCase));
                 int latIdx    = headers.FindIndex(h => h.Equals("lat", StringComparison.OrdinalIgnoreCase) || h.Equals("latitude", StringComparison.OrdinalIgnoreCase));
                 int lonIdx    = headers.FindIndex(h => h.Equals("lon", StringComparison.OrdinalIgnoreCase) || h.Equals("longitude", StringComparison.OrdinalIgnoreCase));
                 int rsrpIdx   = headers.FindIndex(h => h.Equals("RSRP", StringComparison.OrdinalIgnoreCase) || h.Contains("rsrp", StringComparison.OrdinalIgnoreCase));
@@ -672,6 +725,7 @@ namespace SignalTracker.Controllers
                 int dlIdx     = headers.FindIndex(h => h.Equals("DL THPT", StringComparison.OrdinalIgnoreCase) || h.Contains("dl", StringComparison.OrdinalIgnoreCase));
                 int ulIdx     = headers.FindIndex(h => h.Equals("UL THPT", StringComparison.OrdinalIgnoreCase) || h.Contains("ul", StringComparison.OrdinalIgnoreCase));
                 int earfcnIdx = headers.FindIndex(h => h.Equals("EARFCN", StringComparison.OrdinalIgnoreCase) || h.Contains("earfcn", StringComparison.OrdinalIgnoreCase) || h.Contains("arfcn", StringComparison.OrdinalIgnoreCase));
+                int bandIdx   = headers.FindIndex(h => h.Equals("BAND", StringComparison.OrdinalIgnoreCase) || h.Contains("band", StringComparison.OrdinalIgnoreCase));
                 int blerIdx   = headers.FindIndex(h => h.Equals("LTE BLER", StringComparison.OrdinalIgnoreCase) || h.Contains("bler", StringComparison.OrdinalIgnoreCase));
                 int pciIdx    = headers.FindIndex(h => h.Equals("PCI", StringComparison.OrdinalIgnoreCase) || h.Contains("pci", StringComparison.OrdinalIgnoreCase));
                 int ciIdx     = headers.FindIndex(h => h.Equals("CI", StringComparison.OrdinalIgnoreCase) || h.Equals("CELL_ID", StringComparison.OrdinalIgnoreCase) || h.Contains("cell", StringComparison.OrdinalIgnoreCase));
@@ -719,10 +773,26 @@ namespace SignalTracker.Controllers
 
                     var earfcnVal = GetCleanVal(cols, earfcnIdx);
                     var bandVal   = ResolveBandFromEarfcn(earfcnVal);
+                    if (string.IsNullOrWhiteSpace(bandVal) && bandIdx >= 0)
+                    {
+                        var rawBand = GetCleanVal(cols, bandIdx);
+                        if (!string.IsNullOrWhiteSpace(rawBand))
+                            bandVal = ToBandSheetName(rawBand, null);
+                    }
 
-                    var sheetName = !string.IsNullOrWhiteSpace(earfcnVal)
-                        ? (bandVal != null ? $"{earfcnVal} ({bandVal})" : earfcnVal)
-                        : (bandVal ?? "Unknown Band");
+                    string sheetName;
+                    if (earfcnWise)
+                    {
+                        sheetName = !string.IsNullOrWhiteSpace(earfcnVal)
+                            ? (bandVal != null ? $"{earfcnVal} ({bandVal})" : earfcnVal)
+                            : (bandVal ?? "Unknown Band");
+                    }
+                    else
+                    {
+                        sheetName = !string.IsNullOrWhiteSpace(bandVal)
+                            ? bandVal
+                            : (!string.IsNullOrWhiteSpace(earfcnVal) ? earfcnVal : "Unknown Band");
+                    }
 
                     var metricColors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
@@ -760,6 +830,8 @@ namespace SignalTracker.Controllers
                         Id = nextId++,
                         SessionId = (int)sessionId,
                         Timestamp = ts,
+                        X = ParseFloatSafe(GetCleanVal(cols, xIdx)),
+                        Y = ParseFloatSafe(GetCleanVal(cols, yIdx)),
                         Lat = ParseFloatSafe(GetCleanVal(cols, latIdx)),
                         Lon = ParseFloatSafe(GetCleanVal(cols, lonIdx)),
                         Earfcn = earfcnVal,
@@ -791,12 +863,12 @@ namespace SignalTracker.Controllers
             return rows;
         }
 
-        private List<WalkTestLogRow> ExtractNetworkRowsFromZip(ZipArchive archive, long sessionId)
+        private List<WalkTestLogRow> ExtractNetworkRowsFromZip(ZipArchive archive, long sessionId, bool earfcnWise = true)
         {
             var rows = new List<WalkTestLogRow>();
             var nextId = 1;
 
-            var imagePlotRows = ExtractRowsFromImagePlot(archive, sessionId, ref nextId);
+            var imagePlotRows = ExtractRowsFromImagePlot(archive, sessionId, ref nextId, earfcnWise);
             if (imagePlotRows.Count > 0)
             {
                 return imagePlotRows;
@@ -852,7 +924,7 @@ namespace SignalTracker.Controllers
                     var cols = ParseCsvLine(lines[i]);
                     if (cols.Count < 2) continue;
 
-                    var row = ParseZipRow(cols, map, sessionId, ref nextId, fileBaseTime);
+                    var row = ParseZipRow(cols, map, sessionId, ref nextId, fileBaseTime, earfcnWise);
                     if (row != null)
                     {
                         if (imagePlotBlerMap.Count > 0 && row.Timestamp.HasValue)
@@ -875,7 +947,7 @@ namespace SignalTracker.Controllers
 
         private sealed class ZipColumnMap
         {
-            public int Timestamp = -1, Lat = -1, Lon = -1, Network = -1, IndoorOutdoor = -1,
+            public int Timestamp = -1, Lat = -1, Lon = -1, X = -1, Y = -1, Network = -1, IndoorOutdoor = -1,
                 Mos = -1, CellId = -1, Pci = -1,
                 Rsrp = -1, Rsrq = -1, Sinr = -1, DlTpt = -1, UlTpt = -1, Earfcn = -1,
                 VolteCall = -1, Band = -1, Bler = -1, AlphaLong = -1, AlphaShort = -1,
@@ -885,11 +957,20 @@ namespace SignalTracker.Controllers
 
         private static ZipColumnMap BuildZipColumnMap(List<string> headers)
         {
+            var xCol = FindZipColumnByName(headers, "x", "posx", "pointx");
+            var yCol = FindZipColumnByName(headers, "y", "posy", "pointy");
+            var latCol = FindZipColumn(headers, "latitude");
+            if (latCol < 0) latCol = FindZipColumnByName(headers, "lat");
+            var lonCol = FindZipColumn(headers, "longitude");
+            if (lonCol < 0) lonCol = FindZipColumnByName(headers, "lon", "lng");
+
             return new ZipColumnMap
             {
                 Timestamp = FindZipColumn(headers, "timestamp"),
-                Lat = FindZipColumn(headers, "latitude"),
-                Lon = FindZipColumn(headers, "longitude"),
+                Lat = latCol,
+                Lon = lonCol,
+                X = xCol,
+                Y = yCol,
                 Network = FindZipColumn(headers, "network type", "network_type", "networktype", "network", "technology", "tech", "rat", "system", "mode"),
                 IndoorOutdoor = FindZipColumn(headers, "indoor/outdoor", "indoor_outdoor", "location_type"),
                 Mos = FindZipColumn(headers, "mos"),
@@ -952,30 +1033,42 @@ namespace SignalTracker.Controllers
             return -1;
         }
 
-        private static string NormalizeZipColumnName(string value) =>
-            Regex.Replace(value.Trim(), @"[^a-z0-9]+", "", RegexOptions.IgnoreCase);
+        private static string NormalizeZipColumnName(string? header)
+        {
+            if (string.IsNullOrWhiteSpace(header)) return "";
+            return Regex.Replace(header.Trim(), @"[\s_\-\.\(\)\/]+", "").ToLowerInvariant();
+        }
+
+        private static string? GetZipCol(List<string> cols, int index)
+        {
+            if (index < 0 || index >= cols.Count) return null;
+            return NormalizeZipText(cols[index]);
+        }
+
+        private static string? GetZipColByHeader(List<string> cols, List<string> headers, string headerName)
+        {
+            var idx = headers.FindIndex(h => h.Equals(headerName, StringComparison.OrdinalIgnoreCase) ||
+                                             h.Contains(headerName, StringComparison.OrdinalIgnoreCase));
+            return idx >= 0 && idx < cols.Count ? NormalizeZipText(cols[idx]) : null;
+        }
 
         private static Dictionary<string, string>? ParseImageNameColors(string? imageName)
         {
             if (string.IsNullOrWhiteSpace(imageName)) return null;
 
-            var parts = imageName.Split("@@", StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length <= 1) return null;
-
+            var parts = imageName.Split(new[] { ',', ';', '|' }, StringSplitOptions.RemoveEmptyEntries);
             var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-            for (int i = 1; i < parts.Length; i++)
+            foreach (var part in parts)
             {
-                var part = parts[i].Trim();
-                var match = Regex.Match(part, @"^(.*?)\((#[0-9A-Fa-f]{6}|#[0-9A-Fa-f]{8})\)$");
-                if (match.Success)
+                var kv = part.Trim().Split(new[] { ':', '=' }, 2);
+                if (kv.Length != 2) continue;
+
+                var metric = kv[0].Trim();
+                var color = NormalizeColorHex(kv[1].Trim());
+                if (!string.IsNullOrWhiteSpace(metric) && !string.IsNullOrWhiteSpace(color))
                 {
-                    var metricName = match.Groups[1].Value.Trim();
-                    var colorHex = match.Groups[2].Value.Trim();
-                    if (!string.IsNullOrEmpty(metricName) && !string.IsNullOrEmpty(colorHex))
-                    {
-                        dict[metricName] = colorHex;
-                    }
+                    dict[metric] = color;
                 }
             }
 
@@ -1018,7 +1111,7 @@ namespace SignalTracker.Controllers
             return null;
         }
 
-        private WalkTestLogRow? ParseZipRow(List<string> cols, ZipColumnMap map, long sessionId, ref int nextId, DateTime? fileBaseTime = null)
+        private WalkTestLogRow? ParseZipRow(List<string> cols, ZipColumnMap map, long sessionId, ref int nextId, DateTime? fileBaseTime = null, bool earfcnWise = false)
         {
             var tsRaw = GetZipCol(cols, map.Timestamp);
             if (!string.IsNullOrWhiteSpace(tsRaw) && tsRaw.Contains("@@"))
@@ -1096,10 +1189,12 @@ namespace SignalTracker.Controllers
                 Timestamp = ts,
                 Lat = ParseFloatSafe(GetZipCol(cols, map.Lat)),
                 Lon = ParseFloatSafe(GetZipCol(cols, map.Lon)),
+                X = ParseFloatSafe(GetZipCol(cols, map.X)),
+                Y = ParseFloatSafe(GetZipCol(cols, map.Y)),
                 Network = network,
                 Provider = CleanZipProvider(provider),
                 Band = band,
-                BandSheetName = ToBandSheetName(band, network, earfcn, string.IsNullOrWhiteSpace(primaryCellInfo) ? primary : primaryCellInfo),
+                BandSheetName = ToBandSheetName(band, network, earfcn, string.IsNullOrWhiteSpace(primaryCellInfo) ? primary : primaryCellInfo, earfcnWise),
                 Pci = GetZipCol(cols, map.Pci),
                 Rsrp = ClampKpiFloat(ParseFloatSafe(GetZipCol(cols, map.Rsrp)), -140, -44),
                 Rsrq = ClampKpiFloat(ParseFloatSafe(GetZipCol(cols, map.Rsrq)), -34, 3),
@@ -1136,10 +1231,11 @@ namespace SignalTracker.Controllers
             return true;
         }
 
-        private static List<WalkTestLogRow> CleanZipRows(List<WalkTestLogRow> rows)
+        private static List<WalkTestLogRow> CleanZipRows(List<WalkTestLogRow> rows, bool earfcnWise = true)
         {
-            var cleaned = new List<WalkTestLogRow>(rows.Count);
-            var seen = new HashSet<string>();
+            var coordGroups = new Dictionary<string, List<WalkTestLogRow>>(StringComparer.Ordinal);
+            var orderItems = new List<object>();
+            var nonCoordSeen = new HashSet<string>(StringComparer.Ordinal);
 
             foreach (var r in rows)
             {
@@ -1156,10 +1252,14 @@ namespace SignalTracker.Controllers
                 r.Bler = NormalizeZipText(r.Bler);
 
                 // Re-resolve BandSheetName after Band/Network have been normalised
-                // (NormalizeZipText may have turned "Unknown" → null, changing the result)
-                if (string.IsNullOrWhiteSpace(r.BandSheetName) || r.BandSheetName.Equals("Unknown Band", StringComparison.OrdinalIgnoreCase))
+                if (!earfcnWise)
                 {
-                    r.BandSheetName = ToBandSheetName(r.Band, r.Network, r.Earfcn, r.Primary);
+                    // In without-earfcn mode, ALWAYS strip any earfcn compound or discrete earfcn numbers and resolve purely to Band (e.g. B3)
+                    r.BandSheetName = ToBandSheetName(r.Band, r.Network, r.Earfcn, r.Primary, false);
+                }
+                else if (string.IsNullOrWhiteSpace(r.BandSheetName) || r.BandSheetName.Equals("Unknown Band", StringComparison.OrdinalIgnoreCase))
+                {
+                    r.BandSheetName = ToBandSheetName(r.Band, r.Network, r.Earfcn, r.Primary, true);
                 }
 
                 if (string.IsNullOrWhiteSpace(r.NodeBId) && !string.IsNullOrWhiteSpace(r.CellId))
@@ -1171,15 +1271,99 @@ namespace SignalTracker.Controllers
                     }
                 }
 
-                if (r.Lat is < -90 or > 90) r.Lat = null;
-                if (r.Lon is < -180 or > 180) r.Lon = null;
+                // Preserve valid coordinates (do not null out indoor pixel coordinates where Lat/Lon > 90)
+                if (r.Lat.HasValue && (float.IsNaN(r.Lat.Value) || float.IsInfinity(r.Lat.Value))) r.Lat = null;
+                if (r.Lon.HasValue && (float.IsNaN(r.Lon.Value) || float.IsInfinity(r.Lon.Value))) r.Lon = null;
                 if (r.Lat == 0 && r.Lon == 0) { r.Lat = null; r.Lon = null; }
 
-                var dedupeKey = string.Join('|',
-                    r.SessionId, r.Timestamp?.Ticks, r.Pci, r.Rsrp, r.Rsrq, r.Band, r.Lat, r.Lon, r.RawImageName, r.Id);
-                if (!seen.Add(dedupeKey)) continue;
+                if (r.X.HasValue && (float.IsNaN(r.X.Value) || float.IsInfinity(r.X.Value))) r.X = null;
+                if (r.Y.HasValue && (float.IsNaN(r.Y.Value) || float.IsInfinity(r.Y.Value))) r.Y = null;
+                if (r.X == 0 && r.Y == 0) { r.X = null; r.Y = null; }
 
-                cleaned.Add(r);
+                bool hasXY = r.X.HasValue && r.Y.HasValue;
+                bool hasLatLon = r.Lat.HasValue && r.Lon.HasValue;
+
+                if (hasXY)
+                {
+                    var roundX = (float)Math.Round(r.X.Value, 2);
+                    var roundY = (float)Math.Round(r.Y.Value, 2);
+
+                    var coordKey = earfcnWise
+                        ? $"{r.FileIndex}|{r.SessionId}|{r.BandSheetName}|XY|{roundX:F2}|{roundY:F2}"
+                        : $"{r.FileIndex}|{r.SessionId}|XY|{roundX:F2}|{roundY:F2}";
+
+                    if (!coordGroups.TryGetValue(coordKey, out var groupList))
+                    {
+                        groupList = new List<WalkTestLogRow>();
+                        coordGroups[coordKey] = groupList;
+                        orderItems.Add(coordKey);
+                    }
+                    groupList.Add(r);
+                }
+                else if (hasLatLon)
+                {
+                    var roundLat = (float)Math.Round(r.Lat.Value, 6);
+                    var roundLon = (float)Math.Round(r.Lon.Value, 6);
+
+                    var coordKey = earfcnWise
+                        ? $"{r.FileIndex}|{r.SessionId}|{r.BandSheetName}|GPS|{roundLat:F6}|{roundLon:F6}"
+                        : $"{r.FileIndex}|{r.SessionId}|GPS|{roundLat:F6}|{roundLon:F6}";
+
+                    if (!coordGroups.TryGetValue(coordKey, out var groupList))
+                    {
+                        groupList = new List<WalkTestLogRow>();
+                        coordGroups[coordKey] = groupList;
+                        orderItems.Add(coordKey);
+                    }
+                    groupList.Add(r);
+                }
+                else
+                {
+                    // Deduplicate non-coordinate rows
+                    var nonCoordKey = $"{r.FileIndex}|{r.SessionId}|{r.Timestamp?.Ticks}|{r.Pci}|{r.Rsrp}|{r.Rsrq}|{r.Band}";
+                    if (nonCoordSeen.Add(nonCoordKey))
+                    {
+                        orderItems.Add(r);
+                    }
+                }
+            }
+
+            var cleaned = new List<WalkTestLogRow>(orderItems.Count);
+
+            foreach (var item in orderItems)
+            {
+                if (item is string coordKey)
+                {
+                    var group = coordGroups[coordKey];
+                    WalkTestLogRow chosenRow;
+                    if (group.Count == 1)
+                    {
+                        chosenRow = group[0];
+                    }
+                    else
+                    {
+                        // Deduplicate repeating (X, Y) coordinates: consider as 1 count.
+                        // Consider the last row for repeating points.
+                        chosenRow = group.Last();
+
+                        // Ensure fallback metadata is not lost if only present on earlier rows
+                        if (string.IsNullOrWhiteSpace(chosenRow.RawImageName))
+                        {
+                            var firstWithImage = group.FirstOrDefault(r => !string.IsNullOrWhiteSpace(r.RawImageName));
+                            if (firstWithImage != null) chosenRow.RawImageName = firstWithImage.RawImageName;
+                        }
+                        if (chosenRow.MetricColors == null || chosenRow.MetricColors.Count == 0)
+                        {
+                            var firstWithColors = group.FirstOrDefault(r => r.MetricColors != null && r.MetricColors.Count > 0);
+                            if (firstWithColors != null) chosenRow.MetricColors = firstWithColors.MetricColors;
+                        }
+                    }
+                    cleaned.Add(chosenRow);
+                }
+                else if (item is WalkTestLogRow nonCoordRow)
+                {
+                    cleaned.Add(nonCoordRow);
+                }
             }
 
             for (var i = 0; i < cleaned.Count; i++) cleaned[i].Id = i + 1;
@@ -1317,24 +1501,24 @@ namespace SignalTracker.Controllers
                 foreach (var line in lines.Skip(1))
                 {
                     var cols = ParseCsvLine(line);
-                    var metric = GetZipCol(cols, metricIndex).Trim().ToUpperInvariant();
-                    var type = GetZipCol(cols, typeIndex).Trim().ToUpperInvariant();
+                    var metric = GetThresholdZipCol(cols, metricIndex).Trim().ToUpperInvariant();
+                    var type = GetThresholdZipCol(cols, typeIndex).Trim().ToUpperInvariant();
                     if (string.IsNullOrWhiteSpace(metric) || string.IsNullOrWhiteSpace(type)) continue;
 
-                    var color = NormalizeColorHex(GetZipCol(cols, colorIndex));
-                    var label = GetZipCol(cols, labelIndex);
+                    var color = NormalizeColorHex(GetThresholdZipCol(cols, colorIndex));
+                    var label = GetThresholdZipCol(cols, labelIndex);
                     ThresholdRange? range = null;
 
                     if (type == "RANGE")
                     {
-                        var min = ParseDoubleSafe(GetZipCol(cols, minIndex));
-                        var max = ParseDoubleSafe(GetZipCol(cols, maxIndex));
+                        var min = ParseDoubleSafe(GetThresholdZipCol(cols, minIndex));
+                        var max = ParseDoubleSafe(GetThresholdZipCol(cols, maxIndex));
                         if (!min.HasValue || !max.HasValue) continue;
                         range = new ThresholdRange(label, min.Value, max.Value, color);
                     }
                     else if (type == "VALUE")
                     {
-                        var value = GetZipCol(cols, valueIndex);
+                        var value = GetThresholdZipCol(cols, valueIndex);
                         if (string.IsNullOrWhiteSpace(value)) continue;
                         range = new ThresholdRange(label, 0, 0, color) { ValueMatch = value.Trim() };
                     }
@@ -1466,7 +1650,7 @@ namespace SignalTracker.Controllers
             return "";
         }
 
-        private static string GetZipCol(List<string> cols, int idx) =>
+        private static string GetThresholdZipCol(List<string> cols, int idx) =>
             idx >= 0 && idx < cols.Count ? cols[idx].Trim() : "";
 
         private static string CleanZipProvider(string? value) =>
@@ -1626,7 +1810,8 @@ namespace SignalTracker.Controllers
 
         private async Task<List<WalkTestLogRow>> QueryWalkTestRowsAsync(
             WalkTestExcelReportRequest request,
-            List<int> sessionIds)
+            List<int> sessionIds,
+            bool earfcnWise = true)
         {
             var limit = request.Limit.HasValue
                 ? Math.Clamp(request.Limit.Value, 1, 500_000)
@@ -1711,7 +1896,7 @@ namespace SignalTracker.Controllers
                     }
                 }
 
-                row.BandSheetName = ToBandSheetName(row.Band, row.Network, row.Earfcn, row.Primary);
+                row.BandSheetName = ToBandSheetName(row.Band, row.Network, row.Earfcn, row.Primary, earfcnWise);
             }
 
             return resultRows;
@@ -1887,42 +2072,164 @@ namespace SignalTracker.Controllers
                 : null;
         }
 
-        private static List<(string DisplayTitle, string BandSheetName, List<WalkTestLogRow> BandRows)> CreateBandBlocks(List<WalkTestLogRow> rows)
+        private static List<(string DisplayTitle, string BandSheetName, List<WalkTestLogRow> BandRows)> CreateBandBlocks(
+            List<WalkTestLogRow> rows,
+            bool earfcnWise = true,
+            IReadOnlyDictionary<string, byte[]?>? imageBytesByUrl = null)
         {
             var blocks = new List<(string DisplayTitle, string BandSheetName, List<WalkTestLogRow> BandRows)>();
-            var validRows = rows
+
+            if (!earfcnWise)
+            {
+                // Without EARFCN mode: no band-wise and no earfcn-wise filter.
+                // Group by uploaded log file / session.
+                // Check if a .png map image is available for that log file.
+                // If a .png is available, create a separate column for it!
+
+                var distinctFileIndexes = rows
+                    .Select(x => x.FileIndex)
+                    .Distinct()
+                    .OrderBy(x => x)
+                    .ToList();
+
+                var fileIndexesFromImages = imageBytesByUrl?.Keys
+                    .Select(k =>
+                    {
+                        var m = Regex.Match(k, @"^(?:file|idx)_(\d+)_", RegexOptions.IgnoreCase);
+                        return m.Success && int.TryParse(m.Groups[1].Value, out var idx) ? (int?)idx : null;
+                    })
+                    .Where(idx => idx.HasValue)
+                    .Select(idx => idx!.Value)
+                    .Distinct()
+                    .ToList() ?? new List<int>();
+
+                var allKnownFileIndexes = distinctFileIndexes
+                    .Union(fileIndexesFromImages)
+                    .OrderBy(x => x)
+                    .ToList();
+
+                var distinctSessionIds = rows
+                    .Select(x => x.SessionId)
+                    .Where(s => s > 0)
+                    .Distinct()
+                    .OrderBy(s => s)
+                    .ToList();
+
+                bool multiFile = allKnownFileIndexes.Count > 1;
+                bool multiSession = !multiFile && distinctSessionIds.Count > 1;
+
+                var logGroups = multiFile
+                    ? allKnownFileIndexes.Select(fIdx => (
+                        FileIndex: fIdx,
+                        SessionId: rows.Where(x => x.FileIndex == fIdx).Select(x => x.SessionId).FirstOrDefault(s => s > 0),
+                        SourceFileName: rows.Where(x => x.FileIndex == fIdx).Select(x => x.SourceFileName).FirstOrDefault(s => !string.IsNullOrWhiteSpace(s)),
+                        Rows: rows.Where(x => x.FileIndex == fIdx).ToList()
+                    )).ToList()
+                    : multiSession
+                        ? distinctSessionIds.Select(sid => (
+                            FileIndex: rows.Where(x => x.SessionId == sid).Select(x => x.FileIndex).FirstOrDefault(),
+                            SessionId: sid,
+                            SourceFileName: rows.Where(x => x.SessionId == sid).Select(x => x.SourceFileName).FirstOrDefault(s => !string.IsNullOrWhiteSpace(s)),
+                            Rows: rows.Where(x => x.SessionId == sid).ToList()
+                        )).ToList()
+                        : new[] { (
+                            FileIndex: rows.Select(x => x.FileIndex).FirstOrDefault(),
+                            SessionId: rows.Select(x => x.SessionId).FirstOrDefault(s => s > 0),
+                            SourceFileName: rows.Select(x => x.SourceFileName).FirstOrDefault(s => !string.IsNullOrWhiteSpace(s)),
+                            Rows: rows
+                        ) }.ToList();
+
+                for (int i = 0; i < logGroups.Count; i++)
+                {
+                    var group = logGroups[i];
+                    var groupRows = group.Rows.Where(x => x.Timestamp.HasValue).ToList();
+                    if (groupRows.Count == 0) groupRows = group.Rows;
+
+                    int fIdx = group.FileIndex;
+                    int sid = group.SessionId;
+                    string? sName = group.SourceFileName;
+
+                    string displayTitle;
+                    if (logGroups.Count > 1)
+                    {
+                        displayTitle = !string.IsNullOrWhiteSpace(sName)
+                            ? sName
+                            : $"Log {i + 1}";
+                    }
+                    else
+                    {
+                        displayTitle = "Combined";
+                    }
+
+                    // Check if .png map image is available for this log file
+                    bool hasPng = false;
+                    if (imageBytesByUrl != null && imageBytesByUrl.Count > 0)
+                    {
+                        // 1. Check if imageBytesByUrl contains any keys specifically tagged for this file/session
+                        hasPng = imageBytesByUrl.Keys.Any(k =>
+                            k.StartsWith($"file_{fIdx}_", StringComparison.OrdinalIgnoreCase) ||
+                            k.StartsWith($"idx_{fIdx}_", StringComparison.OrdinalIgnoreCase) ||
+                            (!string.IsNullOrWhiteSpace(sName) && k.StartsWith($"{sName}_", StringComparison.OrdinalIgnoreCase)) ||
+                            (sid > 0 && k.StartsWith($"{sid}_", StringComparison.OrdinalIgnoreCase))
+                        );
+
+                        // 2. Also check if TryResolveMapImage can resolve at least one map image for any ImageHeader
+                        if (!hasPng)
+                        {
+                            var fIdxList = new[] { fIdx };
+                            var sNameList = string.IsNullOrWhiteSpace(sName) ? null : new[] { sName };
+                            var sidList = sid > 0 ? new[] { sid } : null;
+                            var candBands = groupRows.Select(x => x.Band).Where(b => !string.IsNullOrWhiteSpace(b)).Distinct().ToList();
+
+                            hasPng = ImageHeaders.Any(h =>
+                                TryResolveMapImage(imageBytesByUrl, sid, h,
+                                                   bandName: null,
+                                                   earfcns: groupRows.Select(x => x.Earfcn),
+                                                   fileIndex: fIdx,
+                                                   sourceFileName: sName,
+                                                   fileIndexes: fIdxList,
+                                                   sourceFileNames: sNameList,
+                                                   sessionIds: sidList,
+                                                   candidateBands: candBands) != null
+                            );
+                        }
+                    }
+                    else
+                    {
+                        hasPng = true;
+                    }
+
+                    if (hasPng)
+                    {
+                        blocks.Add((displayTitle, displayTitle, groupRows));
+                    }
+                }
+
+                // Fallback: If no blocks matched .png check (e.g. no images at all), add 1 combined block so report generates
+                if (blocks.Count == 0)
+                {
+                    var validRows = rows.Where(x => x.Timestamp.HasValue).ToList();
+                    if (validRows.Count == 0) validRows = rows;
+                    blocks.Add(("Combined", "Combined", validRows));
+                }
+
+                return blocks;
+            }
+
+            var validBandedRows = rows
                 .Where(x => !string.IsNullOrWhiteSpace(x.BandSheetName) &&
                             !x.BandSheetName.Equals("Unknown Band", StringComparison.OrdinalIgnoreCase) &&
                             !x.BandSheetName.Equals("Unknown", StringComparison.OrdinalIgnoreCase))
                 .ToList();
 
-            bool hasMultipleFiles = validRows.Select(x => x.FileIndex).Distinct().Count() > 1;
+            var groupedByBand = validBandedRows
+                .GroupBy(x => x.BandSheetName)
+                .OrderBy(g => BandSortKey(g.Key), StringComparer.OrdinalIgnoreCase)
+                .ToList();
 
-            if (hasMultipleFiles)
+            foreach (var g in groupedByBand)
             {
-                var groupedByFileAndBand = validRows
-                    .GroupBy(x => new { x.FileIndex, SourceFileName = !string.IsNullOrWhiteSpace(x.SourceFileName) ? x.SourceFileName : $"Log {x.FileIndex + 1}", x.BandSheetName })
-                    .OrderBy(g => g.Key.FileIndex)
-                    .ThenBy(g => BandSortKey(g.Key.BandSheetName), StringComparer.OrdinalIgnoreCase)
-                    .ToList();
-
-                foreach (var g in groupedByFileAndBand)
-                {
-                    string displayTitle = $"{g.Key.BandSheetName} ({g.Key.SourceFileName})";
-                    blocks.Add((displayTitle, g.Key.BandSheetName, g.ToList()));
-                }
-            }
-            else
-            {
-                var groupedByBand = validRows
-                    .GroupBy(x => x.BandSheetName)
-                    .OrderBy(g => BandSortKey(g.Key), StringComparer.OrdinalIgnoreCase)
-                    .ToList();
-
-                foreach (var g in groupedByBand)
-                {
-                    blocks.Add((g.Key, g.Key, g.ToList()));
-                }
+                blocks.Add((g.Key, g.Key, g.ToList()));
             }
 
             return blocks;
@@ -1938,7 +2245,8 @@ namespace SignalTracker.Controllers
             string reportMode = "separate",
             bool filterByImageName = true,
             bool showSampleCount = false,
-            List<string>? customSheetNames = null)
+            List<string>? customSheetNames = null,
+            bool earfcnWise = true)
         {
             var workbook = new XlsxWorkbook();
             workbook.Sheets.Add(BuildSiteSummarySheet(projectName, sessionIds, rows, siteRows));
@@ -1965,7 +2273,7 @@ namespace SignalTracker.Controllers
                     {
                         int fg = fileGroupIds[idx];
                         var fgRows = rows.Where(x => x.FileGroup == fg).ToList();
-                        var fgBandBlocks = CreateBandBlocks(fgRows);
+                        var fgBandBlocks = CreateBandBlocks(fgRows, earfcnWise, imageBytesByUrl);
 
                         string sheetTitle;
                         if (customSheetNames != null && idx < customSheetNames.Count && !string.IsNullOrWhiteSpace(customSheetNames[idx]))
@@ -1979,12 +2287,12 @@ namespace SignalTracker.Controllers
 
                         workbook.Sheets.Add(BuildCombinedBandSheet(
                             fgBandBlocks, fgRows, imageBytesByUrl, thresholds,
-                            filterByImageName, showSampleCount, sheetTitle));
+                            filterByImageName, showSampleCount, sheetTitle, earfcnWise));
                     }
                 }
                 else
                 {
-                    var bandBlocks = CreateBandBlocks(rows);
+                    var bandBlocks = CreateBandBlocks(rows, earfcnWise, imageBytesByUrl);
 
                     string sheetTitle = (customSheetNames != null && customSheetNames.Count > 0 && !string.IsNullOrWhiteSpace(customSheetNames[0]))
                         ? SanitizeExcelSheetName(customSheetNames[0])
@@ -1992,13 +2300,23 @@ namespace SignalTracker.Controllers
 
                     workbook.Sheets.Add(BuildCombinedBandSheet(
                         bandBlocks, rows, imageBytesByUrl, thresholds,
-                        filterByImageName, showSampleCount, sheetTitle));
+                        filterByImageName, showSampleCount, sheetTitle, earfcnWise));
                 }
             }
             else
             {
-                foreach (var group in bandGroups)
-                    workbook.Sheets.Add(BuildBandSheet(group.Key, group.ToList(), rows, imageBytesByUrl, thresholds, filterByImageName, showSampleCount));
+                if (!earfcnWise)
+                {
+                    // In without-earfcn mode, single sheet without band separation
+                    var validRows = rows.Where(x => x.Timestamp.HasValue).ToList();
+                    if (validRows.Count == 0) validRows = rows;
+                    workbook.Sheets.Add(BuildBandSheet("Combined", validRows, rows, imageBytesByUrl, thresholds, filterByImageName, showSampleCount, earfcnWise));
+                }
+                else
+                {
+                    foreach (var group in bandGroups)
+                        workbook.Sheets.Add(BuildBandSheet(group.Key, group.ToList(), rows, imageBytesByUrl, thresholds, filterByImageName, showSampleCount, earfcnWise));
+                }
             }
 
             return workbook;
@@ -2024,6 +2342,68 @@ namespace SignalTracker.Controllers
             }
 
             return "separate";
+        }
+
+        private static bool ResolveEarfcnWise(
+            string? earfcnMode,
+            bool? earfcnWise,
+            IFormCollection? form = null,
+            IQueryCollection? query = null)
+        {
+            if (earfcnWise.HasValue)
+                return earfcnWise.Value;
+
+            if (form != null)
+            {
+                if (form.TryGetValue("WithoutEarfcnWise", out var vWithout) ||
+                    form.TryGetValue("WithoutEarfcn", out vWithout) ||
+                    form.TryGetValue("without_earfcn_wise", out vWithout) ||
+                    form.TryGetValue("without_earfcn", out vWithout))
+                {
+                    var s = vWithout.ToString().Trim().ToLowerInvariant();
+                    if (s == "true" || s == "1" || s == "yes")
+                        return false;
+                }
+
+                if (form.TryGetValue("EarfcnMode", out var v1) && !string.IsNullOrWhiteSpace(v1)) earfcnMode = v1.ToString();
+                else if (form.TryGetValue("earfcn_mode", out var v2) && !string.IsNullOrWhiteSpace(v2)) earfcnMode = v2.ToString();
+                else if (form.TryGetValue("EarfcnOption", out var v3) && !string.IsNullOrWhiteSpace(v3)) earfcnMode = v3.ToString();
+                else if (form.TryGetValue("EarfcnWise", out var v4) && !string.IsNullOrWhiteSpace(v4)) earfcnMode = v4.ToString();
+                else if (form.TryGetValue("earfcn_wise", out var v5) && !string.IsNullOrWhiteSpace(v5)) earfcnMode = v5.ToString();
+                else if (form.TryGetValue("SeparateEarfcn", out var v6) && !string.IsNullOrWhiteSpace(v6)) earfcnMode = v6.ToString();
+            }
+
+            if (string.IsNullOrWhiteSpace(earfcnMode) && query != null)
+            {
+                if (query.TryGetValue("WithoutEarfcnWise", out var qWithout) ||
+                    query.TryGetValue("WithoutEarfcn", out qWithout) ||
+                    query.TryGetValue("without_earfcn_wise", out qWithout) ||
+                    query.TryGetValue("without_earfcn", out qWithout))
+                {
+                    var s = qWithout.ToString().Trim().ToLowerInvariant();
+                    if (s == "true" || s == "1" || s == "yes")
+                        return false;
+                }
+
+                if (query.TryGetValue("EarfcnMode", out var q1) && !string.IsNullOrWhiteSpace(q1)) earfcnMode = q1.ToString();
+                else if (query.TryGetValue("earfcn_mode", out var q2) && !string.IsNullOrWhiteSpace(q2)) earfcnMode = q2.ToString();
+                else if (query.TryGetValue("EarfcnOption", out var q3) && !string.IsNullOrWhiteSpace(q3)) earfcnMode = q3.ToString();
+                else if (query.TryGetValue("EarfcnWise", out var q4) && !string.IsNullOrWhiteSpace(q4)) earfcnMode = q4.ToString();
+                else if (query.TryGetValue("earfcn_wise", out var q5) && !string.IsNullOrWhiteSpace(q5)) earfcnMode = q5.ToString();
+                else if (query.TryGetValue("SeparateEarfcn", out var q6) && !string.IsNullOrWhiteSpace(q6)) earfcnMode = q6.ToString();
+            }
+
+            if (!string.IsNullOrWhiteSpace(earfcnMode))
+            {
+                var raw = earfcnMode.Trim().ToLowerInvariant();
+                if (raw.Contains("without") || raw == "false" || raw == "0" || raw == "no")
+                    return false;
+                if (raw.Contains("wise") || raw == "true" || raw == "1" || raw == "yes" || raw == "separate")
+                    return true;
+            }
+
+            // Default to true (earfcn wise) for backward compatibility
+            return true;
         }
 
         private static List<IFormFile> ResolveUploadedFiles(ZipReportUploadRequest request, HttpRequest? httpRequest = null)
@@ -2274,7 +2654,8 @@ namespace SignalTracker.Controllers
             ReportThresholdConfig thresholds,
             bool filterByImageName = true,
             bool showSampleCount = false,
-            string sheetName = "Combined")
+            string sheetName = "Combined",
+            bool earfcnWise = true)
         {
             int numBands = bandBlocks.Count;
             int totalCols = Math.Max(15, numBands * 9);
@@ -2290,7 +2671,7 @@ namespace SignalTracker.Controllers
             const int cellSpan = 6; // Block 1: A-F (cols 0-5), Block 2: J-O (cols 9-14)...
             const int maxWidthEmu = 3_619_500; // ~380 px wide
 
-            var bandDataList = new List<(string DisplayTitle, string BandName, List<WalkTestLogRow> BandRows, int PrimarySessionId, List<(string Header, byte[] FinalBytes, (int WidthEmu, int HeightEmu) Size)> Plots)>();
+            var bandDataList = new List<(string DisplayTitle, string BandName, List<WalkTestLogRow> BandRows, int PrimarySessionId, Dictionary<string, (string Header, byte[] FinalBytes, (int WidthEmu, int HeightEmu) Size)> PlotsByHeader)>();
 
             foreach (var block in bandBlocks)
             {
@@ -2298,55 +2679,97 @@ namespace SignalTracker.Controllers
                 var bandName = block.BandSheetName;
                 var bandRows = block.BandRows;
                 var primarySessionId = bandRows.Select(x => x.SessionId).FirstOrDefault(x => x > 0);
+                var fileIndexes = bandRows.Select(x => x.FileIndex).Distinct().ToList();
+                var sourceFileNames = bandRows.Select(x => x.SourceFileName).Where(s => !string.IsNullOrWhiteSpace(s)).Distinct().ToList();
+                var sessionIds = bandRows.Select(x => x.SessionId).Where(s => s > 0).Distinct().ToList();
+                var candidateBands = bandRows.Select(x => x.Band).Where(b => !string.IsNullOrWhiteSpace(b)).Distinct().ToList();
+
+                // Compute legend statistics log-wise from this log's rows
+                var rowsForLegend = bandRows;
+                if (rowsForLegend.Count == 0) rowsForLegend = allRows;
+
+                int fIdx = fileIndexes.Count == 1 ? fileIndexes[0] : -1;
+                string? sName = sourceFileNames.Count == 1 ? sourceFileNames[0] : null;
 
                 var plotSlots = new (string Header, byte[] FinalBytes, (int WidthEmu, int HeightEmu) Size)?[ImageHeaders.Length];
 
                 Parallel.For(0, ImageHeaders.Length, hIdx =>
                 {
                     var header = ImageHeaders[hIdx];
-                    var mapRawBytes = TryResolveMapImage(imageBytesByUrl, primarySessionId, header, bandName);
+                    var earfcns = bandRows.Select(x => x.Earfcn);
+                    var mapRawBytes = TryResolveMapImage(
+                        imageBytesByUrl,
+                        primarySessionId,
+                        header,
+                        !earfcnWise ? null : bandName,
+                        earfcns,
+                        fileIndex: fIdx,
+                        sourceFileName: sName,
+                        fileIndexes: fileIndexes,
+                        sourceFileNames: sourceFileNames,
+                        sessionIds: sessionIds,
+                        candidateBands: candidateBands);
+
                     if (mapRawBytes != null && mapRawBytes.Length > 0)
                     {
-                        var legendBytes = TryResolveLegendPhoto(imageBytesByUrl, primarySessionId, header, bandRows, thresholds, filterByImageName, showSampleCount);
+                        var legendBytes = TryResolveLegendPhoto(imageBytesByUrl, primarySessionId, header, rowsForLegend, thresholds, filterByImageName, showSampleCount, earfcnWise);
                         var finalBytes  = OverlayLegendOnMap(mapRawBytes, legendBytes);
                         var size        = ScaleToEmu(ReadPngSizePx(finalBytes), maxWidthEmu);
                         plotSlots[hIdx] = (header, finalBytes, size);
                     }
                 });
 
-                var plots = plotSlots
-                    .Where(p => p.HasValue)
-                    .Select(p => p!.Value)
-                    .ToList();
-
-                if (plots.Count > 0)
+                var plotsByHeader = new Dictionary<string, (string Header, byte[] FinalBytes, (int WidthEmu, int HeightEmu) Size)>(StringComparer.OrdinalIgnoreCase);
+                for (int hIdx = 0; hIdx < ImageHeaders.Length; hIdx++)
                 {
-                    bandDataList.Add((displayTitle, bandName, bandRows, primarySessionId, plots));
+                    if (plotSlots[hIdx].HasValue)
+                    {
+                        plotsByHeader[ImageHeaders[hIdx].ToUpperInvariant()] = plotSlots[hIdx]!.Value;
+                    }
+                }
+
+                if (plotsByHeader.Count > 0)
+                {
+                    bandDataList.Add((displayTitle, bandName, bandRows, primarySessionId, plotsByHeader));
                 }
             }
 
             if (bandDataList.Count == 0) return sheet;
 
             int activeBands = bandDataList.Count;
+            if (activeBands != numBands)
+            {
+                totalCols = Math.Max(15, activeBands * 9);
+                columnWidths = new double[totalCols];
+                for (int c = 0; c < totalCols; c++)
+                    columnWidths[c] = (c % 9 >= 6) ? 3.5 : 13.5;
+                sheet.ColumnWidths = columnWidths;
+            }
 
-            // 1. Band Banner Row
+            // 1. Band / Log Banner Row
             var headerRow = new XlsxRow(28);
             for (int c = 0; c < totalCols; c++) headerRow.Cells.Add(XlsxCell.Text(""));
 
             for (int b = 0; b < activeBands; b++)
             {
                 int colStart = b * 9;
-                headerRow.Cells[colStart] = XlsxCell.Text($"Band: {bandDataList[b].DisplayTitle}", 4);
+                headerRow.Cells[colStart] = !earfcnWise
+                    ? (activeBands > 1 ? XlsxCell.Text(bandDataList[b].DisplayTitle, 4) : XlsxCell.Text("Combined Plot", 4))
+                    : XlsxCell.Text($"Band: {bandDataList[b].DisplayTitle}", 4);
             }
             sheet.Rows.Add(headerRow);
             sheet.Rows.Add(XlsxRow.Blank());
 
-            // 2. Maximum number of plots among all active bands
-            int maxPlots = bandDataList.Max(b => b.Plots.Count);
+            // 2. Align KPI plots by header across all columns
+            var headersToRender = ImageHeaders
+                .Where(h => bandDataList.Any(b => b.PlotsByHeader.ContainsKey(h.ToUpperInvariant())))
+                .ToList();
 
-            for (int p = 0; p < maxPlots; p++)
+            foreach (var header in headersToRender)
             {
-                // Title Row for plot p across all bands
+                var hUpper = header.ToUpperInvariant();
+
+                // Title Row for this KPI across all bands/logs
                 var titleRow = new XlsxRow(22);
                 for (int c = 0; c < totalCols; c++) titleRow.Cells.Add(XlsxCell.Text(""));
 
@@ -2354,12 +2777,12 @@ namespace SignalTracker.Controllers
 
                 for (int b = 0; b < activeBands; b++)
                 {
-                    var plots = bandDataList[b].Plots;
-                    if (p < plots.Count)
+                    if (bandDataList[b].PlotsByHeader.TryGetValue(hUpper, out var plot))
                     {
                         int colStart = b * 9;
-                        var plot = plots[p];
-                        titleRow.Cells[colStart] = XlsxCell.Text($"{bandDataList[b].BandName} - {plot.Header} Plot", 4);
+                        titleRow.Cells[colStart] = !earfcnWise
+                            ? XlsxCell.Text($"{plot.Header} Plot", 4)
+                            : XlsxCell.Text($"{bandDataList[b].DisplayTitle} - {plot.Header} Plot", 4);
 
                         double heightPts = plot.Size.HeightEmu / 12700.0;
                         if (heightPts > maxRowHeight) maxRowHeight = heightPts;
@@ -2370,7 +2793,7 @@ namespace SignalTracker.Controllers
                 if (maxRowHeight > 550.0) maxRowHeight = 550.0;
                 if (maxRowHeight < 220.0) maxRowHeight = 220.0;
 
-                // Image Row for plot p across all bands
+                // Image Row for this KPI across all bands/logs
                 int imageRowIdx = sheet.Rows.Count;
                 var imageRow = new XlsxRow(maxRowHeight);
                 for (int c = 0; c < totalCols; c++) imageRow.Cells.Add(XlsxCell.Text(""));
@@ -2378,11 +2801,9 @@ namespace SignalTracker.Controllers
 
                 for (int b = 0; b < activeBands; b++)
                 {
-                    var plots = bandDataList[b].Plots;
-                    if (p < plots.Count)
+                    if (bandDataList[b].PlotsByHeader.TryGetValue(hUpper, out var plot))
                     {
                         int colStart = b * 9;
-                        var plot = plots[p];
                         sheet.Images.Add(new XlsxImage(imageRowIdx, colStart, plot.FinalBytes,
                             plot.Size.WidthEmu, plot.Size.HeightEmu, cellSpanCols: cellSpan));
                     }
@@ -2531,7 +2952,8 @@ namespace SignalTracker.Controllers
             IReadOnlyDictionary<string, byte[]?> imageBytesByUrl,
             ReportThresholdConfig thresholds,
             bool filterByImageName = true,
-            bool showSampleCount = false)
+            bool showSampleCount = false,
+            bool earfcnWise = true)
         {
             var columnWidths = new double[15];
             for (int c = 0; c < 15; c++)
@@ -2547,12 +2969,20 @@ namespace SignalTracker.Controllers
             const int maxWidthEmu = 3_619_500; // ~380 px wide (~4 Excel columns)
 
             var primarySessionId = bandRows.Select(x => x.SessionId).FirstOrDefault(x => x > 0);
+            var earfcns = bandRows.Select(x => x.Earfcn);
+            var fileIndexes = bandRows.Select(x => x.FileIndex).Distinct().ToList();
+            var sourceFileNames = bandRows.Select(x => x.SourceFileName).Where(s => !string.IsNullOrWhiteSpace(s)).Distinct().ToList();
+            var sessionIds = bandRows.Select(x => x.SessionId).Where(s => s > 0).Distinct().ToList();
+            var candidateBands = bandRows.Select(x => x.Band).Where(b => !string.IsNullOrWhiteSpace(b)).Distinct().ToList();
+
+            var rowsForLegend = !earfcnWise ? allRows : bandRows;
+            if (rowsForLegend.Count == 0) rowsForLegend = bandRows;
 
             var validImages = ImageHeaders
                 .Select(header => new
                 {
                     Header = header,
-                    Bytes = TryResolveMapImage(imageBytesByUrl, primarySessionId, header, bandName)
+                    Bytes = TryResolveMapImage(imageBytesByUrl, primarySessionId, header, bandName, earfcns, -1, null, fileIndexes, sourceFileNames, sessionIds, candidateBands)
                 })
                 .Where(x => x.Bytes != null && x.Bytes.Length > 0)
                 .ToList();
@@ -2564,18 +2994,18 @@ namespace SignalTracker.Controllers
 
                 // ── 1. Title row ──────────────────────────────────────────────────────
                 var titleRow = new XlsxRow(22);
-                titleRow.Cells.Add(XlsxCell.Text($"{bandName} - {leftItem.Header} Plot", 4)); // col 0
+                titleRow.Cells.Add(XlsxCell.Text(!earfcnWise ? $"{leftItem.Header} Plot" : $"{bandName} - {leftItem.Header} Plot", 4)); // col 0
                 for (int c = 1; c < 9; c++) titleRow.Cells.Add(XlsxCell.Text(""));            // cols 1-8
                 if (rightItem != null)
                 {
-                    titleRow.Cells.Add(XlsxCell.Text($"{bandName} - {rightItem.Header} Plot", 4)); // col 9
+                    titleRow.Cells.Add(XlsxCell.Text(!earfcnWise ? $"{rightItem.Header} Plot" : $"{bandName} - {rightItem.Header} Plot", 4)); // col 9
                     for (int c = 10; c < 15; c++) titleRow.Cells.Add(XlsxCell.Text(""));           // cols 10-14
                 }
                 sheet.Rows.Add(titleRow);
 
                 // ── 2. Resolve legend photo & overlay onto map image ──────────────────
                 var leftRawBytes    = leftItem.Bytes!;
-                var leftLegendBytes = TryResolveLegendPhoto(imageBytesByUrl, primarySessionId, leftItem.Header, bandRows, thresholds, filterByImageName, showSampleCount);
+                var leftLegendBytes = TryResolveLegendPhoto(imageBytesByUrl, primarySessionId, leftItem.Header, rowsForLegend, thresholds, filterByImageName, showSampleCount, earfcnWise);
                 var leftBytes       = OverlayLegendOnMap(leftRawBytes, leftLegendBytes);
                 var leftSize        = ScaleToEmu(ReadPngSizePx(leftBytes), maxWidthEmu);
 
@@ -2584,7 +3014,7 @@ namespace SignalTracker.Controllers
                 if (rightItem != null)
                 {
                     var rightRawBytes    = rightItem.Bytes!;
-                    var rightLegendBytes = TryResolveLegendPhoto(imageBytesByUrl, primarySessionId, rightItem.Header, bandRows, thresholds, filterByImageName, showSampleCount);
+                    var rightLegendBytes = TryResolveLegendPhoto(imageBytesByUrl, primarySessionId, rightItem.Header, rowsForLegend, thresholds, filterByImageName, showSampleCount, earfcnWise);
                     rightBytes           = OverlayLegendOnMap(rightRawBytes, rightLegendBytes);
                     rightSize            = ScaleToEmu(ReadPngSizePx(rightBytes), maxWidthEmu);
                 }
@@ -2622,29 +3052,191 @@ namespace SignalTracker.Controllers
             IReadOnlyDictionary<string, byte[]?> imageBytesByUrl,
             int primarySessionId,
             string header,
-            string? bandName = null)
+            string? bandName = null,
+            IEnumerable<string?>? earfcns = null,
+            int fileIndex = -1,
+            string? sourceFileName = null,
+            IEnumerable<int>? fileIndexes = null,
+            IEnumerable<string?>? sourceFileNames = null,
+            IEnumerable<int>? sessionIds = null,
+            IEnumerable<string?>? candidateBands = null)
         {
             var headerUpper = header.ToUpperInvariant();
             var headerLower = header.ToLowerInvariant();
             var bandUpper   = (bandName ?? "").ToUpperInvariant().Trim();
 
+            var altHeader = headerUpper switch
+            {
+                "CI" => "CELL_ID",
+                "CELL_ID" => "CI",
+                _ => null
+            };
+
+            var fIndexes = new HashSet<int>();
+            if (fileIndex >= 0) fIndexes.Add(fileIndex);
+            if (fileIndexes != null)
+            {
+                foreach (var fi in fileIndexes)
+                    if (fi >= 0) fIndexes.Add(fi);
+            }
+
+            var sFileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (!string.IsNullOrWhiteSpace(sourceFileName)) sFileNames.Add(sourceFileName);
+            if (sourceFileNames != null)
+            {
+                foreach (var sf in sourceFileNames)
+                    if (!string.IsNullOrWhiteSpace(sf)) sFileNames.Add(sf);
+            }
+
+            var sIds = new HashSet<int>();
+            if (primarySessionId > 0) sIds.Add(primarySessionId);
+            if (sessionIds != null)
+            {
+                foreach (var s in sessionIds)
+                    if (s > 0) sIds.Add(s);
+            }
+
+            var allBands = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (!string.IsNullOrWhiteSpace(bandUpper) && !bandUpper.Equals("COMBINED", StringComparison.OrdinalIgnoreCase) && !bandUpper.Equals("OVERALL", StringComparison.OrdinalIgnoreCase))
+                allBands.Add(bandUpper);
+            if (candidateBands != null)
+            {
+                foreach (var cb in candidateBands)
+                {
+                    if (!string.IsNullOrWhiteSpace(cb))
+                    {
+                        var bClean = cb.Trim().ToUpperInvariant();
+                        if (bClean.StartsWith("BAND", StringComparison.OrdinalIgnoreCase))
+                            bClean = "B" + bClean[4..];
+                        if (Regex.IsMatch(bClean, @"^\d+$"))
+                            bClean = "B" + bClean;
+                        allBands.Add(bClean);
+                    }
+                }
+            }
+
+            // 0. File-specific candidate keys (when multiple files uploaded, highest priority to guarantee isolation)
+            if (fIndexes.Count > 0 || sFileNames.Count > 0)
+            {
+                var fileCandidateKeys = new List<string>();
+
+                foreach (var fIdx in fIndexes)
+                {
+                    foreach (var b in allBands)
+                    {
+                        fileCandidateKeys.Add($"file_{fIdx}_{b}_{headerUpper}");
+                        fileCandidateKeys.Add($"file_{fIdx}_{b}_{headerLower}");
+                        fileCandidateKeys.Add($"idx_{fIdx}_{b}_{headerUpper}");
+                    }
+                    fileCandidateKeys.Add($"file_{fIdx}_{headerUpper}");
+                    fileCandidateKeys.Add($"file_{fIdx}_{headerLower}");
+                    fileCandidateKeys.Add($"file_{fIdx}_map_{headerLower}");
+                    fileCandidateKeys.Add($"idx_{fIdx}_{headerUpper}");
+
+                    if (altHeader != null)
+                    {
+                        fileCandidateKeys.Add($"file_{fIdx}_{altHeader}");
+                        foreach (var b in allBands)
+                            fileCandidateKeys.Add($"file_{fIdx}_{b}_{altHeader}");
+                    }
+
+                    if (earfcns != null)
+                    {
+                        foreach (var earfcn in earfcns.Where(e => !string.IsNullOrWhiteSpace(e) && e != "0" && e != "-1"))
+                        {
+                            var eUpper = earfcn!.Trim().ToUpperInvariant();
+                            fileCandidateKeys.Add($"file_{fIdx}_{eUpper}_{headerUpper}");
+                            foreach (var b in allBands)
+                                fileCandidateKeys.Add($"file_{fIdx}_{eUpper} ({b})_{headerUpper}");
+                        }
+                    }
+                }
+
+                foreach (var sf in sFileNames)
+                {
+                    var sfClean = Path.GetFileNameWithoutExtension(sf).Trim();
+                    var sfUpper = sfClean.ToUpperInvariant();
+                    foreach (var b in allBands)
+                    {
+                        fileCandidateKeys.Add($"{sfUpper}_{b}_{headerUpper}");
+                        fileCandidateKeys.Add($"{sfClean}_{b}_{headerUpper}");
+                    }
+                    fileCandidateKeys.Add($"{sfUpper}_{headerUpper}");
+                    fileCandidateKeys.Add($"{sfClean}_{headerUpper}");
+                    if (altHeader != null)
+                    {
+                        fileCandidateKeys.Add($"{sfUpper}_{altHeader}");
+                        fileCandidateKeys.Add($"{sfClean}_{altHeader}");
+                    }
+                }
+
+                foreach (var key in fileCandidateKeys)
+                {
+                    if (imageBytesByUrl.TryGetValue(key, out var b) && b != null && b.Length > 0)
+                        return b;
+                }
+            }
+
             var candidateKeys = new List<string>();
 
             // 1. Session-specific candidate keys
-            if (primarySessionId > 0)
+            foreach (var sid in sIds)
             {
-                candidateKeys.Add($"{primarySessionId}_{headerUpper}");
-                candidateKeys.Add($"{primarySessionId}_{headerLower}");
-                candidateKeys.Add(BuildImageUrl(primarySessionId, header));
-                candidateKeys.Add($"{ImageBaseUrl}/{primarySessionId}_{headerUpper}.png");
-                candidateKeys.Add($"{ImageBaseUrl}/{primarySessionId}_{headerLower}.png");
+                foreach (var b in allBands)
+                {
+                    candidateKeys.Add($"{sid}_{b}_{headerUpper}");
+                    candidateKeys.Add($"{sid}_{b}_{headerLower}");
+                }
+                candidateKeys.Add($"{sid}_{headerUpper}");
+                candidateKeys.Add($"{sid}_{headerLower}");
+                candidateKeys.Add(BuildImageUrl(sid, header));
+                candidateKeys.Add($"{ImageBaseUrl}/{sid}_{headerUpper}.png");
+                candidateKeys.Add($"{ImageBaseUrl}/{sid}_{headerLower}.png");
             }
 
             // 2. Band-specific candidate keys
-            if (!string.IsNullOrWhiteSpace(bandUpper))
+            foreach (var b in allBands)
             {
-                candidateKeys.Add($"{bandUpper}_{headerUpper}");
-                candidateKeys.Add($"{bandUpper}_{headerLower}");
+                candidateKeys.Add($"{b}_{headerUpper}");
+                candidateKeys.Add($"{b}_{headerLower}");
+                if (primarySessionId > 0)
+                {
+                    candidateKeys.Add($"{primarySessionId}_{b}_{headerUpper}");
+                    candidateKeys.Add($"{primarySessionId}_{b}_{headerLower}");
+                }
+
+                var parenMatch = Regex.Match(b, @"^(\d+)\s*\(([^)]+)\)$");
+                if (parenMatch.Success)
+                {
+                    var ePart = parenMatch.Groups[1].Value.Trim();
+                    var bPart = parenMatch.Groups[2].Value.Trim();
+                    candidateKeys.Add($"{bPart}_{headerUpper}");
+                    candidateKeys.Add($"{ePart}_{headerUpper}");
+                    if (primarySessionId > 0)
+                    {
+                        candidateKeys.Add($"{primarySessionId}_{bPart}_{headerUpper}");
+                        candidateKeys.Add($"{primarySessionId}_{ePart}_{headerUpper}");
+                    }
+                }
+            }
+
+            // 3. EARFCN candidate keys
+            if (earfcns != null)
+            {
+                var distinctEarfcns = earfcns.Where(e => !string.IsNullOrWhiteSpace(e) && e != "0" && e != "-1").Distinct(StringComparer.OrdinalIgnoreCase);
+                foreach (var earfcn in distinctEarfcns)
+                {
+                    var eUpper = earfcn!.Trim().ToUpperInvariant();
+                    candidateKeys.Add($"{eUpper}_{headerUpper}");
+                    foreach (var b in allBands)
+                    {
+                        candidateKeys.Add($"{eUpper} ({b})_{headerUpper}");
+                    }
+                    if (primarySessionId > 0)
+                    {
+                        candidateKeys.Add($"{primarySessionId}_{eUpper}_{headerUpper}");
+                    }
+                }
             }
 
             foreach (var key in candidateKeys)
@@ -2653,14 +3245,7 @@ namespace SignalTracker.Controllers
                     return b;
             }
 
-            // 3. Alt header candidate keys (e.g. CI <-> CELL_ID) for this session/band
-            var altHeader = headerUpper switch
-            {
-                "CI" => "CELL_ID",
-                "CELL_ID" => "CI",
-                _ => null
-            };
-
+            // 4. Alt header candidate keys (e.g. CI <-> CELL_ID) for this session/band
             if (altHeader != null)
             {
                 var altKeys = new List<string>();
@@ -2673,6 +3258,10 @@ namespace SignalTracker.Controllers
                 if (!string.IsNullOrWhiteSpace(bandUpper))
                 {
                     altKeys.Add($"{bandUpper}_{altHeader}");
+                    if (primarySessionId > 0)
+                    {
+                        altKeys.Add($"{primarySessionId}_{bandUpper}_{altHeader}");
+                    }
                 }
 
                 foreach (var key in altKeys)
@@ -2682,8 +3271,10 @@ namespace SignalTracker.Controllers
                 }
             }
 
-            // 4. Global header candidate keys (only if no primarySessionId specified, e.g. single zip without session id)
-            if (primarySessionId <= 0)
+            // 5. Global header candidate keys
+            // Only allow fallback to global keys if not isolating to a specific non-zero file index
+            bool allowGlobalFallback = fIndexes.Count == 0 || (!fIndexes.Any(fi => fi > 0));
+            if (allowGlobalFallback)
             {
                 var globalKeys = new[]
                 {
@@ -2712,9 +3303,10 @@ namespace SignalTracker.Controllers
             List<WalkTestLogRow> bandRows,
             ReportThresholdConfig thresholds,
             bool filterByImageName = true,
-            bool showSampleCount = false)
+            bool showSampleCount = false,
+            bool earfcnWise = true)
         {
-            return GenerateLegendPng(header, bandRows, thresholds, filterByImageName, showSampleCount);
+            return GenerateLegendPng(header, bandRows, thresholds, filterByImageName, showSampleCount, earfcnWise);
         }
 
         private static void AddBlackFrame(Image<Rgba32> img, int thickness = 12)
@@ -2891,6 +3483,25 @@ namespace SignalTracker.Controllers
                             (blerStr.Equals("High", StringComparison.OrdinalIgnoreCase) && r.Range.Min >= 10));
                     }
 
+                    if (match == null && headerUpper == "EARFCN")
+                    {
+                        var earfcnStr = (x.Earfcn ?? "").Trim();
+                        var resolvedBand = ResolveBandFromEarfcn(earfcnStr) ?? (x.Band ?? "").Trim();
+                        match = result.FirstOrDefault(r =>
+                            (!string.IsNullOrWhiteSpace(r.Range.ValueMatch) && (
+                                r.Range.ValueMatch.Equals(earfcnStr, StringComparison.OrdinalIgnoreCase) ||
+                                r.Range.ValueMatch.Equals(resolvedBand, StringComparison.OrdinalIgnoreCase) ||
+                                (x.Band != null && r.Range.ValueMatch.Equals(x.Band.Trim(), StringComparison.OrdinalIgnoreCase)))) ||
+                            (!string.IsNullOrWhiteSpace(r.Range.Label) && (
+                                r.Range.Label.Equals(earfcnStr, StringComparison.OrdinalIgnoreCase) ||
+                                r.Range.Label.Equals(resolvedBand, StringComparison.OrdinalIgnoreCase) ||
+                                (x.Band != null && r.Range.Label.Equals(x.Band.Trim(), StringComparison.OrdinalIgnoreCase)) ||
+                                r.Range.Label.Contains(earfcnStr, StringComparison.OrdinalIgnoreCase))) ||
+                            (!string.IsNullOrWhiteSpace(r.Range.Display) && (
+                                r.Range.Display.Contains(earfcnStr, StringComparison.OrdinalIgnoreCase) ||
+                                r.Range.Display.Contains(resolvedBand, StringComparison.OrdinalIgnoreCase))));
+                    }
+
                     if (match != null)
                     {
                         match.Count++;
@@ -3062,17 +3673,16 @@ namespace SignalTracker.Controllers
                 if (Min < Max)
                     return val >= Min && val < Max;
 
-                return val >= Max && val < Min;
+                return val > Max && val <= Min;
             }
 
             public bool ContainsInclusive(double val)
             {
                 var lower = Math.Min(Min, Max);
                 var upper = Math.Max(Min, Max);
-                return val >= lower && val <= upper;
+                return val > lower && val <= upper;
             }
         }
-
         public sealed class ReportThresholdConfig
         {
             public string Source { get; set; } = "Hardcoded";
@@ -3508,7 +4118,8 @@ namespace SignalTracker.Controllers
             List<WalkTestLogRow>? allRows = null,
             ReportThresholdConfig? thresholds = null,
             bool filterByImageName = true,
-            bool showSampleCount = false)
+            bool showSampleCount = false,
+            bool earfcnWise = true)
         {
             thresholds ??= ReportThresholdConfig.Hardcoded();
             allRows ??= new List<WalkTestLogRow>();
@@ -3565,27 +4176,17 @@ namespace SignalTracker.Controllers
                         ? $"{headerUpper} {valDisplay}  ({valCount} | {pct:0.00}%)"
                         : $"{headerUpper} {valDisplay}  ({pct:0.00}%)";
 
-                    // Strict color lookup:
-                    // 1. For discrete IDs (CI, PCI, NodeB ID): from Image Name (MetricColors) of matching rows
-                    string? hexColor = null;
-                    if (!isEarfcn)
-                    {
-                        hexColor = GetHexColorFromRows(matchingRows, headerUpper);
-                    }
+                    // Color lookup:
+                    // 1. From Image Name (MetricColors) of matching rows (image_plot / image_name)
+                    string? hexColor = GetHexColorFromRows(matchingRows, headerUpper);
 
-                    // 2. From ColorSettings / thresholds (for EARFCN and fallback for others)
-                    if (string.IsNullOrWhiteSpace(hexColor))
+                    // 2. From ColorSettings / thresholds (only for non-EARFCN discrete IDs like CI, PCI, NodeB ID fallback)
+                    if (string.IsNullOrWhiteSpace(hexColor) && !isEarfcn)
                     {
                         hexColor = thresholds.GetColorForValue(headerUpper, val);
                     }
 
-                    // 3. Fallback to image_plot MetricColors if EARFCN
-                    if (string.IsNullOrWhiteSpace(hexColor) && isEarfcn)
-                    {
-                        hexColor = GetHexColorFromRows(matchingRows, headerUpper);
-                    }
-
-                    // 4. Fallback to distinct palette color per unique value
+                    // 3. Fallback to distinct palette color per unique value (for EARFCN and others)
                     if (string.IsNullOrWhiteSpace(hexColor))
                     {
                         var palette = new[]
@@ -3612,7 +4213,9 @@ namespace SignalTracker.Controllers
                 {
                     var hexColor = !string.IsNullOrWhiteSpace(stat.Range.ColorHex) ? stat.Range.ColorHex : "#808080";
                     var (r, g, b) = ParseHexColor(hexColor);
-                    var rangeDisplay = isEarfcn ? stat.Range.Display : stat.Range.RangeOnlyDisplay;
+                    var rangeDisplay = isEarfcn
+                        ? (!string.IsNullOrWhiteSpace(stat.Range.Display) ? stat.Range.Display : (!string.IsNullOrWhiteSpace(stat.Range.Label) ? stat.Range.Label : stat.Range.RangeOnlyDisplay))
+                        : stat.Range.RangeOnlyDisplay;
                     if (string.IsNullOrWhiteSpace(rangeDisplay)) rangeDisplay = stat.Range.Display;
 
                     string label = showSampleCount
@@ -3857,7 +4460,7 @@ namespace SignalTracker.Controllers
             };
         }
 
-        private static string ToBandSheetName(string? band, string? network, string? earfcn = null, string? primaryCellInfo = null)
+        private static string ToBandSheetName(string? band, string? network, string? earfcn = null, string? primaryCellInfo = null, bool earfcnWise = false)
         {
             var value = (band ?? string.Empty).Trim();
 
@@ -3868,6 +4471,16 @@ namespace SignalTracker.Controllers
                                  value.Equals("Unknown Band", StringComparison.OrdinalIgnoreCase) ||
                                  value.Equals("null", StringComparison.OrdinalIgnoreCase);
 
+            if (isInvalidBand && !string.IsNullOrWhiteSpace(earfcn))
+            {
+                var resolved = ResolveBandFromEarfcn(earfcn);
+                if (!string.IsNullOrWhiteSpace(resolved))
+                {
+                    value = resolved;
+                    isInvalidBand = false;
+                }
+            }
+
             if (isInvalidBand)
             {
                 return "Unknown Band";
@@ -3876,19 +4489,31 @@ namespace SignalTracker.Controllers
             value = value.Replace("LTE", "", StringComparison.OrdinalIgnoreCase).Trim();
             value = Regex.Replace(value, @"\s+", "");
 
+            string resolvedBandName;
             if (Regex.IsMatch(value, @"^[BbNn]\d+[A-Za-z]?$"))
-                return value.StartsWith("n", StringComparison.OrdinalIgnoreCase)
+                resolvedBandName = value.StartsWith("n", StringComparison.OrdinalIgnoreCase)
                     ? "n" + value[1..]
                     : "B" + value[1..];
-
-            var match = Regex.Match(value, @"\d+");
-            if (match.Success)
+            else
             {
-                var prefix = (network != null && (network.Contains("5G", StringComparison.OrdinalIgnoreCase) || network.Contains("NR", StringComparison.OrdinalIgnoreCase))) ? "n" : "B";
-                return $"{prefix}{match.Value}";
+                var match = Regex.Match(value, @"\d+");
+                if (match.Success)
+                {
+                    var prefix = (network != null && (network.Contains("5G", StringComparison.OrdinalIgnoreCase) || network.Contains("NR", StringComparison.OrdinalIgnoreCase))) ? "n" : "B";
+                    resolvedBandName = $"{prefix}{match.Value}";
+                }
+                else
+                {
+                    resolvedBandName = value.Length <= 31 ? value : value[..31];
+                }
             }
 
-            return value.Length <= 31 ? value : value[..31];
+            if (earfcnWise && !string.IsNullOrWhiteSpace(earfcn) && earfcn != "0" && earfcn != "-1")
+            {
+                return $"{earfcn.Trim()} ({resolvedBandName})";
+            }
+
+            return resolvedBandName;
         }
 
         private static string FormatBandValue(int? band)
@@ -3933,6 +4558,8 @@ namespace SignalTracker.Controllers
             public string? Mode { get; set; }
             public bool? FilterByImageName { get; set; }
             public string? ImageFilter { get; set; }
+            public string? EarfcnMode { get; set; }
+            public bool? EarfcnWise { get; set; }
         }
 
         private sealed class WalkTestLogRow
@@ -3942,6 +4569,8 @@ namespace SignalTracker.Controllers
             public DateTime? Timestamp { get; set; }
             public float? Lat { get; set; }
             public float? Lon { get; set; }
+            public float? X { get; set; }
+            public float? Y { get; set; }
             public string? IndoorOutdoor { get; set; }
             public string? Network { get; set; }
             public string? Provider { get; set; }

@@ -1124,6 +1124,12 @@ namespace SignalTracker.Controllers
         public List<IFormFile>? LogZips { get; set; }
 
         public long? SessionIdOverride { get; set; }
+
+        /// <summary>
+        /// Optional EARFCN grouping mode: "earfcn_wise" (default) or "without_earfcn_wise".
+        /// </summary>
+        public string? EarfcnMode { get; set; }
+        public bool? EarfcnWise { get; set; }
     }
 
     public sealed class ZipReportUploadRequest
@@ -1150,5 +1156,13 @@ namespace SignalTracker.Controllers
 
         // Optional multi-select form binding: send Bands=B3&Bands=B8 or Bands=B3,B8.
         public List<string>? Bands { get; set; }
+
+        /// <summary>
+        /// Optional EARFCN grouping mode:
+        /// "earfcn_wise" (default / true) = separate blocks/sheets by EARFCN; EARFCN plot uses unique values.
+        /// "without_earfcn_wise" (false) = do not separate by EARFCN; EARFCN plot uses ColorSettings range.
+        /// </summary>
+        public string? EarfcnMode { get; set; }
+        public bool? EarfcnWise { get; set; }
     }
 }
