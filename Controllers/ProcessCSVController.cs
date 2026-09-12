@@ -1984,10 +1984,10 @@ public IActionResult UploadSitePrediction(
             cmd.CommandText = @"
                 INSERT INTO tbl_event_log
                     (tbl_upload_id, session_id, source_file_name, row_no, timestamp_text, latitude, longitude,
-                     category, event_name, detail, cause, source, severity, raw_json)
+                     category, direction, channel, event_name, detail, cause, source, severity, raw_json)
                 VALUES
                     (@uploadId, @sessionId, @fileName, @rowNo, @timestampText, @latitude, @longitude,
-                     @category, @eventName, @detail, @cause, @source, @severity, @rawJson);";
+                     @category, @direction, @channel, @eventName, @detail, @cause, @source, @severity, @rawJson);";
             AddDiagnosticParam(cmd, "@uploadId", excelId);
             AddDiagnosticParam(cmd, "@sessionId", sessionId);
             AddDiagnosticParam(cmd, "@fileName", fileName);
@@ -1996,6 +1996,8 @@ public IActionResult UploadSitePrediction(
             AddDiagnosticParam(cmd, "@latitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "latitude", "lat")));
             AddDiagnosticParam(cmd, "@longitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "longitude", "lon", "lng")));
             AddDiagnosticParam(cmd, "@category", GetDiagnosticValue(row, "category"));
+            AddDiagnosticParam(cmd, "@direction", GetDiagnosticValue(row, "direction", "dir", "call_direction"));
+            AddDiagnosticParam(cmd, "@channel", GetDiagnosticValue(row, "channel", "chan", "channel_name", "channel_number", "earfcn"));
             var eventName = GetDiagnosticValue(row, "event", "event_name", "message");
             AddDiagnosticParam(cmd, "@eventName", eventName);
             var detail = GetDiagnosticValue(row, "detail", "description");
@@ -2014,10 +2016,10 @@ public IActionResult UploadSitePrediction(
             cmd.CommandText = @"
                 INSERT INTO tbl_l3_log
                     (tbl_upload_id, session_id, source_file_name, source_file_type, row_no, timestamp_text, latitude, longitude,
-                     category, message, detail, cause, source, severity, raw_text, raw_json)
+                     category, direction, channel, message, detail, cause, source, severity, raw_text, raw_json)
                 VALUES
                     (@uploadId, @sessionId, @fileName, @sourceFileType, @rowNo, @timestampText, @latitude, @longitude,
-                     @category, @message, @detail, @cause, @source, @severity, @rawText, @rawJson);";
+                     @category, @direction, @channel, @message, @detail, @cause, @source, @severity, @rawText, @rawJson);";
             AddDiagnosticParam(cmd, "@uploadId", excelId);
             AddDiagnosticParam(cmd, "@sessionId", sessionId);
             AddDiagnosticParam(cmd, "@fileName", fileName);
@@ -2034,6 +2036,8 @@ public IActionResult UploadSitePrediction(
             AddDiagnosticParam(cmd, "@latitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "latitude", "lat")));
             AddDiagnosticParam(cmd, "@longitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "longitude", "lon", "lng")));
             AddDiagnosticParam(cmd, "@category", category);
+            AddDiagnosticParam(cmd, "@direction", GetDiagnosticValue(row, "direction", "dir", "call_direction"));
+            AddDiagnosticParam(cmd, "@channel", GetDiagnosticValue(row, "channel", "chan", "channel_name", "channel_number", "earfcn"));
             AddDiagnosticParam(cmd, "@message", message);
             AddDiagnosticParam(cmd, "@detail", storedDetail);
             AddDiagnosticParam(cmd, "@cause", ExtractDiagnosticCause(storedDetail, storedRawText));
@@ -2314,6 +2318,8 @@ public IActionResult UploadSitePrediction(
                         latitude DOUBLE NULL,
                         longitude DOUBLE NULL,
                         category VARCHAR(128) NULL,
+                        direction VARCHAR(64) NULL,
+                        channel VARCHAR(128) NULL,
                         message VARCHAR(512) NULL,
                         detail LONGTEXT NULL,
                         cause VARCHAR(255) NULL,
@@ -2340,6 +2346,8 @@ public IActionResult UploadSitePrediction(
                         latitude DOUBLE NULL,
                         longitude DOUBLE NULL,
                         category VARCHAR(128) NULL,
+                        direction VARCHAR(64) NULL,
+                        channel VARCHAR(128) NULL,
                         event_name VARCHAR(512) NULL,
                         detail LONGTEXT NULL,
                         cause VARCHAR(255) NULL,
@@ -2354,6 +2362,10 @@ public IActionResult UploadSitePrediction(
 
                 EnsureColumn("tbl_l3_log", "cause", "VARCHAR(255) NULL");
                 EnsureColumn("tbl_event_log", "cause", "VARCHAR(255) NULL");
+                EnsureColumn("tbl_l3_log", "direction", "VARCHAR(64) NULL");
+                EnsureColumn("tbl_l3_log", "channel", "VARCHAR(128) NULL");
+                EnsureColumn("tbl_event_log", "direction", "VARCHAR(64) NULL");
+                EnsureColumn("tbl_event_log", "channel", "VARCHAR(128) NULL");
 
                 using var history = conn.CreateCommand();
                 history.Transaction = db.Database.CurrentTransaction?.GetDbTransaction();
