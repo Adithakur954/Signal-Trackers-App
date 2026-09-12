@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -973,6 +973,9 @@ public IActionResult UploadSitePrediction(
                     });
 
 
+                    if (fileType == 1 && IsValidSheet)
+                        InvalidateNetworkLogCachesBestEffort();
+
                     if (IsValidSheet && imageList.Count > 0)
                     {
                         var imgpath = Path.Combine(Directory.GetCurrentDirectory(), "UploadedExcels", "Images_" + sessionId);
@@ -1594,7 +1597,8 @@ public IActionResult UploadSitePrediction(
                     // for minutes and cause MySQL lock wait timeouts. Keep the raw
                     // upload fast and let reports/read APIs handle missing labels.
                     // Apply5GAlphaAndBandFillRules(sessionId);
-	                InvalidateNetworkLogCachesBestEffort();
+	                if (outerTx == null)
+                        InvalidateNetworkLogCachesBestEffort();
 	            }
 	            else
 	            {
@@ -1740,29 +1744,6 @@ public IActionResult UploadSitePrediction(
                 : null;
         }
 
-        private static string? ExtractDiagnosticCause(params string?[] texts)
-        {
-            foreach (var text in texts)
-            {
-                if (string.IsNullOrWhiteSpace(text))
-                    continue;
-
-                foreach (var pattern in DiagnosticCausePatterns)
-                {
-                    var match = Regex.Match(text, pattern, RegexOptions.IgnoreCase);
-                    if (!match.Success)
-                        continue;
-
-                    var cause = Regex.Replace(match.Groups["cause"].Value, @"\s+", " ").Trim();
-                    cause = cause.Trim(' ', '.', ',', ';', '|', '}', ']', ')', '"', '\'');
-                    if (!string.IsNullOrWhiteSpace(cause))
-                        return cause.Length > 255 ? cause[..255] : cause;
-                }
-            }
-
-            return null;
-        }
-
         private static string? ExtractEventDiagnosticCause(string? eventName, string? detail)
         {
             if (string.IsNullOrWhiteSpace(detail))
@@ -1817,14 +1798,6 @@ public IActionResult UploadSitePrediction(
             };
         }
 
-        private static readonly string[] DiagnosticCausePatterns =
-        {
-            @"\besmCause\s*[:=]\s*(?<cause>[^|,;\r\n]+)",
-            @"\bgetDisconnectCause\s*:\s*cause\s*=\s*(?<cause>[^|,;\s}\]\)]+)",
-            @"\b(?:disconnectCause|releaseCause|failureCause|rejectCause|restrictCause|mRestrictCause)\s*[:=]\s*(?<cause>[^|,;\s}\]\)]+)",
-            @"(?:^|[^\w])\.?cause\s*[:=]\s*(?<cause>[^|,;\s}\]\)]+)"
-        };
-
         private void AddDiagnosticParam(IDbCommand cmd, string name, object? value)
         {
             var param = cmd.CreateParameter();
@@ -1834,63 +1807,31 @@ public IActionResult UploadSitePrediction(
         }
 
         private bool ProcessEventDiagnosticFile(int sessionId, int excelId, string filePath, ref int rowInserted, out List<string> errorList)
-        {
-            errorList = new List<string>();
-            var fileName = Path.GetFileName(filePath);
-
-            try
-            {
-                using var reader = new StreamReader(filePath);
-                using var csv = new CsvReader(reader, new CsvConfiguration(CultureInfo.InvariantCulture)
-                {
-                    BadDataFound = null,
-                    MissingFieldFound = null,
-                    HeaderValidated = null,
-                    DetectColumnCountChanges = false
-                });
-
-                var rowNo = 0;
-                var storedRows = 0;
-                foreach (var record in csv.GetRecords<dynamic>())
-                {
-                    rowNo++;
-                    var row = NormalizeDiagnosticRow((IDictionary<string, object?>)record);
-                    if (ShouldSkipEventDiagnosticRow(row))
-                        continue;
-
-                    InsertEventDiagnosticRow(sessionId, excelId, fileName, rowNo, row);
-                    rowInserted++;
-                    storedRows++;
-                }
-
-                if (rowNo == 0 || storedRows == 0)
-                {
-                    errorList.Add($"{fileName} event import warning: no Event diagnostic rows were stored.");
-                    return false;
-                }
-
-                return true;
-            }
-            catch (Exception ex)
-            {
-                errorList.Add($"{fileName} event import error: {SafeException.GetInnermost(ex)}");
-                return false;
-            }
-        }
+            => ProcessDiagnosticCsvFile(sessionId, excelId, filePath, false, ref rowInserted, out errorList);
 
         private bool ProcessL3DiagnosticFile(int sessionId, int excelId, string filePath, ref int rowInserted, out List<string> errorList)
         {
+            if (string.Equals(Path.GetExtension(filePath), ".txt", StringComparison.OrdinalIgnoreCase))
+            {
+                // Keep the existing CSV-only import behavior for large text dumps.
+                errorList = new List<string>();
+                return true;
+            }
+            return ProcessDiagnosticCsvFile(sessionId, excelId, filePath, true, ref rowInserted, out errorList);
+        }
+
+        private bool ProcessDiagnosticCsvFile(int sessionId, int excelId, string filePath, bool isL3, ref int rowInserted, out List<string> errorList)
+        {
             errorList = new List<string>();
             var fileName = Path.GetFileName(filePath);
-
+            var kind = isL3 ? "L3" : "Event";
+            DiagnosticInsertBatch? batch = null;
             try
             {
-                if (string.Equals(Path.GetExtension(filePath), ".txt", StringComparison.OrdinalIgnoreCase))
-                {
-                    // L3 message text dumps are very large and are intentionally not stored.
-                    return true;
-                }
-
+                batch = new DiagnosticInsertBatch(db.Database.GetDbConnection(),
+                    db.Database.CurrentTransaction?.GetDbTransaction(),
+                    isL3 ? "tbl_l3_log" : "tbl_event_log",
+                    isL3 ? L3DiagnosticColumns : EventDiagnosticColumns);
                 using var reader = new StreamReader(filePath);
                 using var csv = new CsvReader(reader, new CsvConfiguration(CultureInfo.InvariantCulture)
                 {
@@ -1899,28 +1840,35 @@ public IActionResult UploadSitePrediction(
                     HeaderValidated = null,
                     DetectColumnCountChanges = false
                 });
-
                 var rowNo = 0;
                 foreach (var record in csv.GetRecords<dynamic>())
                 {
                     rowNo++;
                     var row = NormalizeDiagnosticRow((IDictionary<string, object?>)record);
-                    InsertL3DiagnosticRow(sessionId, excelId, fileName, rowNo, "csv", row, null);
-                    rowInserted++;
+                    if (!isL3 && ShouldSkipEventDiagnosticRow(row)) continue;
+                    batch.Add(isL3
+                        ? BuildL3DiagnosticValues(sessionId, excelId, fileName, rowNo, "csv", row, null)
+                        : BuildEventDiagnosticValues(sessionId, excelId, fileName, rowNo, row));
                 }
-
-                if (rowNo == 0)
+                batch.Flush();
+                if (batch.RowsWritten == 0)
                 {
-                    errorList.Add($"{fileName} L3 import warning: file contains headers only; no L3 rows were stored.");
+                    errorList.Add($"{fileName} {kind} import warning: no {kind} diagnostic rows were stored.");
                     return false;
                 }
-
                 return true;
             }
             catch (Exception ex)
             {
-                errorList.Add($"{fileName} L3 import error: {SafeException.GetInnermost(ex)}");
+                // Let the existing upload transaction retry transient database failures.
+                if (IsTransientDbException(ex)) throw;
+                errorList.Add($"{fileName} {kind} import error: {SafeException.GetInnermost(ex)}");
                 return false;
+            }
+            finally
+            {
+                // Include only successful batches, even if a later batch failed.
+                rowInserted += batch?.RowsWritten ?? 0;
             }
         }
 
@@ -1977,75 +1925,50 @@ public IActionResult UploadSitePrediction(
             return records;
         }
 
-        private void InsertEventDiagnosticRow(int sessionId, int excelId, string fileName, int rowNo, Dictionary<string, object?> row)
+        private static readonly string[] EventDiagnosticColumns =
         {
-            using var cmd = db.Database.GetDbConnection().CreateCommand();
-            cmd.Transaction = db.Database.CurrentTransaction?.GetDbTransaction();
-            cmd.CommandText = @"
-                INSERT INTO tbl_event_log
-                    (tbl_upload_id, session_id, source_file_name, row_no, timestamp_text, latitude, longitude,
-                     category, direction, channel, event_name, detail, cause, source, severity, raw_json)
-                VALUES
-                    (@uploadId, @sessionId, @fileName, @rowNo, @timestampText, @latitude, @longitude,
-                     @category, @direction, @channel, @eventName, @detail, @cause, @source, @severity, @rawJson);";
-            AddDiagnosticParam(cmd, "@uploadId", excelId);
-            AddDiagnosticParam(cmd, "@sessionId", sessionId);
-            AddDiagnosticParam(cmd, "@fileName", fileName);
-            AddDiagnosticParam(cmd, "@rowNo", rowNo);
-            AddDiagnosticParam(cmd, "@timestampText", GetDiagnosticValue(row, "timestamp", "time"));
-            AddDiagnosticParam(cmd, "@latitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "latitude", "lat")));
-            AddDiagnosticParam(cmd, "@longitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "longitude", "lon", "lng")));
-            AddDiagnosticParam(cmd, "@category", GetDiagnosticValue(row, "category"));
-            AddDiagnosticParam(cmd, "@direction", GetDiagnosticValue(row, "direction", "dir", "call_direction"));
-            AddDiagnosticParam(cmd, "@channel", GetDiagnosticValue(row, "channel", "chan", "channel_name", "channel_number", "earfcn"));
+            "tbl_upload_id", "session_id", "source_file_name", "row_no", "timestamp_text", "latitude", "longitude",
+            "category", "direction", "channel", "event_name", "detail", "cause", "source", "severity", "raw_json"
+        };
+
+        private static readonly string[] L3DiagnosticColumns =
+        {
+            "tbl_upload_id", "session_id", "source_file_name", "source_file_type", "row_no", "timestamp_text", "latitude", "longitude",
+            "category", "direction", "channel", "message", "detail", "cause", "source", "severity", "raw_text", "raw_json"
+        };
+
+        private static object?[] BuildEventDiagnosticValues(int sessionId, int excelId, string fileName, int rowNo, Dictionary<string, object?> row)
+        {
             var eventName = GetDiagnosticValue(row, "event", "event_name", "message");
-            AddDiagnosticParam(cmd, "@eventName", eventName);
-            var detail = GetDiagnosticValue(row, "detail", "description");
-            AddDiagnosticParam(cmd, "@detail", detail);
-            AddDiagnosticParam(cmd, "@cause", ExtractEventDiagnosticCause(eventName, detail));
-            AddDiagnosticParam(cmd, "@source", GetDiagnosticValue(row, "source"));
-            AddDiagnosticParam(cmd, "@severity", GetDiagnosticValue(row, "severity", "level"));
-            AddDiagnosticParam(cmd, "@rawJson", DBNull.Value);
-            cmd.ExecuteNonQuery();
+            var detail = GetDiagnosticValue(row, "detail", "details", "description", "info", "value", "data");
+            var fields = DiagnosticFieldParser.Resolve(row, detail, eventCause: ExtractEventDiagnosticCause(eventName, detail));
+            return new object?[]
+            {
+                excelId, sessionId, fileName, rowNo, GetDiagnosticValue(row, "timestamp", "time"),
+                ParseDiagnosticDouble(GetDiagnosticValue(row, "latitude", "lat")),
+                ParseDiagnosticDouble(GetDiagnosticValue(row, "longitude", "lon", "lng")),
+                GetDiagnosticValue(row, "category"), fields.Direction, fields.Channel, eventName, detail, fields.Cause,
+                GetDiagnosticValue(row, "source"), GetDiagnosticValue(row, "severity", "level"), null
+            };
         }
 
-        private void InsertL3DiagnosticRow(int sessionId, int excelId, string fileName, int rowNo, string sourceFileType, Dictionary<string, object?> row, string? rawText)
+        private static object?[] BuildL3DiagnosticValues(int sessionId, int excelId, string fileName, int rowNo, string sourceFileType, Dictionary<string, object?> row, string? rawText)
         {
-            using var cmd = db.Database.GetDbConnection().CreateCommand();
-            cmd.Transaction = db.Database.CurrentTransaction?.GetDbTransaction();
-            cmd.CommandText = @"
-                INSERT INTO tbl_l3_log
-                    (tbl_upload_id, session_id, source_file_name, source_file_type, row_no, timestamp_text, latitude, longitude,
-                     category, direction, channel, message, detail, cause, source, severity, raw_text, raw_json)
-                VALUES
-                    (@uploadId, @sessionId, @fileName, @sourceFileType, @rowNo, @timestampText, @latitude, @longitude,
-                     @category, @direction, @channel, @message, @detail, @cause, @source, @severity, @rawText, @rawJson);";
-            AddDiagnosticParam(cmd, "@uploadId", excelId);
-            AddDiagnosticParam(cmd, "@sessionId", sessionId);
-            AddDiagnosticParam(cmd, "@fileName", fileName);
-            AddDiagnosticParam(cmd, "@sourceFileType", sourceFileType);
-            AddDiagnosticParam(cmd, "@rowNo", rowNo);
             var category = GetDiagnosticValue(row, "category");
             var message = GetDiagnosticValue(row, "message", "event", "message_name");
-            var detail = GetDiagnosticValue(row, "detail", "description");
+            var detail = GetDiagnosticValue(row, "detail", "details", "description", "decode", "decoded", "decoded_text", "text", "content", "info");
+            var fields = DiagnosticFieldParser.Resolve(row, detail, rawText);
             var decodedNrRrcSummary = NrRrcOtaDecoder.TryDecodeSummary(category, message, detail, rawText, sourceFileType);
             var storedDetail = decodedNrRrcSummary ?? detail;
             var storedRawText = decodedNrRrcSummary ?? rawText;
-
-            AddDiagnosticParam(cmd, "@timestampText", GetDiagnosticValue(row, "timestamp", "time"));
-            AddDiagnosticParam(cmd, "@latitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "latitude", "lat")));
-            AddDiagnosticParam(cmd, "@longitude", ParseDiagnosticDouble(GetDiagnosticValue(row, "longitude", "lon", "lng")));
-            AddDiagnosticParam(cmd, "@category", category);
-            AddDiagnosticParam(cmd, "@direction", GetDiagnosticValue(row, "direction", "dir", "call_direction"));
-            AddDiagnosticParam(cmd, "@channel", GetDiagnosticValue(row, "channel", "chan", "channel_name", "channel_number", "earfcn"));
-            AddDiagnosticParam(cmd, "@message", message);
-            AddDiagnosticParam(cmd, "@detail", storedDetail);
-            AddDiagnosticParam(cmd, "@cause", ExtractDiagnosticCause(storedDetail, storedRawText));
-            AddDiagnosticParam(cmd, "@source", GetDiagnosticValue(row, "source"));
-            AddDiagnosticParam(cmd, "@severity", GetDiagnosticValue(row, "severity", "level"));
-            AddDiagnosticParam(cmd, "@rawText", storedRawText);
-            AddDiagnosticParam(cmd, "@rawJson", DBNull.Value);
-            cmd.ExecuteNonQuery();
+            return new object?[]
+            {
+                excelId, sessionId, fileName, sourceFileType, rowNo, GetDiagnosticValue(row, "timestamp", "time"),
+                ParseDiagnosticDouble(GetDiagnosticValue(row, "latitude", "lat")),
+                ParseDiagnosticDouble(GetDiagnosticValue(row, "longitude", "lon", "lng")),
+                category, fields.Direction, fields.Channel, message, storedDetail, fields.Cause,
+                GetDiagnosticValue(row, "source"), GetDiagnosticValue(row, "severity", "level"), storedRawText, null
+            };
         }
 
         private static bool IsPrimaryNo(string? primary)

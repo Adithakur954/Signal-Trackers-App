@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -1711,8 +1711,7 @@ public L3EventController(
         {
             var eventName = GetDiagnosticValue(row, "event_name", "eventname", "event_type", "eventtype", "event", "name", "type", "message");
             var detail = GetDiagnosticValue(row, "value", "detail", "details", "description", "info", "message", "data");
-            var direction = GetDiagnosticValue(row, "direction", "dir", "call_direction");
-            var channel = GetDiagnosticValue(row, "channel", "chan", "channel_name", "channel_number", "earfcn");
+            var fields = DiagnosticFieldParser.Resolve(row, detail, eventCause: ExtractEventDiagnosticCause(eventName, detail));
 
             return new EventDiagnosticInsertRow(
                 uploadId,
@@ -1723,11 +1722,11 @@ public L3EventController(
                 ParseDiagnosticDouble(GetDiagnosticValue(row, "latitude", "lat", "y")),
                 ParseDiagnosticDouble(GetDiagnosticValue(row, "longitude", "long", "lon", "lng", "x")),
                 GetDiagnosticValue(row, "category", "event_category", "class", "group"),
-                direction,
-                channel,
+                fields.Direction,
+                fields.Channel,
                 eventName,
                 detail,
-                ExtractEventDiagnosticCause(eventName, detail),
+                fields.Cause,
                 GetDiagnosticValue(row, "source", "origin", "producer"),
                 GetDiagnosticValue(row, "severity", "level", "priority"),
                 null);
@@ -1793,8 +1792,7 @@ public L3EventController(
             var category = GetDiagnosticValue(row, "category", "layer", "protocol", "stack", "channel");
             var message = GetDiagnosticValue(row, "message_name", "messagename", "msg_name", "message_type", "messagetype", "message", "msg", "name", "event");
             var detail = GetDiagnosticValue(row, "decode", "decoded", "decoded_text", "detail", "details", "text", "content", "info", "description");
-            var direction = GetDiagnosticValue(row, "direction", "dir", "call_direction");
-            var channel = GetDiagnosticValue(row, "channel", "chan", "channel_name", "channel_number", "earfcn");
+            var fields = DiagnosticFieldParser.Resolve(row, detail, rawText);
             var decodedNrRrcSummary = NrRrcOtaDecoder.TryDecodeSummary(category, message, detail, rawText, sourceFileType);
             var storedDetail = NormalizeUnavailableNrArfcn(decodedNrRrcSummary ?? detail);
             var storedRawText = NormalizeUnavailableNrArfcn(decodedNrRrcSummary ?? rawText);
@@ -1809,11 +1807,11 @@ public L3EventController(
                 ParseDiagnosticDouble(GetDiagnosticValue(row, "latitude", "lat", "y")),
                 ParseDiagnosticDouble(GetDiagnosticValue(row, "longitude", "long", "lon", "lng", "x")),
                 category,
-                direction,
-                FirstNonBlank(channel, ExtractDiagnosticChannel(storedDetail, storedRawText)),
+                fields.Direction,
+                fields.Channel,
                 message,
                 storedDetail,
-                ExtractDiagnosticCause(storedDetail, storedRawText),
+                fields.Cause,
                 GetDiagnosticValue(row, "source", "origin", "producer"),
                 GetDiagnosticValue(row, "severity", "level", "priority"),
                 storedRawText,
@@ -2739,42 +2737,6 @@ public L3EventController(
             return null;
         }
 
-        private static string? ExtractDiagnosticChannel(params string?[] texts)
-        {
-            const string pattern = @"(?<![A-Za-z0-9])(?:DL-|UL-)?(?:BCCH|PCCH|CCCH|DCCH|DTCH|BCH|PCH|SCH)(?![A-Za-z0-9])";
-            foreach (var text in texts)
-            {
-                if (string.IsNullOrWhiteSpace(text))
-                    continue;
-                var match = Regex.Match(text, pattern, RegexOptions.IgnoreCase);
-                if (match.Success)
-                    return match.Value.ToUpperInvariant();
-            }
-            return null;
-        }
-        private static string? ExtractDiagnosticCause(params string?[] texts)
-        {
-            foreach (var text in texts)
-            {
-                if (string.IsNullOrWhiteSpace(text))
-                    continue;
-
-                foreach (var pattern in DiagnosticCausePatterns)
-                {
-                    var match = Regex.Match(text, pattern, RegexOptions.IgnoreCase);
-                    if (!match.Success)
-                        continue;
-
-                    var cause = Regex.Replace(match.Groups["cause"].Value, @"\s+", " ").Trim();
-                    cause = cause.Trim(' ', '.', ',', ';', '|', '}', ']', ')', '"', '\'');
-                    if (!string.IsNullOrWhiteSpace(cause))
-                        return cause.Length > 255 ? cause[..255] : cause;
-                }
-            }
-
-            return null;
-        }
-
         private static string? ExtractEventDiagnosticCause(string? eventName, string? detail)
         {
             if (string.IsNullOrWhiteSpace(detail))
@@ -2830,14 +2792,6 @@ public L3EventController(
                 _ => $"{cause} - TELECOM_DISCONNECT_CAUSE"
             };
         }
-
-        private static readonly string[] DiagnosticCausePatterns =
-        {
-            @"\besmCause\s*[:=]\s*(?<cause>[^|,;\r\n]+)",
-            @"\bgetDisconnectCause\s*:\s*cause\s*=\s*(?<cause>[^|,;\s}\]\)]+)",
-            @"\b(?:disconnectCause|releaseCause|failureCause|rejectCause|restrictCause|mRestrictCause)\s*[:=]\s*(?<cause>[^|,;\s}\]\)]+)",
-            @"(?:^|[^\w])\.?cause\s*[:=]\s*(?<cause>[^|,;\s}\]\)]+)"
-        };
 
         private static string? NormalizeUnavailableNrArfcn(string? value)
         {

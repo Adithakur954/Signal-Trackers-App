@@ -4,6 +4,8 @@ using CsvHelper;
 using CsvHelper.Configuration;
 using SignalTracker.Controllers;
 
+DiagnosticFieldRegression.Run();
+
 static List<DiagnosticAnalyzerInput> ReadRows(string zipPath, string prefix)
 {
     using var archive = ZipFile.OpenRead(zipPath);
@@ -45,6 +47,7 @@ static void Print(string name, DiagnosticCallRegressionResult result)
 }
 
 var datasets = args.Length > 0 ? args : new[] { "/home/adi/Downloads/CSTEST.zip", "/home/adi/Downloads/BestL3.zip" };
+NetworkDiagnosticBatchRegression.Run(datasets);
 Console.WriteLine($"{"Dataset",-12} {"Calls",5} {"Connected",10} {"Not Connected",14} {"Dropped",9} {"Unknown",8}");
 foreach (var dataset in datasets)
 {
