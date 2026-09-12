@@ -62,6 +62,7 @@ namespace SignalTracker.Controllers
             "networklog:v16:*",
             "networklog:v17:*",
             "networklog:v18:*",
+            "networklog:v19:*",
             "latlon:dist:*",
             "n78_simple_kpi:*",
             "n78_neighbours:*",
@@ -6839,6 +6840,8 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyEF(
             indoor_outdoor = log.indoor_outdoor ?? "",
             nodeb_id = log.nodeb_id ?? "",
             cell_id = log.cell_id ?? "",
+            direction = log.direction ?? "",
+            channel = log.channel ?? "",
             primary_cell_info_1 = log.primary_cell_info_1 ?? "",
             connection_type = log.primary_cell_info_1 != null &&
                 (log.primary_cell_info_1.StartsWith("SSID:") || log.primary_cell_info_1.Contains("BSSID:"))
@@ -6947,7 +6950,7 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
                 network, m_alpha_short, m_alpha_long,
                 pci, rssi, rsrp, rsrq, sinr, mos, jitter, latency, tac,
                 packet_loss, dl_tpt, ul_tpt, band, image_path, indoor_outdoor, nodeb_id, cell_id,
-                primary_cell_info_1, earfcn, extra_json
+                primary_cell_info_1, earfcn, extra_json, direction, channel
             FROM tbl_network_log
             WHERE {dataWhereClause}
             ORDER BY timestamp, id
@@ -6973,7 +6976,7 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
                 THEN 'wifi'
                 ELSE 'network'
             END AS connection_type,
-            bp.primary_cell_info_1, bp.earfcn, bp.extra_json
+            bp.primary_cell_info_1, bp.earfcn, bp.extra_json, bp.direction, bp.channel
         FROM base_page bp
         ORDER BY bp.timestamp, bp.id;";
 
@@ -7020,7 +7023,9 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
             connection_type = rd.IsDBNull(29) ? "network" : rd.GetString(29),
             primary_cell_info_1 = rd.IsDBNull(30) ? "" : rd.GetString(30),
             earfcn = rd.IsDBNull(31) ? "" : Convert.ToString(rd.GetValue(31), CultureInfo.InvariantCulture) ?? "",
-            extra_json = rd.IsDBNull(32) ? "" : rd.GetString(32)
+            extra_json = rd.IsDBNull(32) ? "" : rd.GetString(32),
+            direction = rd.IsDBNull(33) ? "" : rd.GetString(33),
+            channel = rd.IsDBNull(34) ? "" : rd.GetString(34)
         });
     }
 
@@ -7403,7 +7408,7 @@ private string BuildNetworkLogCacheKey(
         : "no_project";
     string versionKey = NormalizeCacheKeyPart(dataVersion);
 
-    return $"networklog:v18:{GetProjectListCacheScope()}:{sortedSessionIds}:{providerKey}:{networkTypeKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
+    return $"networklog:v19:{GetProjectListCacheScope()}:{sortedSessionIds}:{providerKey}:{networkTypeKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
 }
 
 private static string CleanProviderDisplayName(string value)
