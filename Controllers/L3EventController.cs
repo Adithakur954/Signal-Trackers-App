@@ -289,6 +289,17 @@ public L3EventController(
             return await CreateMapViewController().GenerateDiagnosticL3SummaryPdf(sessionId, sessionIds, sessionIdsAlt, uploadId, take, reportRows, sourceFileName, filters);
         }
 
+        [HttpGet("GetDiagnosticL3Summary")]
+        public Task<IActionResult> GetDiagnosticL3Summary(
+            [FromQuery] int? sessionId = null,
+            [FromQuery] string? sessionIds = null,
+            [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
+            [FromQuery] int? uploadId = null,
+            [FromQuery] int take = 50000,
+            [FromQuery] string? sourceFileName = null,
+            [FromQuery] L3SummaryFilters? filters = null) =>
+            CreateMapViewController().GetDiagnosticL3Summary(sessionId, sessionIds, sessionIdsAlt, uploadId, take, sourceFileName, filters);
+
         [HttpGet("GenerateDiagnosticL3SummaryExcel")]
         public Task<IActionResult> GenerateDiagnosticL3SummaryExcel(
             [FromQuery] int? sessionId = null,

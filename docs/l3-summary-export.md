@@ -5,10 +5,11 @@ Authenticated backend endpoints:
 ```text
 GET /api/L3Event/GenerateDiagnosticL3SummaryExcel?sessionId=189
 GET /api/L3Event/GenerateDiagnosticL3SummaryPdf?sessionId=189
+GET /api/L3Event/GetDiagnosticL3Summary?sessionId=189
 ```
 
-Both routes also exist under `/api/MapView` and enforce the same session/upload access checks.
-Responses are downloadable XLSX/PDF files with a `Content-Disposition` filename. The frontend
+All three routes also exist under `/api/MapView` and enforce the same session/upload access checks.
+Export responses are downloadable XLSX/PDF files with a `Content-Disposition` filename. The frontend
 must request a blob and download it; an existing browser-generated workbook does not automatically
 switch to these endpoints. The frontend source is not in this repository.
 
@@ -16,11 +17,42 @@ The Excel workbook preserves Summary, Call Summary, Technology Summary and Sheet
 and adds L3 Dashboard. Its three tables contain KPI results and observations, mobility counts,
 and decoded parameters. The PDF contains the same sections and calculations.
 
+## JSON summary for the frontend
+
+`GetDiagnosticL3Summary` returns `application/json`; use the normal authenticated JSON client,
+not a Blob download. It uses exactly the same query, access checks, filters and calculations as
+the Excel/PDF exports. Examples:
+
+```text
+GET /api/L3Event/GetDiagnosticL3Summary?sessionId=189
+GET /api/L3Event/GetDiagnosticL3Summary?sessionIds=185,189
+GET /api/L3Event/GetDiagnosticL3Summary?uploadId=185
+```
+
+The response has `status: 1` and a `data` object with these fields:
+
+| Field | Contents |
+| --- | --- |
+| `sourceFile`, `scope`, `generatedAt` | Source label, actual query scope and UTC generation time |
+| `hasData`, `totalRows`, `l3Rows`, `eventRows` | Whether any filtered rows exist and the row counts |
+| `kpis` | Dashboard KPI rows: `{ parameter, result, observation }` |
+| `mobility` | Mobility rows with the same three fields |
+| `parameters` | Decoded parameter rows with the same three fields |
+| `technologies` | `{ technology, rows, interfaces }` entries |
+| `calls` | `{ call, technology, start, end, result, setupTime, duration, reason }` entries; timing strings are in seconds |
+
+Render `data.kpis`, `data.mobility` and `data.parameters` as the three dashboard tables.
+Results preserve the report's display strings, including units and `Not available`. The JSON
+omits full Sheet Messages to keep the response focused on the summary. Empty selections currently
+return `status: 1`, `hasData: false`, zero row counts and the unavailable-value dashboard; the frontend
+should show a no-data state. Validation/access/load-limit errors use the shared HTTP error responses.
+This endpoint does not change the existing `GetDiagnosticAnalyzerSummary` contract.
+
 ## Scope and filters
 
 Supply `sessionId`, comma-separated `sessionIds` (alias `session_ids`), or `uploadId`.
 An upload and sessions supplied together are intersected using the existing diagnostic query.
-Optional filters, shared by both formats:
+Optional filters, shared by the exports and JSON summary:
 
 | Query | Meaning |
 | --- | --- |

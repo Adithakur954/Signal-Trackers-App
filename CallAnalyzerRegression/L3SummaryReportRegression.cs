@@ -3,6 +3,7 @@ using System.Globalization;
 using System.IO.Compression;
 using System.Reflection;
 using System.Text;
+using System.Text.Json;
 using System.Xml.Linq;
 using CsvHelper;
 using CsvHelper.Configuration;
@@ -48,6 +49,9 @@ internal static class L3SummaryReportRegression
         Check(report.Technologies.Sum(t => t.Rows) == rows.Count, "technology counts cover every row");
         var empty = L3SummaryReportBuilder.Build("empty", "all", [], []);
         Check(empty.Kpis.Single(k => k.Parameter == "Average SS-RSRP (dBm)").Result == "Not available", "empty measurements");
+        CheckJson(empty);
+        CheckJson(L3SummaryReportBuilder.Build("multiple", "Sessions: 1,2", rows.Concat(rows.Select(r => r with { SessionId = 2 })).ToList(),
+            [new L3ReportCall("Call-1", "5G", "12:00:00", "12:00:30", "Connected", "2", "28", "Normal release")]));
 
         var filter = new L3SummaryFilters { Sources = "l3", Channel = "UL-DCCH", Technology = "5G", TimeFrom = "23:00", TimeTo = "01:00" };
         Check(filter.Validate() == null && filter.Matches(rows[5] with { Timestamp = "00:30:00", Channel = "UL-DCCH" }, false), "overnight time and combined filters");
@@ -86,6 +90,7 @@ internal static class L3SummaryReportRegression
             }
         }
         var xlsx = L3SummaryReportBuilder.WriteExcel(report);
+        var summaryJson = CheckJson(report);
         using (var archive = new ZipArchive(new MemoryStream(xlsx)))
         {
             XNamespace ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
@@ -112,8 +117,37 @@ internal static class L3SummaryReportRegression
             Directory.CreateDirectory(outputDirectory);
             File.WriteAllBytes(Path.Combine(outputDirectory, "l3-combined-summary.xlsx"), xlsx);
             File.WriteAllBytes(Path.Combine(outputDirectory, "l3-combined-summary.pdf"), pdf);
+            File.WriteAllText(Path.Combine(outputDirectory, "l3-summary.json"), summaryJson);
         }
         Console.WriteLine($"L3 summary regressions passed; {report.Messages.Count} messages; XLSX {xlsx.Length:N0} bytes; PDF {pdf.Length:N0} bytes.");
+    }
+
+    private static string CheckJson(L3SummaryReport report)
+    {
+        var payload = typeof(MapViewController).GetMethod("BuildL3SummaryJson", BindingFlags.NonPublic | BindingFlags.Static)!
+            .Invoke(null, [report]);
+        // Mirror Program.cs: property naming policy is null, so field names must be explicit.
+        var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true });
+        using var document = JsonDocument.Parse(json);
+        var root = document.RootElement;
+        Check(root.GetProperty("status").GetInt32() == 1, "JSON status");
+        var data = root.GetProperty("data");
+        Check(data.GetProperty("scope").GetString() == report.Scope, "JSON records the selected scope");
+        Check(data.GetProperty("hasData").GetBoolean() == (report.Messages.Count > 0), "JSON empty-state indicator");
+        Check(data.GetProperty("totalRows").GetInt32() == report.Messages.Count, "JSON total message count");
+        Check(data.GetProperty("l3Rows").GetInt32() + data.GetProperty("eventRows").GetInt32() == report.Messages.Count, "JSON source counts");
+        foreach (var (key, values) in new[] { ("kpis", report.Kpis), ("mobility", report.Mobility), ("parameters", report.Parameters) })
+        {
+            var actual = data.GetProperty(key).EnumerateArray().Select(v => new L3DashboardValue(
+                v.GetProperty("parameter").GetString()!, v.GetProperty("result").GetString()!, v.GetProperty("observation").GetString()!));
+            Check(actual.SequenceEqual(values), "JSON/Excel/PDF calculation parity: " + key);
+        }
+        Check(data.GetProperty("technologies").EnumerateArray().Sum(t => t.GetProperty("rows").GetInt32()) == report.Messages.Count, "JSON technology counts");
+        Check(data.GetProperty("calls").GetArrayLength() == report.Calls.Count, "JSON call summaries");
+        if (report.Calls.Count > 0)
+            Check(data.GetProperty("calls")[0].GetProperty("setupTime").GetString() == report.Calls[0].SetupTime, "JSON call timing");
+        Check(!data.TryGetProperty("messages", out _), "JSON summary avoids the full message payload");
+        return json;
     }
 
     private static L3ReportMessage Row(string source, string message, string detail) =>

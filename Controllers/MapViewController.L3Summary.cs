@@ -8,6 +8,17 @@ namespace SignalTracker.Controllers;
 
 public partial class MapViewController
 {
+    [HttpGet("GetDiagnosticL3Summary")]
+    public Task<IActionResult> GetDiagnosticL3Summary(
+        [FromQuery] int? sessionId = null,
+        [FromQuery] string? sessionIds = null,
+        [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
+        [FromQuery] int? uploadId = null,
+        [FromQuery] int take = 50000,
+        [FromQuery] string? sourceFileName = null,
+        [FromQuery] L3SummaryFilters? filters = null) =>
+        GenerateCombinedL3SummaryAsync(sessionId, sessionIds, sessionIdsAlt, uploadId, take, sourceFileName, filters, false, 100000, json: true);
+
     [HttpGet("GenerateDiagnosticL3SummaryExcel")]
     public Task<IActionResult> GenerateDiagnosticL3SummaryExcel(
         [FromQuery] int? sessionId = null,
@@ -21,7 +32,7 @@ public partial class MapViewController
 
     private async Task<IActionResult> GenerateCombinedL3SummaryAsync(int? sessionId, string? sessionIds,
         string? sessionIdsAlt, int? uploadId, int take, string? sourceFileName, L3SummaryFilters? filters,
-        bool pdf, int reportRows)
+        bool pdf, int reportRows, bool json = false)
     {
         try
         {
@@ -60,6 +71,7 @@ public partial class MapViewController
                 (filters.ToString().Length == 0 ? "All selected L3/Event messages" : filters.ToString());
             var report = L3SummaryReportBuilder.Build(source, scope, selected.Select(p => p.Message).ToList(), selectedCalls);
             HttpContext.RequestAborted.ThrowIfCancellationRequested();
+            if (json) return Json(BuildL3SummaryJson(report));
             var stem = SanitizeDiagnosticFileStem(source);
             return pdf ? File(BuildCombinedL3SummaryPdf(report, Math.Clamp(reportRows, 1, 100000)), "application/pdf", $"call-summary-{stem}.pdf")
                 : File(L3SummaryReportBuilder.WriteExcel(report), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", $"call-summary-{stem}.xlsx");
@@ -69,6 +81,42 @@ public partial class MapViewController
         {
             return StatusCode(500, new { status = 0, message = "An error occurred while generating the L3 summary report.", details = SafeException.Get(ex) });
         }
+    }
+
+    private static object BuildL3SummaryJson(L3SummaryReport report)
+    {
+        // Explicit camel-case properties: the application's global JSON naming policy is null.
+        static object[] Values(IEnumerable<L3DashboardValue> rows) => rows.Select(row => (object)new
+        {
+            parameter = row.Parameter, result = row.Result, observation = row.Observation
+        }).ToArray();
+
+        return new
+        {
+            status = 1,
+            data = new
+            {
+                sourceFile = report.SourceFile,
+                scope = report.Scope,
+                generatedAt = report.GeneratedAt,
+                hasData = report.Messages.Count > 0,
+                totalRows = report.Messages.Count,
+                l3Rows = report.Messages.Count(row => row.Source.Equals("l3", StringComparison.OrdinalIgnoreCase)),
+                eventRows = report.Messages.Count(row => row.Source.Equals("event", StringComparison.OrdinalIgnoreCase)),
+                kpis = Values(report.Kpis),
+                mobility = Values(report.Mobility),
+                parameters = Values(report.Parameters),
+                technologies = report.Technologies.Select(row => new
+                {
+                    technology = row.Technology, rows = row.Rows, interfaces = row.Interfaces
+                }).ToArray(),
+                calls = report.Calls.Select(row => new
+                {
+                    call = row.Call, technology = row.Technology, start = row.Start, end = row.End,
+                    result = row.Result, setupTime = row.SetupTime, duration = row.Duration, reason = row.Reason
+                }).ToArray()
+            }
+        };
     }
 
     private static L3ReportMessage ToL3ReportMessage(DiagnosticTimelineRow row)
