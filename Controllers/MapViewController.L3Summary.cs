@@ -71,7 +71,7 @@ public partial class MapViewController
                 (filters.ToString().Length == 0 ? "All selected L3/Event messages" : filters.ToString());
             var report = L3SummaryReportBuilder.Build(source, scope, selected.Select(p => p.Message).ToList(), selectedCalls);
             HttpContext.RequestAborted.ThrowIfCancellationRequested();
-            if (json) return Json(BuildL3SummaryJson(report));
+            if (json) return Json(BuildL3SummaryJson(report, selected.Select(pair => pair.Row).ToList()));
             var stem = SanitizeDiagnosticFileStem(source);
             return pdf ? File(BuildCombinedL3SummaryPdf(report, Math.Clamp(reportRows, 1, 100000)), "application/pdf", $"call-summary-{stem}.pdf")
                 : File(L3SummaryReportBuilder.WriteExcel(report), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", $"call-summary-{stem}.xlsx");
@@ -83,7 +83,7 @@ public partial class MapViewController
         }
     }
 
-    private static object BuildL3SummaryJson(L3SummaryReport report)
+    private static object BuildL3SummaryJson(L3SummaryReport report, IReadOnlyList<DiagnosticTimelineRow> timeline)
     {
         // Explicit camel-case properties: the application's global JSON naming policy is null.
         static object[] Values(IEnumerable<L3DashboardValue> rows) => rows.Select(row => (object)new
@@ -103,6 +103,7 @@ public partial class MapViewController
                 totalRows = report.Messages.Count,
                 l3Rows = report.Messages.Count(row => row.Source.Equals("l3", StringComparison.OrdinalIgnoreCase)),
                 eventRows = report.Messages.Count(row => row.Source.Equals("event", StringComparison.OrdinalIgnoreCase)),
+                rows = timeline,
                 kpis = Values(report.Kpis),
                 mobility = Values(report.Mobility),
                 parameters = Values(report.Parameters),
