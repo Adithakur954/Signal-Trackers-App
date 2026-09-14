@@ -4629,12 +4629,12 @@ namespace SignalTracker.Controllers
             public string? Technology { get; set; }
         }
 
-        private sealed class XlsxWorkbook
+        internal sealed class XlsxWorkbook
         {
             public List<XlsxSheet> Sheets { get; } = new();
         }
 
-        private sealed class XlsxSheet
+        internal sealed class XlsxSheet
         {
             public XlsxSheet(string name)
             {
@@ -4652,7 +4652,7 @@ namespace SignalTracker.Controllers
         /// A picture to embed in the sheet, anchored to the top-left of a specific cell.
         /// RowIndex0/ColIndex0 are 0-based (matching OOXML drawing anchors).
         /// </summary>
-        private sealed class XlsxImage
+        internal sealed class XlsxImage
         {
             public XlsxImage(int rowIndex0, int colIndex0, byte[] data, int widthEmu = 1724025, int heightEmu = 889000, int cellSpanCols = 6)
             {
@@ -4672,7 +4672,7 @@ namespace SignalTracker.Controllers
             public int CellSpanCols { get; }
         }
 
-        private sealed class XlsxRow
+        internal sealed class XlsxRow
         {
             public XlsxRow(double? height = null)
             {
@@ -4719,7 +4719,7 @@ namespace SignalTracker.Controllers
             }
         }
 
-        private sealed class XlsxCell
+        internal sealed class XlsxCell
         {
             public string? TextValue { get; init; }
             public string? FormulaValue { get; init; }
@@ -4736,7 +4736,7 @@ namespace SignalTracker.Controllers
             }
         }
 
-        private static class SimpleXlsxWriter
+        internal static class SimpleXlsxWriter
         {
             private const string MainNs = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
             private const string RelNs = "http://schemas.openxmlformats.org/package/2006/relationships";
@@ -5088,7 +5088,7 @@ namespace SignalTracker.Controllers
     <border><left style="thin"><color rgb="FF000000"/></left><right style="thin"><color rgb="FF000000"/></right><top style="thin"><color rgb="FF000000"/></top><bottom style="thin"><color rgb="FF000000"/></bottom><diagonal/></border>
   </borders>
   <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-  <cellXfs count="7">
+  <cellXfs count="8">
     <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
     <xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>
     <xf numFmtId="0" fontId="2" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
@@ -5096,6 +5096,7 @@ namespace SignalTracker.Controllers
     <xf numFmtId="0" fontId="4" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="center"/></xf>
     <xf numFmtId="0" fontId="2" fillId="4" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
     <xf numFmtId="0" fontId="4" fillId="5" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="center"/></xf>
+    <xf numFmtId="0" fontId="3" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>
   </cellXfs>
   <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
 </styleSheet>

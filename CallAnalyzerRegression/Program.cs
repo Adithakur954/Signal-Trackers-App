@@ -4,6 +4,12 @@ using CsvHelper;
 using CsvHelper.Configuration;
 using SignalTracker.Controllers;
 
+if (args.FirstOrDefault() == "--l3-report")
+{
+    L3SummaryReportRegression.Run(args.ElementAtOrDefault(1), args.ElementAtOrDefault(2));
+    return;
+}
+
 DiagnosticFieldRegression.Run();
 
 static List<DiagnosticAnalyzerInput> ReadRows(string zipPath, string prefix)

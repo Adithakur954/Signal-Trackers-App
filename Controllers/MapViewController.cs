@@ -32,7 +32,7 @@ namespace SignalTracker.Controllers
     [Route("api/[controller]")]
     [ApiController]
     [Authorize]
-    public class MapViewController : BaseController
+    public partial class MapViewController : BaseController
     {
         private const int DiagnosticCallAnalysisVersion = 12;
         private readonly IWebHostEnvironment _env;
@@ -2772,40 +2772,16 @@ public async Task<IActionResult> DeleteAvailablePolygon(
         }
 
         [HttpGet("GenerateDiagnosticL3SummaryPdf")]
-        public async Task<IActionResult> GenerateDiagnosticL3SummaryPdf(
+        public Task<IActionResult> GenerateDiagnosticL3SummaryPdf(
             [FromQuery] int? sessionId = null,
             [FromQuery] string? sessionIds = null,
             [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
             [FromQuery] int? uploadId = null,
             [FromQuery] int take = 50000,
-            [FromQuery] int reportRows = 1000,
-            [FromQuery] string? sourceFileName = null)
-        {
-            try
-            {
-                var request = ParseDiagnosticQuery(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
-                if (request.Error != null)
-                    return request.Error;
-
-                reportRows = Math.Clamp(reportRows, 50, 5000);
-                var conn = await OpenDiagnosticConnectionAsync();
-                var events = await LoadDiagnosticEventRowsAsync(conn, request.SessionIds, request.UploadId, request.Take);
-                var l3Rows = await LoadDiagnosticL3RowsAsync(conn, request.SessionIds, request.UploadId, request.Take);
-                var calls = BuildDiagnosticCallRows(events, l3Rows);
-                var rows = BuildDiagnosticTimelineRows(events, l3Rows, calls);
-                var connected = calls.Count(x => string.Equals(x.Result, "Connected", StringComparison.OrdinalIgnoreCase));
-                var dropped = calls.Count(x => string.Equals(x.Result, "Dropped", StringComparison.OrdinalIgnoreCase));
-                var notConnected = calls.Count(x => string.Equals(x.Result, "Not Connected", StringComparison.OrdinalIgnoreCase));
-                var fileStem = SanitizeDiagnosticFileStem(sourceFileName ?? $"diagnostic-{request.UploadId?.ToString(CultureInfo.InvariantCulture) ?? string.Join("-", request.SessionIds)}");
-
-                var pdf = BuildDiagnosticL3SummaryPdf(sourceFileName, calls, rows.Take(reportRows).ToList(), rows.Count, l3Rows.Count, events.Count);
-                return File(pdf, "application/pdf", $"l3-call-summary-messages-{fileStem}.pdf");
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, new { status = 0, message = "An error occurred while generating the L3 summary PDF.", details = SafeException.Get(ex) });
-            }
-        }
+            [FromQuery] int reportRows = 100000,
+            [FromQuery] string? sourceFileName = null,
+            [FromQuery] L3SummaryFilters? filters = null) =>
+            GenerateCombinedL3SummaryAsync(sessionId, sessionIds, sessionIdsAlt, uploadId, take, sourceFileName, filters, true, reportRows);
 
 // ========================================
 //  RESPONSE DTO FOR CACHING

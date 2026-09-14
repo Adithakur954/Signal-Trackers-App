@@ -282,12 +282,23 @@ public L3EventController(
             [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
             [FromQuery] int? uploadId = null,
             [FromQuery] int take = 50000,
-            [FromQuery] int reportRows = 1000,
-            [FromQuery] string? sourceFileName = null)
+            [FromQuery] int reportRows = 100000,
+            [FromQuery] string? sourceFileName = null,
+            [FromQuery] L3SummaryFilters? filters = null)
         {
-            var denied = await ValidateDiagnosticAccessAsync(sessionId, sessionIds, sessionIdsAlt, uploadId, HttpContext.RequestAborted);
-            return denied ?? await CreateMapViewController().GenerateDiagnosticL3SummaryPdf(sessionId, sessionIds, sessionIdsAlt, uploadId, take, reportRows, sourceFileName);
+            return await CreateMapViewController().GenerateDiagnosticL3SummaryPdf(sessionId, sessionIds, sessionIdsAlt, uploadId, take, reportRows, sourceFileName, filters);
         }
+
+        [HttpGet("GenerateDiagnosticL3SummaryExcel")]
+        public Task<IActionResult> GenerateDiagnosticL3SummaryExcel(
+            [FromQuery] int? sessionId = null,
+            [FromQuery] string? sessionIds = null,
+            [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
+            [FromQuery] int? uploadId = null,
+            [FromQuery] int take = 50000,
+            [FromQuery] string? sourceFileName = null,
+            [FromQuery] L3SummaryFilters? filters = null) =>
+            CreateMapViewController().GenerateDiagnosticL3SummaryExcel(sessionId, sessionIds, sessionIdsAlt, uploadId, take, sourceFileName, filters);
 
         [HttpPost("ImportSessionDiagnosticData")]
         [RequestFormLimits(MultipartBodyLengthLimit = 512L * 1024 * 1024)]
@@ -1408,7 +1419,7 @@ public L3EventController(
                 ?? 0;
         }
 
-        private async Task<IActionResult?> ValidateDiagnosticAccessAsync(
+        internal async Task<IActionResult?> ValidateDiagnosticAccessAsync(
             int? sessionId,
             string? sessionIds,
             string? sessionIdsAlt,
