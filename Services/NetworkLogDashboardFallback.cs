@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using SignalTracker.Models;
@@ -54,7 +55,16 @@ public sealed class NetworkDashboardSample
 public static class NetworkLogDashboardFallback
 {
     private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
-    public static string Normalize(string value) => Regex.Replace(value, "[^a-z0-9]", "", RegexOptions.IgnoreCase).ToLowerInvariant();
+    private static readonly ConcurrentDictionary<string, string> NormalizedKeys = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly string[] NrEvidenceFields =
+    [
+        "NR Serving (DIAG)", "NR MAC Thpt DL (Mbps)", "NR MAC Thpt UL (Mbps)",
+        "NR DL RB", "NR DL Slot Usage (%)", "NR DL Modulation", "NR DL Rank",
+        "NR CQI", "NR MCS", "NR Cell Identity", "NR ARFCN", "RI", "ENDC State"
+    ];
+
+    public static string Normalize(string value) => NormalizedKeys.GetOrAdd(value,
+        static key => Regex.Replace(key, "[^a-z0-9]", "", RegexOptions.IgnoreCase).ToLowerInvariant());
     public static bool Available(string? value) => !string.IsNullOrWhiteSpace(value)
         && !Regex.IsMatch(value.Trim(), @"^(?:not available|unknown|null|n/?a|--?|\u2014|2147483647|9223372036854775807)$", RegexOptions.IgnoreCase);
     public static string Technology(string value)
@@ -160,12 +170,7 @@ public static class NetworkLogDashboardFallback
             // NSA exports often label the row as LTE Anchor while carrying
             // NR measurements in the same row. Only NR-specific evidence can
             // promote such a row; a generic LTE CQI/MCS is not enough.
-            return new[]
-            {
-                "NR Serving (DIAG)", "NR MAC Thpt DL (Mbps)", "NR MAC Thpt UL (Mbps)",
-                "NR DL RB", "NR DL Slot Usage (%)", "NR DL Modulation", "NR DL Rank",
-                "NR CQI", "NR MCS", "NR Cell Identity", "NR ARFCN", "RI", "ENDC State"
-            }.Any(name => NetworkLogDashboardFallback.Available(sample.Get(name)));
+            return NrEvidenceFields.Any(name => NetworkLogDashboardFallback.Available(sample.Get(name)));
         }
 
         // Derive only radio values with a physically meaningful formula and
