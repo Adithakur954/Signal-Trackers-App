@@ -2377,18 +2377,13 @@ public L3EventController(
                 where.Add($"h.session_id IN ({string.Join(", ", names)})");
             }
 
-            where.Add(@"(
-                EXISTS (SELECT 1 FROM tbl_l3_log l3 WHERE l3.tbl_upload_id = h.tbl_upload_id LIMIT 1)
-                OR EXISTS (
-                    SELECT 1
-                    FROM tbl_event_log event_log
-                    WHERE event_log.tbl_upload_id = h.tbl_upload_id
-                      AND NOT (
-                          UPPER(COALESCE(event_log.event_name, '')) = 'CALLSTATE'
-                          AND LOWER(TRIM(COALESCE(event_log.detail, ''))) = 'idle (ended)'
-                      )
-                    LIMIT 1
-                )
+            // Availability in this list requires actual L3 rows. Event-only uploads
+            // remain stored, but cannot make an upload appear in the L3 list.
+            where.Add(@"EXISTS (
+                SELECT 1
+                FROM tbl_l3_log l3
+                WHERE l3.tbl_upload_id = h.tbl_upload_id
+                LIMIT 1
             )");
 
             AddParam(cmd, "@take", take);
