@@ -5415,7 +5415,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
                 : "ALL";
 
             var companyScope = await GetDashboardCompanyCacheScopeAsync(targetCompanyId, useUserScope ? currentUserId : 0);
-            string cacheKey = $"OpSamples:{GetCacheCountryScope()}:{companyScope}:{opKey}:{netKey}:{fromKey}:{toKey}";
+            string cacheKey = $"OpSamples:v4:{GetCacheCountryScope()}:{companyScope}:{opKey}:{netKey}:{fromKey}:{toKey}";
 
             // =========================================================
             // 3. TRY REDIS
@@ -5458,9 +5458,16 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
                 {
                     cmd.CommandTimeout = 180;
 
-                    var companyClause = targetCompanyId == 0 && !useUserScope
-                        ? "1=1"
-                        : (useUserScope ? "s.user_id = @userId" : "u.company_id = @companyId");
+                    var sessionScopeClause = targetCompanyId == 0 && !useUserScope
+                        ? string.Empty
+                        : $@"
+                  AND EXISTS (
+                      SELECT 1
+                      FROM tbl_session s
+                      JOIN tbl_user u ON s.user_id = u.id
+                      WHERE s.id = n.session_id
+                        AND {(useUserScope ? "s.user_id = @userId" : "u.company_id = @companyId")}
+                  )";
                     var sqlBuilder = new StringBuilder(@"
                 SELECT
                     CASE
@@ -5500,17 +5507,16 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
                 FROM tbl_network_log n
                 WHERE n.m_alpha_long IS NOT NULL
                   AND TRIM(n.m_alpha_long) <> ''
+                  AND (
+                      TRIM(n.m_alpha_long) REGEXP '[[:alpha:]]'
+                      OR TRIM(n.m_alpha_long) REGEXP '^[0-9]+([[:space:]][0-9]+)*$'
+                  )
                   AND n.network IS NOT NULL
                   AND TRIM(n.network) <> ''
+                  AND TRIM(n.network) REGEXP '[[:alpha:]]'
                   AND n.timestamp >= @from
                   AND n.timestamp < @toExclusive
-                  AND EXISTS (
-                      SELECT 1
-                      FROM tbl_session s
-                      JOIN tbl_user u ON s.user_id = u.id
-                      WHERE s.id = n.session_id
-                        AND __COMPANY_CLAUSE__
-                  )
+                  __SESSION_SCOPE_CLAUSE__
             ");
 
                     if (opSet is { Count: > 0 })
@@ -5552,7 +5558,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
                     sqlBuilder.AppendLine("GROUP BY operatorName, network");
                     sqlBuilder.AppendLine("ORDER BY value DESC;");
 
-                    cmd.CommandText = sqlBuilder.ToString().Replace("__COMPANY_CLAUSE__", companyClause);
+                    cmd.CommandText = sqlBuilder.ToString().Replace("__SESSION_SCOPE_CLAUSE__", sessionScopeClause);
 
                     // Parameters
                     if (targetCompanyId > 0)
@@ -6353,19 +6359,21 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
     return Unauthorized(new { Status = 0, Message = "Unauthorized. Invalid Company." });
 }
 
-            var hasDateFilter = from.HasValue || to.HasValue;
+            // Always constrain the dashboard query. Without a requested range,
+            // use the recent default window instead of scanning all history.
+            var hasDateFilter = true;
             var effectiveTo = to ?? DateTime.UtcNow;
             var effectiveFrom = from ?? effectiveTo.AddDays(-14);
-            if (hasDateFilter && effectiveFrom > effectiveTo)
+            if (effectiveFrom > effectiveTo)
             {
                 var tmp = effectiveFrom;
                 effectiveFrom = effectiveTo;
                 effectiveTo = tmp;
             }
-            string fromKey = hasDateFilter ? effectiveFrom.ToString("yyyyMMdd") : "ALL";
-            string toKey = hasDateFilter ? effectiveTo.ToString("yyyyMMdd") : "ALL";
+            string fromKey = effectiveFrom.ToString("yyyyMMdd");
+            string toKey = effectiveTo.ToString("yyyyMMdd");
             var companyScope = await GetDashboardCompanyCacheScopeAsync(targetCompanyId, useUserScope ? currentUserId : 0);
-            string cacheKey = $"HandsetDist:MakeOnly:{GetCacheCountryScope()}:{companyScope}:{fromKey}:{toKey}";
+            string cacheKey = $"HandsetDist:v2:MakeOnly:{GetCacheCountryScope()}:{companyScope}:{fromKey}:{toKey}";
 
             var totalSw = System.Diagnostics.Stopwatch.StartNew();
 
@@ -7123,7 +7131,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
     // 2. CACHE KEY
     var companyScope = await GetDashboardCompanyCacheScopeAsync(targetCompanyId, useUserScope ? currentUserId : 0);
     var dateFilter = ResolveDashboardDateFilter(from, to, month, year, defaultDays: 90);
-    string cacheKey = $"OperatorsList:{GetCacheCountryScope()}:{companyScope}:{dateFilter.FromKey}:{dateFilter.ToKey}";
+    string cacheKey = $"OperatorsList:v3:{GetCacheCountryScope()}:{companyScope}:{dateFilter.FromKey}:{dateFilter.ToKey}";
 
             
             if (_redis != null && _redis.IsConnected)
@@ -7172,6 +7180,18 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
                     .ToListAsync();
                 }
 
+                // Keep text operators and valid integer numeric identifiers,
+                // but exclude decimal artifacts such as 0.00 and 0.01.
+                operators = operators
+                    .Where(operatorName =>
+                    {
+                        var value = operatorName.Trim();
+                        return value.Any(char.IsLetter)
+                            || (value.Any(char.IsDigit)
+                                && value.All(character => char.IsDigit(character) || char.IsWhiteSpace(character)));
+                    })
+                    .ToList();
+
                 // =========================================================
                 // 5. SAVE TO REDIS
                 // =========================================================
@@ -7210,7 +7230,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
     // 2. CACHE KEY
     var companyScope = await GetDashboardCompanyCacheScopeAsync(targetCompanyId, useUserScope ? currentUserId : 0);
     var dateFilter = ResolveDashboardDateFilter(from, to, month, year, defaultDays: 90);
-    string cacheKey = $"NetworksList:{GetCacheCountryScope()}:{companyScope}:{dateFilter.FromKey}:{dateFilter.ToKey}";
+    string cacheKey = $"NetworksList:v2:{GetCacheCountryScope()}:{companyScope}:{dateFilter.FromKey}:{dateFilter.ToKey}";
 
            
             if (_redis != null && _redis.IsConnected)
@@ -7258,6 +7278,13 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
                     .OrderBy(x => x)
                     .ToListAsync();
                 }
+
+                // Network type must contain a technology label. Numeric-only
+                // values such as 277.0 are malformed/imported field values,
+                // not valid network types for the dashboard legend.
+                networks = networks
+                    .Where(network => network.Any(char.IsLetter))
+                    .ToList();
 
                 // =========================================================
                 // 5. SAVE TO REDIS

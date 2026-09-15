@@ -32,7 +32,7 @@ namespace SignalTracker.Controllers
     [Route("api/[controller]")]
     [ApiController]
     [Authorize]
-    public class MapViewController : BaseController
+    public partial class MapViewController : BaseController
     {
         private const int DiagnosticCallAnalysisVersion = 12;
         private readonly IWebHostEnvironment _env;
@@ -62,6 +62,7 @@ namespace SignalTracker.Controllers
             "networklog:v16:*",
             "networklog:v17:*",
             "networklog:v18:*",
+            "networklog:v19:*",
             "latlon:dist:*",
             "n78_simple_kpi:*",
             "n78_neighbours:*",
@@ -2771,40 +2772,16 @@ public async Task<IActionResult> DeleteAvailablePolygon(
         }
 
         [HttpGet("GenerateDiagnosticL3SummaryPdf")]
-        public async Task<IActionResult> GenerateDiagnosticL3SummaryPdf(
+        public Task<IActionResult> GenerateDiagnosticL3SummaryPdf(
             [FromQuery] int? sessionId = null,
             [FromQuery] string? sessionIds = null,
             [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
             [FromQuery] int? uploadId = null,
             [FromQuery] int take = 50000,
-            [FromQuery] int reportRows = 1000,
-            [FromQuery] string? sourceFileName = null)
-        {
-            try
-            {
-                var request = ParseDiagnosticQuery(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
-                if (request.Error != null)
-                    return request.Error;
-
-                reportRows = Math.Clamp(reportRows, 50, 5000);
-                var conn = await OpenDiagnosticConnectionAsync();
-                var events = await LoadDiagnosticEventRowsAsync(conn, request.SessionIds, request.UploadId, request.Take);
-                var l3Rows = await LoadDiagnosticL3RowsAsync(conn, request.SessionIds, request.UploadId, request.Take);
-                var calls = BuildDiagnosticCallRows(events, l3Rows);
-                var rows = BuildDiagnosticTimelineRows(events, l3Rows, calls);
-                var connected = calls.Count(x => string.Equals(x.Result, "Connected", StringComparison.OrdinalIgnoreCase));
-                var dropped = calls.Count(x => string.Equals(x.Result, "Dropped", StringComparison.OrdinalIgnoreCase));
-                var notConnected = calls.Count(x => string.Equals(x.Result, "Not Connected", StringComparison.OrdinalIgnoreCase));
-                var fileStem = SanitizeDiagnosticFileStem(sourceFileName ?? $"diagnostic-{request.UploadId?.ToString(CultureInfo.InvariantCulture) ?? string.Join("-", request.SessionIds)}");
-
-                var pdf = BuildDiagnosticL3SummaryPdf(sourceFileName, calls, rows.Take(reportRows).ToList(), rows.Count, l3Rows.Count, events.Count);
-                return File(pdf, "application/pdf", $"l3-call-summary-messages-{fileStem}.pdf");
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, new { status = 0, message = "An error occurred while generating the L3 summary PDF.", details = SafeException.Get(ex) });
-            }
-        }
+            [FromQuery] int reportRows = 100000,
+            [FromQuery] string? sourceFileName = null,
+            [FromQuery] L3SummaryFilters? filters = null) =>
+            GenerateCombinedL3SummaryAsync(sessionId, sessionIds, sessionIdsAlt, uploadId, take, sourceFileName, filters, true, reportRows);
 
 // ========================================
 //  RESPONSE DTO FOR CACHING
@@ -6839,6 +6816,8 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyEF(
             indoor_outdoor = log.indoor_outdoor ?? "",
             nodeb_id = log.nodeb_id ?? "",
             cell_id = log.cell_id ?? "",
+            direction = log.direction ?? "",
+            channel = log.channel ?? "",
             primary_cell_info_1 = log.primary_cell_info_1 ?? "",
             connection_type = log.primary_cell_info_1 != null &&
                 (log.primary_cell_info_1.StartsWith("SSID:") || log.primary_cell_info_1.Contains("BSSID:"))
@@ -6947,7 +6926,7 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
                 network, m_alpha_short, m_alpha_long,
                 pci, rssi, rsrp, rsrq, sinr, mos, jitter, latency, tac,
                 packet_loss, dl_tpt, ul_tpt, band, image_path, indoor_outdoor, nodeb_id, cell_id,
-                primary_cell_info_1, earfcn, extra_json
+                primary_cell_info_1, earfcn, extra_json, direction, channel
             FROM tbl_network_log
             WHERE {dataWhereClause}
             ORDER BY timestamp, id
@@ -6973,7 +6952,7 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
                 THEN 'wifi'
                 ELSE 'network'
             END AS connection_type,
-            bp.primary_cell_info_1, bp.earfcn, bp.extra_json
+            bp.primary_cell_info_1, bp.earfcn, bp.extra_json, bp.direction, bp.channel
         FROM base_page bp
         ORDER BY bp.timestamp, bp.id;";
 
@@ -7020,7 +6999,9 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
             connection_type = rd.IsDBNull(29) ? "network" : rd.GetString(29),
             primary_cell_info_1 = rd.IsDBNull(30) ? "" : rd.GetString(30),
             earfcn = rd.IsDBNull(31) ? "" : Convert.ToString(rd.GetValue(31), CultureInfo.InvariantCulture) ?? "",
-            extra_json = rd.IsDBNull(32) ? "" : rd.GetString(32)
+            extra_json = rd.IsDBNull(32) ? "" : rd.GetString(32),
+            direction = rd.IsDBNull(33) ? "" : rd.GetString(33),
+            channel = rd.IsDBNull(34) ? "" : rd.GetString(34)
         });
     }
 
@@ -7403,7 +7384,7 @@ private string BuildNetworkLogCacheKey(
         : "no_project";
     string versionKey = NormalizeCacheKeyPart(dataVersion);
 
-    return $"networklog:v18:{GetProjectListCacheScope()}:{sortedSessionIds}:{providerKey}:{networkTypeKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
+    return $"networklog:v19:{GetProjectListCacheScope()}:{sortedSessionIds}:{providerKey}:{networkTypeKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
 }
 
 private static string CleanProviderDisplayName(string value)

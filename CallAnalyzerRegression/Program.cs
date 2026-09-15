@@ -4,6 +4,20 @@ using CsvHelper;
 using CsvHelper.Configuration;
 using SignalTracker.Controllers;
 
+if (args.FirstOrDefault() == "--l3-report")
+{
+    L3SummaryReportRegression.Run(args.ElementAtOrDefault(1), args.ElementAtOrDefault(2));
+    return;
+}
+
+if (args.FirstOrDefault() == "--network-fallback")
+{
+    NetworkDashboardFallbackRegression.Run(args.ElementAtOrDefault(1) ?? "artifacts/network-fallback-test");
+    return;
+}
+
+DiagnosticFieldRegression.Run();
+
 static List<DiagnosticAnalyzerInput> ReadRows(string zipPath, string prefix)
 {
     using var archive = ZipFile.OpenRead(zipPath);
@@ -45,6 +59,7 @@ static void Print(string name, DiagnosticCallRegressionResult result)
 }
 
 var datasets = args.Length > 0 ? args : new[] { "/home/adi/Downloads/CSTEST.zip", "/home/adi/Downloads/BestL3.zip" };
+NetworkDiagnosticBatchRegression.Run(datasets);
 Console.WriteLine($"{"Dataset",-12} {"Calls",5} {"Connected",10} {"Not Connected",14} {"Dropped",9} {"Unknown",8}");
 foreach (var dataset in datasets)
 {

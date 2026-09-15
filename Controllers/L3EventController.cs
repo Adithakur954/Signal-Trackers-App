@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -282,12 +282,35 @@ public L3EventController(
             [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
             [FromQuery] int? uploadId = null,
             [FromQuery] int take = 50000,
-            [FromQuery] int reportRows = 1000,
-            [FromQuery] string? sourceFileName = null)
+            [FromQuery] int reportRows = 100000,
+            [FromQuery] string? sourceFileName = null,
+            [FromQuery] L3SummaryFilters? filters = null)
         {
-            var denied = await ValidateDiagnosticAccessAsync(sessionId, sessionIds, sessionIdsAlt, uploadId, HttpContext.RequestAborted);
-            return denied ?? await CreateMapViewController().GenerateDiagnosticL3SummaryPdf(sessionId, sessionIds, sessionIdsAlt, uploadId, take, reportRows, sourceFileName);
+            return await CreateMapViewController().GenerateDiagnosticL3SummaryPdf(sessionId, sessionIds, sessionIdsAlt, uploadId, take, reportRows, sourceFileName, filters);
         }
+
+        [HttpGet("GetDiagnosticL3Summary")]
+        public Task<IActionResult> GetDiagnosticL3Summary(
+            [FromQuery] int? sessionId = null,
+            [FromQuery] string? sessionIds = null,
+            [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
+            [FromQuery] int? uploadId = null,
+            [FromQuery] int take = 50000,
+            [FromQuery] string? sourceFileName = null,
+            [FromQuery] L3SummaryFilters? filters = null,
+            [FromQuery] bool includeRows = true) =>
+            CreateMapViewController().GetDiagnosticL3Summary(sessionId, sessionIds, sessionIdsAlt, uploadId, take, sourceFileName, filters, includeRows);
+
+        [HttpGet("GenerateDiagnosticL3SummaryExcel")]
+        public Task<IActionResult> GenerateDiagnosticL3SummaryExcel(
+            [FromQuery] int? sessionId = null,
+            [FromQuery] string? sessionIds = null,
+            [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
+            [FromQuery] int? uploadId = null,
+            [FromQuery] int take = 50000,
+            [FromQuery] string? sourceFileName = null,
+            [FromQuery] L3SummaryFilters? filters = null) =>
+            CreateMapViewController().GenerateDiagnosticL3SummaryExcel(sessionId, sessionIds, sessionIdsAlt, uploadId, take, sourceFileName, filters);
 
         [HttpPost("ImportSessionDiagnosticData")]
         [RequestFormLimits(MultipartBodyLengthLimit = 512L * 1024 * 1024)]
@@ -1408,7 +1431,7 @@ public L3EventController(
                 ?? 0;
         }
 
-        private async Task<IActionResult?> ValidateDiagnosticAccessAsync(
+        internal async Task<IActionResult?> ValidateDiagnosticAccessAsync(
             int? sessionId,
             string? sessionIds,
             string? sessionIdsAlt,
@@ -1711,8 +1734,7 @@ public L3EventController(
         {
             var eventName = GetDiagnosticValue(row, "event_name", "eventname", "event_type", "eventtype", "event", "name", "type", "message");
             var detail = GetDiagnosticValue(row, "value", "detail", "details", "description", "info", "message", "data");
-            var direction = GetDiagnosticValue(row, "direction", "dir", "call_direction");
-            var channel = GetDiagnosticValue(row, "channel", "chan", "channel_name", "channel_number", "earfcn");
+            var fields = DiagnosticFieldParser.Resolve(row, detail, eventCause: ExtractEventDiagnosticCause(eventName, detail));
 
             return new EventDiagnosticInsertRow(
                 uploadId,
@@ -1723,11 +1745,11 @@ public L3EventController(
                 ParseDiagnosticDouble(GetDiagnosticValue(row, "latitude", "lat", "y")),
                 ParseDiagnosticDouble(GetDiagnosticValue(row, "longitude", "long", "lon", "lng", "x")),
                 GetDiagnosticValue(row, "category", "event_category", "class", "group"),
-                direction,
-                channel,
+                fields.Direction,
+                fields.Channel,
                 eventName,
                 detail,
-                ExtractEventDiagnosticCause(eventName, detail),
+                fields.Cause,
                 GetDiagnosticValue(row, "source", "origin", "producer"),
                 GetDiagnosticValue(row, "severity", "level", "priority"),
                 null);
@@ -1793,8 +1815,7 @@ public L3EventController(
             var category = GetDiagnosticValue(row, "category", "layer", "protocol", "stack", "channel");
             var message = GetDiagnosticValue(row, "message_name", "messagename", "msg_name", "message_type", "messagetype", "message", "msg", "name", "event");
             var detail = GetDiagnosticValue(row, "decode", "decoded", "decoded_text", "detail", "details", "text", "content", "info", "description");
-            var direction = GetDiagnosticValue(row, "direction", "dir", "call_direction");
-            var channel = GetDiagnosticValue(row, "channel", "chan", "channel_name", "channel_number", "earfcn");
+            var fields = DiagnosticFieldParser.Resolve(row, detail, rawText);
             var decodedNrRrcSummary = NrRrcOtaDecoder.TryDecodeSummary(category, message, detail, rawText, sourceFileType);
             var storedDetail = NormalizeUnavailableNrArfcn(decodedNrRrcSummary ?? detail);
             var storedRawText = NormalizeUnavailableNrArfcn(decodedNrRrcSummary ?? rawText);
@@ -1809,11 +1830,11 @@ public L3EventController(
                 ParseDiagnosticDouble(GetDiagnosticValue(row, "latitude", "lat", "y")),
                 ParseDiagnosticDouble(GetDiagnosticValue(row, "longitude", "long", "lon", "lng", "x")),
                 category,
-                direction,
-                FirstNonBlank(channel, ExtractDiagnosticChannel(storedDetail, storedRawText)),
+                fields.Direction,
+                fields.Channel,
                 message,
                 storedDetail,
-                ExtractDiagnosticCause(storedDetail, storedRawText),
+                fields.Cause,
                 GetDiagnosticValue(row, "source", "origin", "producer"),
                 GetDiagnosticValue(row, "severity", "level", "priority"),
                 storedRawText,
@@ -2357,18 +2378,13 @@ public L3EventController(
                 where.Add($"h.session_id IN ({string.Join(", ", names)})");
             }
 
-            where.Add(@"(
-                EXISTS (SELECT 1 FROM tbl_l3_log l3 WHERE l3.tbl_upload_id = h.tbl_upload_id LIMIT 1)
-                OR EXISTS (
-                    SELECT 1
-                    FROM tbl_event_log event_log
-                    WHERE event_log.tbl_upload_id = h.tbl_upload_id
-                      AND NOT (
-                          UPPER(COALESCE(event_log.event_name, '')) = 'CALLSTATE'
-                          AND LOWER(TRIM(COALESCE(event_log.detail, ''))) = 'idle (ended)'
-                      )
-                    LIMIT 1
-                )
+            // Availability in this list requires actual L3 rows. Event-only uploads
+            // remain stored, but cannot make an upload appear in the L3 list.
+            where.Add(@"EXISTS (
+                SELECT 1
+                FROM tbl_l3_log l3
+                WHERE l3.tbl_upload_id = h.tbl_upload_id
+                LIMIT 1
             )");
 
             AddParam(cmd, "@take", take);
@@ -2739,42 +2755,6 @@ public L3EventController(
             return null;
         }
 
-        private static string? ExtractDiagnosticChannel(params string?[] texts)
-        {
-            const string pattern = @"(?<![A-Za-z0-9])(?:DL-|UL-)?(?:BCCH|PCCH|CCCH|DCCH|DTCH|BCH|PCH|SCH)(?![A-Za-z0-9])";
-            foreach (var text in texts)
-            {
-                if (string.IsNullOrWhiteSpace(text))
-                    continue;
-                var match = Regex.Match(text, pattern, RegexOptions.IgnoreCase);
-                if (match.Success)
-                    return match.Value.ToUpperInvariant();
-            }
-            return null;
-        }
-        private static string? ExtractDiagnosticCause(params string?[] texts)
-        {
-            foreach (var text in texts)
-            {
-                if (string.IsNullOrWhiteSpace(text))
-                    continue;
-
-                foreach (var pattern in DiagnosticCausePatterns)
-                {
-                    var match = Regex.Match(text, pattern, RegexOptions.IgnoreCase);
-                    if (!match.Success)
-                        continue;
-
-                    var cause = Regex.Replace(match.Groups["cause"].Value, @"\s+", " ").Trim();
-                    cause = cause.Trim(' ', '.', ',', ';', '|', '}', ']', ')', '"', '\'');
-                    if (!string.IsNullOrWhiteSpace(cause))
-                        return cause.Length > 255 ? cause[..255] : cause;
-                }
-            }
-
-            return null;
-        }
-
         private static string? ExtractEventDiagnosticCause(string? eventName, string? detail)
         {
             if (string.IsNullOrWhiteSpace(detail))
@@ -2830,14 +2810,6 @@ public L3EventController(
                 _ => $"{cause} - TELECOM_DISCONNECT_CAUSE"
             };
         }
-
-        private static readonly string[] DiagnosticCausePatterns =
-        {
-            @"\besmCause\s*[:=]\s*(?<cause>[^|,;\r\n]+)",
-            @"\bgetDisconnectCause\s*:\s*cause\s*=\s*(?<cause>[^|,;\s}\]\)]+)",
-            @"\b(?:disconnectCause|releaseCause|failureCause|rejectCause|restrictCause|mRestrictCause)\s*[:=]\s*(?<cause>[^|,;\s}\]\)]+)",
-            @"(?:^|[^\w])\.?cause\s*[:=]\s*(?<cause>[^|,;\s}\]\)]+)"
-        };
 
         private static string? NormalizeUnavailableNrArfcn(string? value)
         {

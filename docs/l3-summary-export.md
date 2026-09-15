@@ -1,0 +1,196 @@
+# Combined L3/Event summary export
+
+Authenticated backend endpoints:
+
+```text
+GET /api/L3Event/GenerateDiagnosticL3SummaryExcel?sessionId=189
+GET /api/L3Event/GenerateDiagnosticL3SummaryPdf?sessionId=189
+GET /api/L3Event/GetDiagnosticL3Summary?sessionId=189
+```
+
+All three routes also exist under `/api/MapView` and enforce the same session/upload access checks.
+Export responses are downloadable XLSX/PDF files with a `Content-Disposition` filename. The frontend
+must request a blob and download it; an existing browser-generated workbook does not automatically
+switch to these endpoints. The frontend source is not in this repository.
+
+The Excel workbook preserves Summary, Call Summary, Technology Summary and Sheet Messages,
+and adds L3 Dashboard. Its three tables contain KPI results and observations, mobility counts,
+and decoded parameters. The PDF contains the same sections and calculations.
+
+## JSON summary for the frontend
+
+`GetDiagnosticL3Summary` returns `application/json`; use the normal authenticated JSON client,
+not a Blob download. It uses exactly the same query, access checks, filters and calculations as
+the Excel/PDF exports. Examples:
+
+```text
+GET /api/L3Event/GetDiagnosticL3Summary?sessionId=189
+GET /api/L3Event/GetDiagnosticL3Summary?sessionIds=185,189
+GET /api/L3Event/GetDiagnosticL3Summary?uploadId=185
+```
+
+The response has `status: 1` and a `data` object with these fields:
+
+| Field | Contents |
+| --- | --- |
+| `sourceFile`, `scope`, `generatedAt` | Source label, actual query scope and UTC generation time |
+| `hasData`, `totalRows`, `l3Rows`, `eventRows` | Availability and L3/Event message counts; `hasData` can also be true for a dashboard filled from Network Log |
+| `networkLogRows`, `hasNetworkLogFallback`, `dashboardSources` | Number of eligible Network Log samples, whether a fallback value was used, and source label |
+| `kpis` | Dashboard KPI rows: `{ parameter, result, observation, source }` |
+| `mobility` | Mobility rows with the same fields, including `source` |
+| `parameters` | Decoded parameter rows with the same fields, including `source` |
+| `technologies` | `{ technology, rows, interfaces }` entries |
+| `calls` | `{ call, technology, start, end, result, setupTime, duration, reason }` entries; timing strings are in seconds |
+
+Render `data.kpis`, `data.mobility` and `data.parameters` as the three dashboard tables.
+Results preserve the report's display strings, including units and `Not available`. The JSON
+retains the existing `rows` timeline; Network Log samples are not appended to it. Empty selections currently
+return `status: 1`, `hasData: false`, zero row counts and the unavailable-value dashboard; the frontend
+should show a no-data state. Validation/access/load-limit errors use the shared HTTP error responses.
+This endpoint does not change the existing `GetDiagnosticAnalyzerSummary` contract.
+
+## Scope and filters
+
+Supply `sessionId`, comma-separated `sessionIds` (alias `session_ids`), or `uploadId`.
+An upload and sessions supplied together are intersected using the existing diagnostic query.
+Optional filters, shared by the exports and JSON summary:
+
+| Query | Meaning |
+| --- | --- |
+| `technology` | Timeline technology label(s), comma-separated, e.g. `5G,LTE` |
+| `sources` | `l3`, `event`, or both, comma-separated |
+| `direction` | Direction label(s), e.g. `UL,DL` |
+| `channel` | Channel label(s), e.g. `PCCH` |
+| `interface` | Timeline interface label(s) |
+| `search` | Case-insensitive substring in message or detail |
+| `failuresOnly` | Restrict to timeline failure/error/critical rows |
+| `timeFrom`, `timeTo` | Inclusive time of day, e.g. `12:15:30.000`; a descending interval crosses midnight |
+| `sourceFileName` | Display name for the report |
+| `take` | Maximum loaded rows per source, default/maximum 50,000 |
+| `reportRows` | PDF message-row limit only, default/maximum 100,000 |
+
+For example:
+
+```text
+/api/L3Event/GenerateDiagnosticL3SummaryExcel?sessionId=189&sources=l3,event&technology=5G&direction=DL
+```
+
+All dashboard and technology counts use the filtered messages. Call outcomes use the full loaded
+session window; only calls associated with selected messages appear. Filtering does not fabricate
+a new call attempt from a partial window. A requested PDF message-row limit is disclosed in the PDF;
+its dashboard still uses all selected rows. Excel includes all selected messages. Long Excel details
+continue on additional rows, repeating the message columns; Summary counts source messages.
+
+The server reads one extra row to detect the load limit. If either source exceeds `take`, it returns
+422 instead of silently producing a partial dashboard. Increase `take` up to 50,000 or select fewer
+sessions. Time/search filters are applied after loading; they cannot bypass this load guard.
+
+## Calculation rules
+
+- Primary sources are imported `tbl_l3_log` and `tbl_event_log` records. Missing dashboard parameters
+  fall back to imported `tbl_network_log` measurements for the authorized session/upload scope.
+  Export does not reimport ZIPs or read arbitrary files. Unimported TXT records cannot contribute.
+- Direction/channel columns take priority; missing values fall back to captured/decoded detail.
+- Reference workbooks supply the layout, never fixed report values.
+- Event signal-change statistics use the new value once per event. Unavailable sentinels and
+  out-of-range RF observations are excluded. These are event-observation averages, not time-weighted
+  or regularly sampled network averages.
+- Serving PCI counts exclude neighbour-list PCIs. Negative/unavailable identifiers are excluded.
+- A1–A6/B1–B2 counts come from actual L3 measurement-report messages, not event configuration rows.
+- Reconfiguration completion ratios compare observed counts, without assuming correlated transactions.
+  RACH ratios use explicit exported handover RACH outcomes. Zero observed failures is not proof that
+  no failures occurred outside the selected capture.
+- Registration observation ratios do not mean registration procedure success. Explicit NR RAT
+  evidence alone does not identify SA versus NSA. Technology Summary retains timeline labels,
+  including Unknown and any contextual inference from the existing analyzer.
+- Unsupported/missing metrics show `Not available`. Explicit named decoded performance fields are
+  retained where supported; link-capacity estimates are never treated as throughput.
+
+## Verification
+
+```powershell
+dotnet build SignalTracker.csproj --no-restore
+dotnet run --project CallAnalyzerRegression/CallAnalyzerRegression.csproj -- --l3-report <zip-path> artifacts/l3-summary
+```
+
+The regression checks filtering, unavailable values, neighbour exclusion, configuration/report
+distinction, long Unicode details and formula-like text, the five-sheet XLSX structure, PDF sections,
+and shared calculation results. With the Sunil sample ZIP it verifies 1,773 imported rows,
+76 measurement reports, 19 reconfigurations, 19 completions, 8 handover RACH success events,
+and SS-RSRP/RSRQ/SINR averages of -83.2/-12.5/11.3.
+
+
+## Network Log dashboard fallback
+
+Fallback runs automatically in the JSON, Excel and PDF endpoints. L3/Event values always take priority
+for each dashboard parameter in the selected scope, including valid zero counts. Only missing values
+are filled. Each KPI/parameter includes a `source` (`L3/Event`, `Network Log`, or `Not available`), also
+printed in the Excel/PDF dashboard. Network Log values use sample-weighted means and are labelled;
+they are not combined with Event-change measurements into a single average.
+
+Network measurements come from `tbl_network_log`, populated by the network Excel/CSV upload flow.
+The loader resolves a diagnostic history/upload ID or an original network upload ID to its linked
+sessions. Explicit session IDs and upload IDs are intersected. Every resolved session is checked
+against the caller's access rights before loading measurements. No unrelated upload or unlinked
+session is used; a standalone diagnostic upload with no linked session has no Network Log fallback.
+
+Supported fallbacks include technology, band, serving-cell IDs, PLMN/TAC, LTE EARFCN / NR ARFCN,
+LTE RSRP/RSRQ and NR SS-RSRP/SS-RSRQ/SS-SINR, plus explicitly stored application/MAC throughput,
+NR MCS/CQI/rank/modulation/RB/slot usage/Tx power and named decoded configuration parameters.
+Generic LTE measurements never fill NR metrics; CSI-RSRP is not treated as SS-RSRP. Application
+throughput requires the explicit PS App measurement; a capacity estimate or generic DL THPT column
+is not relabelled as application throughput. Mobility counts and procedure success ratios still
+require signaling evidence and are not invented from sampled RF values.
+
+Time, technology, direction and channel filters apply to Network Log samples. The `sources` filter
+selects primary L3/Event messages and does not disable the requested fallback. Search, interface
+(other than `all`) and failures-only filters disable fallback because sampled Network Log rows cannot
+satisfy signaling-message predicates. The default load guard also applies to Network Log rows:
+exceeding `take` returns 422 `NETWORK_FALLBACK_LIMIT`, rather than a partial fallback calculation.
+
+The importer now retains supported extra dashboard columns under `extra_json.network_log_fields`
+on new uploads, without per-row database lookups. Dedicated columns take priority over extra JSON.
+Older uploads can use their existing stored columns; fields that were previously discarded require
+reimporting the original Network Log file. This change does not modify L3 list eligibility: actual
+L3 rows are still required for an upload to appear in that list.
+
+Run the focused fallback regressions:
+
+```powershell
+dotnet run --project CallAnalyzerRegression/CallAnalyzerRegression.csproj -- --network-fallback artifacts/network-fallback-test
+```
+
+
+## Backend Summary contract (version 1)
+
+`GET /api/L3Event/GetDiagnosticL3Summary?uploadId=<id>&includeRows=false`
+returns all Summary metrics and calls with an empty `rows` array. Omit `includeRows`
+or set it to `true` to retain the existing timeline response. The MapView alias
+supports the same option. Access checks, filters, database fallback and complete-scope
+row limits apply in both modes.
+
+The response includes `summaryVersion: 1`, call outcome totals, millisecond averages
+(`averageSetupTime`, `averageTalkTime`), duration totals, and `observedEvents` with
+`endcSetupRows` and `handoverRows`. Each entry in `technologies` also includes
+`observedEvents`. Averages use Connected calls with valid, nonnegative timings;
+missing timings do not become zero-valued samples. Total connected duration includes
+the recorded talk time of dropped calls.
+
+Observed counts match canonical message/detail/interface text once per stored row.
+They are not deduplicated handover procedures: several messages may describe one
+handover. Ordinary RRC reconfiguration/completion alone does not count as an observed
+handover. These same observed totals appear in the Excel and PDF mobility metrics.
+Network Log fallback continues to fill missing RF metrics, not handover observations.
+
+The backend analyzer frontend requests `includeRows=true` once when an upload/session
+opens. It stores the summary and timeline from that response and builds one shared
+protocol/signaling model and map points. All tabs reuse this initial data; switching
+tabs does not fetch again. Concurrent requests for the same open scope (including
+React development effect replay) share the same promise. Opening another scope
+loads that scope's data. Summary keeps backend totals and call technology.
+Errors, including 422 row-limit errors, are displayed without retrying a different
+endpoint that could return partial data.
+Deploy the backend before this frontend: the new page requires summary contract v1.
+
+This change does not add persistent analysis caching, paginated detail endpoints,
+or move the detailed handover correlation engine to the backend.
