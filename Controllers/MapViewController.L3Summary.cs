@@ -16,8 +16,9 @@ public partial class MapViewController
         [FromQuery] int? uploadId = null,
         [FromQuery] int take = 50000,
         [FromQuery] string? sourceFileName = null,
-        [FromQuery] L3SummaryFilters? filters = null) =>
-        GenerateCombinedL3SummaryAsync(sessionId, sessionIds, sessionIdsAlt, uploadId, take, sourceFileName, filters, false, 100000, json: true);
+        [FromQuery] L3SummaryFilters? filters = null,
+        [FromQuery] bool includeRows = true) =>
+        GenerateCombinedL3SummaryAsync(sessionId, sessionIds, sessionIdsAlt, uploadId, take, sourceFileName, filters, false, 100000, json: true, includeRows: includeRows);
 
     [HttpGet("GenerateDiagnosticL3SummaryExcel")]
     public Task<IActionResult> GenerateDiagnosticL3SummaryExcel(
@@ -32,7 +33,7 @@ public partial class MapViewController
 
     private async Task<IActionResult> GenerateCombinedL3SummaryAsync(int? sessionId, string? sessionIds,
         string? sessionIdsAlt, int? uploadId, int take, string? sourceFileName, L3SummaryFilters? filters,
-        bool pdf, int reportRows, bool json = false)
+        bool pdf, int reportRows, bool json = false, bool includeRows = true)
     {
         try
         {
@@ -74,7 +75,7 @@ public partial class MapViewController
             if (fallback.Error != null) return fallback.Error;
             NetworkLogDashboardFallback.Apply(report, fallback.Rows);
             HttpContext.RequestAborted.ThrowIfCancellationRequested();
-            if (json) return Json(BuildL3SummaryJson(report, selected.Select(pair => pair.Row).ToList()));
+            if (json) return Json(BuildL3SummaryJson(report, includeRows ? selected.Select(pair => pair.Row).ToList() : Array.Empty<DiagnosticTimelineRow>()));
             var stem = SanitizeDiagnosticFileStem(source);
             return pdf ? File(BuildCombinedL3SummaryPdf(report, Math.Clamp(reportRows, 1, 100000)), "application/pdf", $"call-summary-{stem}.pdf")
                 : File(L3SummaryReportBuilder.WriteExcel(report), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", $"call-summary-{stem}.xlsx");
@@ -94,11 +95,33 @@ public partial class MapViewController
             parameter = row.Parameter, result = row.Result, observation = row.Observation, source = row.Source
         }).ToArray();
 
+        static double? Milliseconds(string value) =>
+            double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds)
+            && double.IsFinite(seconds) && seconds >= 0 ? Math.Round(seconds * 1000, MidpointRounding.AwayFromZero) : null;
+        static double Average(IEnumerable<double?> values)
+        {
+            var valid = values.Where(v => v.HasValue).Select(v => v!.Value).ToArray();
+            return valid.Length == 0 ? 0 : Math.Round(valid.Average(), MidpointRounding.AwayFromZero);
+        }
+        var connectedCalls = report.Calls.Where(c => c.Result.Equals("Connected", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var duration = report.Calls.Sum(c => Milliseconds(c.Duration) ?? 0);
+        static object Observed(L3ObservedEvents value) => new { endcSetupRows = value.EndcSetupRows, handoverRows = value.HandoverRows };
+
         return new
         {
             status = 1,
             data = new
             {
+                summaryVersion = 1,
+                totalCalls = report.Calls.Count,
+                connected = connectedCalls.Length,
+                dropped = report.Calls.Count(c => c.Result.Equals("Dropped", StringComparison.OrdinalIgnoreCase)),
+                notConnected = report.Calls.Count(c => c.Result.Equals("Not Connected", StringComparison.OrdinalIgnoreCase)),
+                averageSetupTime = Average(connectedCalls.Select(c => Milliseconds(c.SetupTime))),
+                averageTalkTime = Average(connectedCalls.Select(c => Milliseconds(c.Duration))),
+                totalDurationMs = duration,
+                totalConnectedDurationMs = duration,
+                observedEvents = Observed(report.ObservedEvents),
                 sourceFile = report.SourceFile,
                 scope = report.Scope,
                 generatedAt = report.GeneratedAt,
@@ -115,7 +138,8 @@ public partial class MapViewController
                 parameters = Values(report.Parameters),
                 technologies = report.Technologies.Select(row => new
                 {
-                    technology = row.Technology, rows = row.Rows, interfaces = row.Interfaces
+                    technology = row.Technology, rows = row.Rows, interfaces = row.Interfaces,
+                    observedEvents = Observed(report.ObservedEventsByTechnology.GetValueOrDefault(row.Technology) ?? new(0, 0))
                 }).ToArray(),
                 calls = report.Calls.Select(row => new
                 {

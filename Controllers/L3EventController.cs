@@ -297,8 +297,9 @@ public L3EventController(
             [FromQuery] int? uploadId = null,
             [FromQuery] int take = 50000,
             [FromQuery] string? sourceFileName = null,
-            [FromQuery] L3SummaryFilters? filters = null) =>
-            CreateMapViewController().GetDiagnosticL3Summary(sessionId, sessionIds, sessionIdsAlt, uploadId, take, sourceFileName, filters);
+            [FromQuery] L3SummaryFilters? filters = null,
+            [FromQuery] bool includeRows = true) =>
+            CreateMapViewController().GetDiagnosticL3Summary(sessionId, sessionIds, sessionIdsAlt, uploadId, take, sourceFileName, filters, includeRows);
 
         [HttpGet("GenerateDiagnosticL3SummaryExcel")]
         public Task<IActionResult> GenerateDiagnosticL3SummaryExcel(

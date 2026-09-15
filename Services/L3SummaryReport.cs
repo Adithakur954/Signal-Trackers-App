@@ -16,6 +16,7 @@ public sealed record L3DashboardValue(string Parameter, string Result, string Ob
     public string Source { get; init; } = "";
 }
 public sealed record L3ReportTechnology(string Technology, int Rows, string Interfaces);
+public sealed record L3ObservedEvents(int EndcSetupRows, int HandoverRows);
 
 public sealed class L3SummaryReport
 {
@@ -31,11 +32,30 @@ public sealed class L3SummaryReport
     public List<L3DashboardValue> Kpis { get; } = [];
     public List<L3DashboardValue> Mobility { get; } = [];
     public List<L3DashboardValue> Parameters { get; } = [];
+    public L3ObservedEvents ObservedEvents { get; set; } = new(0, 0);
+    public Dictionary<string, L3ObservedEvents> ObservedEventsByTechnology { get; } = new(StringComparer.OrdinalIgnoreCase);
 }
 
 /// <summary>Builds primary L3/Event statistics. Missing dashboard values may subsequently use Network Log fallback.</summary>
 public static class L3SummaryReportBuilder
 {
+    // Message observations, not deduplicated procedures or success rates.
+    private static readonly Regex HandoverText = new(@"\bhand[\s-]?over\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex EndcText = new(@"\b(?:en[-\s]?dc|scg|secondary\s+cell\s+group|s?gnb)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex SetupText = new(@"\b(?:setup|addition|add|request|reconfig(?:uration)?|activation|activate|active|establish(?:ment)?)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    public static L3ObservedEvents CountObservedEvents(IEnumerable<string> texts)
+    {
+        var endc = 0;
+        var handovers = 0;
+        foreach (var text in texts)
+        {
+            if (EndcText.IsMatch(text) && SetupText.IsMatch(text)) endc++;
+            if (HandoverText.IsMatch(text)) handovers++;
+        }
+        return new(endc, handovers);
+    }
+
     private const string Missing = "Not available";
     private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
     private static readonly Regex Fields = new(@"\b(?<key>[a-zA-Z][a-zA-Z0-9_-]*)\s*[:=]\s*(?<value>\[[^\]\r\n]*\]|[^\s,;|{}]+)", RegexOptions.Compiled);
@@ -58,6 +78,12 @@ public static class L3SummaryReportBuilder
                     StringComparer.OrdinalIgnoreCase)
                 .Select(g => new L3ReportTechnology(g.Key, g.Count(), Join(g.Select(m => m.Interface)))).ToList()
         };
+        foreach (var group in messages.GroupBy(m => string.IsNullOrWhiteSpace(m.Technology) ? "Unknown" : m.Technology, StringComparer.OrdinalIgnoreCase))
+            report.ObservedEventsByTechnology[group.Key] = CountObservedEvents(group.Select(m => $"{m.Message} {m.Detail} {m.Interface}"));
+        report.ObservedEvents = new(report.ObservedEventsByTechnology.Values.Sum(v => v.EndcSetupRows),
+            report.ObservedEventsByTechnology.Values.Sum(v => v.HandoverRows));
+        report.Mobility.Add(new("Observed EN-DC setup rows", report.ObservedEvents.EndcSetupRows.ToString(Inv), "Message text observations; not correlated setup attempts."));
+        report.Mobility.Add(new("Observed handover rows", report.ObservedEvents.HandoverRows.ToString(Inv), "Message text observations; not unique handovers or confirmed successes."));
         // Parse each payload once. Named decoded values remain associated with their source row.
         var decoded = messages.Select(m => (Row: m, Fields: Fields.Matches(m.Detail)
             .GroupBy(x => Key(x.Groups["key"].Value))

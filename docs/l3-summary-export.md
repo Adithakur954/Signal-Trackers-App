@@ -159,3 +159,38 @@ Run the focused fallback regressions:
 ```powershell
 dotnet run --project CallAnalyzerRegression/CallAnalyzerRegression.csproj -- --network-fallback artifacts/network-fallback-test
 ```
+
+
+## Backend Summary contract (version 1)
+
+`GET /api/L3Event/GetDiagnosticL3Summary?uploadId=<id>&includeRows=false`
+returns all Summary metrics and calls with an empty `rows` array. Omit `includeRows`
+or set it to `true` to retain the existing timeline response. The MapView alias
+supports the same option. Access checks, filters, database fallback and complete-scope
+row limits apply in both modes.
+
+The response includes `summaryVersion: 1`, call outcome totals, millisecond averages
+(`averageSetupTime`, `averageTalkTime`), duration totals, and `observedEvents` with
+`endcSetupRows` and `handoverRows`. Each entry in `technologies` also includes
+`observedEvents`. Averages use Connected calls with valid, nonnegative timings;
+missing timings do not become zero-valued samples. Total connected duration includes
+the recorded talk time of dropped calls.
+
+Observed counts match canonical message/detail/interface text once per stored row.
+They are not deduplicated handover procedures: several messages may describe one
+handover. Ordinary RRC reconfiguration/completion alone does not count as an observed
+handover. These same observed totals appear in the Excel and PDF mobility metrics.
+Network Log fallback continues to fill missing RF metrics, not handover observations.
+
+The backend analyzer frontend requests `includeRows=true` once when an upload/session
+opens. It stores the summary and timeline from that response and builds one shared
+protocol/signaling model and map points. All tabs reuse this initial data; switching
+tabs does not fetch again. Concurrent requests for the same open scope (including
+React development effect replay) share the same promise. Opening another scope
+loads that scope's data. Summary keeps backend totals and call technology.
+Errors, including 422 row-limit errors, are displayed without retrying a different
+endpoint that could return partial data.
+Deploy the backend before this frontend: the new page requires summary contract v1.
+
+This change does not add persistent analysis caching, paginated detail endpoints,
+or move the detailed handover correlation engine to the backend.

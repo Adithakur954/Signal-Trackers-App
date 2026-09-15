@@ -28,7 +28,7 @@ internal static class L3SummaryReportRegression
             Row("l3", "NR RRC Reconfiguration", "measCfg: A1 A2 A3"),
             Row("l3", "NR Measurement Report", "Measurement Event: A2 | PCell PCI32 -90dBm"),
             Row("l3", "NR RRC Reconfiguration Complete", "xact=1"),
-            Row("event", "ENDC_AVAILABILITY", "accessNetworkTechnology=NR CellIdentityNr mPci=32 mBands=[41] mNci=3331"),
+            Row("event", "ENDC_AVAILABILITY", "accessNetworkTechnology=NR CellIdentityNr mRegistered=YES mPci=32 mBands=[41] mNci=3331"),
             Row("event", "ENDC_AVAILABILITY", "accessNetworkTechnology=UNKNOWN"),
             Row("event", "LINK_CAPACITY_EST", "downlinkCapacityKbps=200000"),
             Row("l3", "NR SIB2", "qRxLevMin=-120dBm qQualMin=-43 qHyst=dB3 prio=7"),
@@ -52,6 +52,35 @@ internal static class L3SummaryReportRegression
         CheckJson(empty);
         CheckJson(L3SummaryReportBuilder.Build("multiple", "Sessions: 1,2", rows.Concat(rows.Select(r => r with { SessionId = 2 })).ToList(),
             [new L3ReportCall("Call-1", "5G", "12:00:00", "12:00:30", "Connected", "2", "28", "Normal release")]));
+
+        var observedReport = L3SummaryReportBuilder.Build("observed", "all", [
+            Row("l3", "NR RRC Reconfiguration", "radioBearerConfig"),
+            Row("l3", "NR RRC Reconfiguration Complete", "xact=1"),
+            Row("event", "handover started", "handover target"),
+            Row("event", "hand-over completed", "success") with { Technology = "LTE" },
+            Row("l3", "SCG addition request", "secondary cell group setup"),
+            Row("event", "ENDC_AVAILABILITY", "available"),
+            Row("event", "ordinary event", "leftover")
+        ], [
+            new("1", "5G", "12:00:00", "12:00:20", "Connected", "1.25", "18", ""),
+            new("2", "LTE", "12:00:30", "12:00:50", "Connected", "", "", ""),
+            new("3", "LTE", "12:01:00", "12:01:20", "Dropped", "3", "10", ""),
+            new("4", "LTE", "12:01:30", "12:01:35", "Not Connected", "", "", "")
+        ]);
+        Check(observedReport.ObservedEvents == new L3ObservedEvents(1, 2), "count each matching row once; ordinary RRC completion is not handover");
+        Check(observedReport.ObservedEventsByTechnology["LTE"].HandoverRows == 1, "technology-scoped handover observations");
+        using (var stats = JsonDocument.Parse(CheckJson(observedReport)))
+        {
+            var data = stats.RootElement.GetProperty("data");
+            Check(data.GetProperty("summaryVersion").GetInt32() == 1, "summary contract version");
+            Check(data.GetProperty("totalCalls").GetInt32() == 4 && data.GetProperty("connected").GetInt32() == 2
+                && data.GetProperty("dropped").GetInt32() == 1 && data.GetProperty("notConnected").GetInt32() == 1, "backend call outcome totals");
+            Check(data.GetProperty("averageSetupTime").GetDouble() == 1250 && data.GetProperty("averageTalkTime").GetDouble() == 18000,
+                "averages use connected calls and exclude unavailable timings");
+            Check(data.GetProperty("totalConnectedDurationMs").GetDouble() == 28000, "connected duration includes dropped call talk time");
+            Check(data.GetProperty("observedEvents").GetProperty("handoverRows").GetInt32() == 2, "summary observations without timeline payload");
+            Check(data.GetProperty("rows").GetArrayLength() == 0, "lightweight summary retains metrics without timeline rows");
+        }
 
         var filter = new L3SummaryFilters { Sources = "l3", Channel = "UL-DCCH", Technology = "5G", TimeFrom = "23:00", TimeTo = "01:00" };
         Check(filter.Validate() == null && filter.Matches(rows[5] with { Timestamp = "00:30:00", Channel = "UL-DCCH" }, false), "overnight time and combined filters");
@@ -144,6 +173,10 @@ internal static class L3SummaryReportRegression
         }
         Check(data.GetProperty("technologies").EnumerateArray().Sum(t => t.GetProperty("rows").GetInt32()) == report.Messages.Count, "JSON technology counts");
         Check(data.GetProperty("calls").GetArrayLength() == report.Calls.Count, "JSON call summaries");
+        Check(data.GetProperty("observedEvents").GetProperty("handoverRows").GetInt32() == report.ObservedEvents.HandoverRows, "JSON observed handover rows");
+        Check(data.GetProperty("technologies").EnumerateArray().Sum(t => t.GetProperty("observedEvents").GetProperty("handoverRows").GetInt32()) == report.ObservedEvents.HandoverRows, "technology handover counts sum to total");
+        if (report.Calls.Count == 0)
+            Check(data.GetProperty("averageSetupTime").GetDouble() == 0 && data.GetProperty("averageTalkTime").GetDouble() == 0, "empty call averages");
         if (report.Calls.Count > 0)
             Check(data.GetProperty("calls")[0].GetProperty("setupTime").GetString() == report.Calls[0].SetupTime, "JSON call timing");
         Check(!data.TryGetProperty("messages", out _), "JSON summary avoids the full message payload");
