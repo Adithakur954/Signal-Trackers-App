@@ -41,6 +41,7 @@ CALL add_index_if_missing('tbl_network_log', 'ix_network_log_timestamp_session',
 CALL add_index_if_missing('tbl_network_log', 'ix_network_log_company_session', 'company_id, session_id');
 CALL add_index_if_missing('tbl_network_log', 'ix_network_log_session_kpi', 'session_id, rsrp, rsrq, sinr, mos');
 CALL add_index_if_missing('tbl_network_log_neighbour', 'ix_network_log_neighbour_session_time_id', 'session_id, timestamp, id');
+CALL add_index_if_missing('tbl_project_clutter_tile', 'ix_project_clutter_tile_active', 'project_id, is_active');
 
 CALL add_index_if_missing('tbl_session', 'ix_session_user_start_id', 'user_id, start_time, id');
 CALL add_index_if_missing('tbl_session', 'ix_session_upload_id', 'tbl_upload_id');
