@@ -16,8 +16,11 @@ namespace SignalTracker.Services
     {
         private const int DefaultBatchSize = 2000;
         private const int BaselineResultInsertBatchSize = 20000;
-        private const int GeoFeatureInsertBatchSize = 5000;
+        private const int GeoFeatureInsertBatchSize = 10000;
         private const int BridgeReadCacheTtlSeconds = 180;
+        // Bounded stripes avoid retaining a semaphore for every project forever.
+        private static readonly SemaphoreSlim[] BaselineSaveGates = Enumerable.Range(0, 128)
+            .Select(_ => new SemaphoreSlim(1, 1)).ToArray();
 
         private readonly ApplicationDbContext _db;
         private readonly IConfiguration _configuration;
@@ -1279,10 +1282,13 @@ namespace SignalTracker.Services
                     project_id,
                     area,
                     geometry,
+                    height_m,
+                    source_name,
                     ST_AsText(region) AS region_wkt,
                     ST_AsText(geometry) AS geometry_wkt
                 FROM tbl_savepolygon
                 WHERE project_id = @pid
+                  AND (source_name IS NULL OR source_name IN ('overture_building', 'osm_building'))
                 ORDER BY id
                 LIMIT @lim OFFSET @off;";
 
@@ -1913,6 +1919,43 @@ namespace SignalTracker.Services
             CancellationToken cancellationToken = default
         )
         {
+            if (request.ProjectId <= 0 || (request.Rows ?? new()).Any(row =>
+                Convert.ToInt64(RowValue(row, "project_id") ?? request.ProjectId) != request.ProjectId))
+                throw new ArgumentException("Baseline rows must belong to the requested project.", nameof(request));
+
+            var gate = BaselineSaveGates[(int)((uint)request.ProjectId % (uint)BaselineSaveGates.Length)];
+            await gate.WaitAsync(cancellationToken);
+            try
+            {
+                for (var attempt = 1; ; attempt++)
+                {
+                    try
+                    {
+                        return await SaveLtePredictionBaselineAttemptAsync(request, cancellationToken);
+                    }
+                    catch (MySqlConnector.MySqlException ex) when (
+                        (ex.Number == 1205 || ex.Number == 1213) && attempt < 3 &&
+                        !cancellationToken.IsCancellationRequested)
+                    {
+                        // The attempt's transaction is disposed (rolled back) before retrying.
+                        // Never retry transport/commit failures with an unknown commit outcome.
+                        _logger.LogWarning(ex,
+                            "Baseline save retry: project={ProjectId} job={JobId} attempt={Attempt} mysqlError={Error}",
+                            request.ProjectId, request.JobId, attempt, ex.Number);
+                        await Task.Delay(TimeSpan.FromSeconds(attempt), cancellationToken);
+                    }
+                }
+            }
+            finally
+            {
+                gate.Release();
+            }
+        }
+
+        private async Task<int> SaveLtePredictionBaselineAttemptAsync(
+            DictionaryRowsBulkRequest request,
+            CancellationToken cancellationToken)
+        {
             var rows = request.Rows ?? new List<Dictionary<string, object?>>();
             if (rows.Count == 0)
             {
@@ -1930,7 +1973,31 @@ namespace SignalTracker.Services
                     await conn.OpenAsync(cancellationToken);
                 }
 
+            await using (var diagnostic = conn.CreateCommand())
+            {
+                diagnostic.CommandText = "SELECT DATABASE(), CONNECTION_ID();";
+                await using var reader = await diagnostic.ExecuteReaderAsync(cancellationToken);
+                if (await reader.ReadAsync(cancellationToken))
+                    _logger.LogInformation(
+                        "Baseline save: server={Server} database={Database} connectionId={ConnectionId} region={Region} country={Country} project={ProjectId} job={JobId} rows={Rows} replace={Replace}",
+                        conn.DataSource, reader.GetValue(0), reader.GetValue(1), request.Region,
+                        request.CountryCode, request.ProjectId, request.JobId, rows.Count, request.ReplaceExisting);
+            }
+
             await EnsureBaselineSmoothedColumnsAsync(conn, transaction: null, cancellationToken);
+            if (request.ReplaceExisting)
+            {
+                await using var indexCheck = conn.CreateCommand();
+                indexCheck.CommandText = @"
+                    SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS
+                    WHERE TABLE_SCHEMA = DATABASE()
+                      AND TABLE_NAME = 'lte_prediction_baseline_results'
+                      AND COLUMN_NAME = 'project_id' AND SEQ_IN_INDEX = 1;";
+                if (Convert.ToInt64(await indexCheck.ExecuteScalarAsync(cancellationToken)) == 0)
+                    _logger.LogWarning(
+                        "Baseline DELETE has no leading project_id index: database={Database} project={ProjectId}. Add a project_id index through a database migration.",
+                        conn.Database, request.ProjectId);
+            }
             await using var transaction = await BeginTransactionWithReconnectAsync(
                 conn,
                 nameof(SaveLtePredictionBaselineResultsAsync),
@@ -1957,7 +2024,7 @@ namespace SignalTracker.Services
                 }
             }
 
-            foreach (var batch in rows.Chunk(300))
+            foreach (var batch in rows.Chunk(10000))
             {
                 await using var command = conn.CreateCommand();
                 command.Transaction = transaction;
