@@ -37,6 +37,7 @@ END $$
 DELIMITER ;
 
 CALL add_index_if_missing('tbl_network_log', 'ix_network_log_session_time_id', 'session_id, timestamp, id');
+CALL add_index_if_missing('tbl_network_log', 'ix_network_log_timestamp_session', 'timestamp, session_id');
 CALL add_index_if_missing('tbl_network_log', 'ix_network_log_company_session', 'company_id, session_id');
 CALL add_index_if_missing('tbl_network_log', 'ix_network_log_session_kpi', 'session_id, rsrp, rsrq, sinr, mos');
 CALL add_index_if_missing('tbl_network_log_neighbour', 'ix_network_log_neighbour_session_time_id', 'session_id, timestamp, id');
