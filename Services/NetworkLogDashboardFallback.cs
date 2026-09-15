@@ -94,11 +94,11 @@ public static class NetworkLogDashboardFallback
     {
         report.NetworkLogRows = samples.Count;
         if (samples.Count == 0) return;
-        void Fill(List<L3DashboardValue> group, string name, string? value, string note)
+        void Fill(List<L3DashboardValue> group, string name, string? value, string note, string source = "Network Log")
         {
             var index = group.FindIndex(v => v.Parameter == name);
             if (index < 0 || Available(group[index].Result) || !Available(value)) return;
-            group[index] = new(name, value!, "Network Log fallback: " + note) { Source = "Network Log" };
+            group[index] = new(name, value!, $"{source}: {note}") { Source = source };
         }
         string? Join(IEnumerable<string?> values)
         {
@@ -118,7 +118,7 @@ public static class NetworkLogDashboardFallback
         Ids("NR Cell Identity count", samples.Where(r => r.Technology == "5G").Select(r => r.Get("mci", "nci", "cell_id")), true);
         Ids("NR ARFCN", samples.Where(r => r.Technology == "5G").Select(r => r.Get("earfcn", "nrArfcn")));
         Ids("LTE EARFCN", samples.Where(r => r.Technology == "LTE").Select(r => r.Get("earfcn")));
-        Ids("TAC", Values("tac"));
+        Ids("TAC", Values("tac").Where(v => !string.Equals(v?.Trim(), "65535", StringComparison.OrdinalIgnoreCase)));
         Fill(report.Kpis, "PLMN", Join(samples.Select(r =>
         {
             var mcc = r.Get("mcc", "m_mcc"); var mnc = r.Get("mnc", "m_mnc");
@@ -138,6 +138,66 @@ public static class NetworkLogDashboardFallback
             Fill(report.Kpis, "Average " + label, numbers.Average().ToString("0.0", Inv), note);
             Fill(report.Kpis, "Min / Max " + label, $"{numbers.Min().ToString("0.#", Inv)} / {numbers.Max().ToString("0.#", Inv)}", note);
         }
+
+        // Derive only radio values with a physically meaningful formula and
+        // only when every required measurement is present in the same sample.
+        // Never estimate a value from a loosely related field or a default.
+        void FillDerivedRadioMetric(string technology, string metric, double min, double max,
+            Func<NetworkDashboardSample, double?> calculate, string formula)
+        {
+            var values = samples
+                .Where(sample => sample.Technology == technology)
+                .Select(calculate)
+                .OfType<double>()
+                .Where(value => value >= min && value <= max)
+                .ToArray();
+            if (values.Length == 0) return;
+
+            Fill(report.Kpis, "Average " + metric, values.Average().ToString("0.0", Inv),
+                $"{values.Length} valid samples; {formula}.", "RF calculated");
+            Fill(report.Kpis, "Min / Max " + metric,
+                $"{values.Min().ToString("0.#", Inv)} / {values.Max().ToString("0.#", Inv)}",
+                $"{values.Length} valid samples; {formula}.", "RF calculated");
+        }
+
+        static double? RsrqFromRsrpRssi(NetworkDashboardSample sample)
+        {
+            var rsrp = Numeric(sample.Get("rsrp", "ssRsrp"), -160, -20);
+            var rssi = Numeric(sample.Get("rssi"), -200, 50);
+            var resourceBlocks = Numeric(sample.Get(
+                "NR DL RB", "LTE DL RB", "DL RB", "resource_blocks", "resource blocks", "rb"), 1, 10000);
+            if (!rsrp.HasValue || !rssi.HasValue || !resourceBlocks.HasValue) return null;
+            return 10d * Math.Log10(resourceBlocks.Value) + rsrp.Value - rssi.Value;
+        }
+
+        static double? RsrpFromRsrqRssi(NetworkDashboardSample sample)
+        {
+            var rsrq = Numeric(sample.Get("rsrq", "ssRsrq"), -50, 20);
+            var rssi = Numeric(sample.Get("rssi"), -200, 50);
+            var resourceBlocks = Numeric(sample.Get(
+                "NR DL RB", "LTE DL RB", "DL RB", "resource_blocks", "resource blocks", "rb"), 1, 10000);
+            if (!rsrq.HasValue || !rssi.HasValue || !resourceBlocks.HasValue) return null;
+            return rsrq.Value + rssi.Value - 10d * Math.Log10(resourceBlocks.Value);
+        }
+
+        static double? SinrFromNoise(NetworkDashboardSample sample)
+        {
+            var rsrp = Numeric(sample.Get("rsrp", "ssRsrp"), -160, -20);
+            var noise = Numeric(sample.Get("noise", "noise_floor", "noise floor", "interference"), -200, 50);
+            return rsrp.HasValue && noise.HasValue ? rsrp.Value - noise.Value : null;
+        }
+
+        FillDerivedRadioMetric("5G", "SS-RSRQ (dB)", -50, 20,
+            RsrqFromRsrpRssi, "RSRQ = 10*log10(resource blocks) + RSRP - RSSI");
+        FillDerivedRadioMetric("LTE", "LTE RSRQ (dB)", -50, 20,
+            RsrqFromRsrpRssi, "RSRQ = 10*log10(resource blocks) + RSRP - RSSI");
+        FillDerivedRadioMetric("5G", "SS-RSRP (dBm)", -160, -20,
+            RsrpFromRsrqRssi, "RSRP = RSRQ + RSSI - 10*log10(resource blocks)");
+        FillDerivedRadioMetric("LTE", "LTE RSRP (dBm)", -160, -20,
+            RsrpFromRsrqRssi, "RSRP = RSRQ + RSSI - 10*log10(resource blocks)");
+        FillDerivedRadioMetric("5G", "SS-SINR (dB)", -50, 60,
+            SinrFromNoise, "SINR = RSRP - measured noise/interference");
+
         void Metric(string label, string[] aliases, double min, double max, string unit, bool nrOnly)
         {
             var numbers = samples.Where(r => !nrOnly || r.Technology == "5G")
@@ -146,15 +206,19 @@ public static class NetworkLogDashboardFallback
             Fill(report.Kpis, label, numbers.Average().ToString("0.###", Inv) + unit,
                 $"mean of {numbers.Length} valid captured samples ({string.Join(" / ", aliases)}); no capacity estimates.");
         }
-        Metric("DL application throughput", ["PS App DL (Mbps)"], 0, 1000000, " Mbps", false);
-        Metric("UL application throughput", ["PS App UL (Mbps)"], 0, 1000000, " Mbps", false);
+        Metric("DL application throughput", ["PS App DL (Mbps)", "DL THPT", "dl_tpt", "DL Delivered (Mbps)", "PDCP DL Thpt (Mbps)"], 0, 1000000, " Mbps", false);
+        Metric("UL application throughput", ["PS App UL (Mbps)", "UL THPT", "ul_tpt", "UL Delivered (Mbps)"], 0, 1000000, " Mbps", false);
         // Keep MAC statistics grouped by RAT when an upload contains both LTE and NR.
         foreach (var direction in new[] { "DL", "UL" })
         {
             var parts = new List<string>();
             foreach (var rat in new[] { ("LTE", "LTE"), ("5G", "NR") })
             {
-                var vals = samples.Where(r => r.Technology == rat.Item1).Select(r => Numeric(r.Get($"{rat.Item2} MAC Thpt {direction} (Mbps)"), 0, 1000000)).OfType<double>().ToArray();
+                var aliases = rat.Item2 == "LTE"
+                    ? new[] { $"LTE MAC Thpt {direction} (Mbps)", $"LTE MAC Thpt {direction} delivered (Mbps)" }
+                    : new[] { $"NR MAC Thpt {direction} (Mbps)", $"NR MAC Thpt {direction} delivered (Mbps)" };
+                var vals = samples.Where(r => r.Technology == rat.Item1)
+                    .Select(r => Numeric(r.Get(aliases), 0, 1000000)).OfType<double>().ToArray();
                 if (vals.Length > 0) parts.Add($"{rat.Item2}: {vals.Average().ToString("0.###", Inv)} Mbps ({vals.Length} samples)");
             }
             Fill(report.Kpis, direction + " MAC throughput", parts.Count == 0 ? null : string.Join("; ", parts), "captured MAC throughput means, grouped by RAT.");

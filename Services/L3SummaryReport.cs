@@ -73,7 +73,12 @@ public static class L3SummaryReportBuilder
         {
             var raw = d.Fields.GetValueOrDefault("mbands") ?? d.Fields.GetValueOrDefault("band");
             if (raw == null) return Array.Empty<string>();
-            var nr = Has(d.Row.Detail, @"CellIdentityNr|\bNR\b|\bn\d+\b") || d.Row.Technology.Contains("5G");
+            // LTE CellInfo can contain NR capability/status text. Do not use
+            // that text to classify the band; use the row RAT and explicit NR
+            // cell identity instead.
+            var nr = Has(d.Row.Detail, @"CellIdentityNr")
+                || d.Row.Technology.Contains("5G", StringComparison.OrdinalIgnoreCase)
+                || d.Row.Technology.Equals("NR", StringComparison.OrdinalIgnoreCase);
             return Identifiers(Number.Matches(raw).Select(n => n.Value)).Where(v => v != "0").Select(n => (nr ? "n" : "B") + n).ToArray();
         });
         report.Kpis.Add(new("Band", Join(bands), "Explicitly logged band values; no ARFCN-to-band guessing."));
@@ -90,7 +95,8 @@ public static class L3SummaryReportBuilder
             .Concat(messages.SelectMany(m => Regex.Matches(m.Detail, @"\bPLMN\s+(\d{3}-\d{2,3})", RegexOptions.IgnoreCase)).Select(m => m.Groups[1].Value));
         report.Kpis.Add(new("PLMN", Join(plmns)));
         report.Kpis.Add(new("TAC", Join(Identifiers(Values("mTac", "tac").Concat(messages.SelectMany(m =>
-            Regex.Matches(m.Detail, @"\bTAC\s+(\d+)", RegexOptions.IgnoreCase)).Select(m => m.Groups[1].Value))))));
+            Regex.Matches(m.Detail, @"\bTAC\s+(\d+)", RegexOptions.IgnoreCase)).Select(m => m.Groups[1].Value)))
+            .Where(v => v != "65535"))));
 
         foreach (var (name, label, min, max) in new[]
         {
@@ -162,6 +168,18 @@ public static class L3SummaryReportBuilder
         foreach (var group in new[] { report.Kpis, report.Mobility, report.Parameters })
             for (var i = 0; i < group.Count; i++)
                 group[i] = group[i] with { Source = NetworkLogDashboardFallback.Available(group[i].Result) ? "L3/Event" : "Not available" };
+
+        // Android LTE CellInfo sometimes serializes LTE bands with an "n"
+        // prefix. That prefix means NR only when the row is actually NR; for
+        // an LTE-only report the canonical value must be B<band>.
+        var technologyResult = report.Kpis.FirstOrDefault(v => v.Parameter == "Technology")?.Result ?? "";
+        var bandIndex = report.Kpis.FindIndex(v => v.Parameter == "Band");
+        if (bandIndex >= 0 && !Has(technologyResult, @"5G|\bNR\b"))
+        {
+            var band = report.Kpis[bandIndex];
+            var normalizedBand = Regex.Replace(band.Result, @"\bn(\d+)\b", "B$1", RegexOptions.IgnoreCase);
+            report.Kpis[bandIndex] = band with { Result = normalizedBand };
+        }
         return report;
     }
 
