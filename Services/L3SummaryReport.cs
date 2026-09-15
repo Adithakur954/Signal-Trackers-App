@@ -65,11 +65,14 @@ public static class L3SummaryReportBuilder
         IEnumerable<string> Values(params string[] names) => decoded.SelectMany(d => names.Select(n =>
                 d.Fields.GetValueOrDefault(Key(n))).OfType<string>())
             .Where(v => !Has(v, @"^(?:2147483647|9223372036854775807|unknown|null|n/a|na)$"));
+        static bool IsServingCellRow((L3ReportMessage Row, Dictionary<string, string> Fields) decodedRow) =>
+            !decodedRow.Fields.ContainsKey("mbands") && !decodedRow.Fields.ContainsKey("mpci")
+            || Regex.IsMatch(decodedRow.Row.Detail, @"mRegistered\s*=\s*YES|registered\s*[:=]\s*YES", RegexOptions.IgnoreCase);
         var explicitRats = Values("accessNetworkTechnology", "rat").Where(v => !v.Equals("UNKNOWN", StringComparison.OrdinalIgnoreCase))
             .Select(v => v.Equals("NR", StringComparison.OrdinalIgnoreCase) ? "5G NR" : v).ToArray();
         report.Kpis.Add(new("Technology", explicitRats.Length > 0 ? Join(explicitRats) : Join(report.Technologies.Select(t => t.Technology)),
             explicitRats.Length > 0 ? "Explicit registration RAT observations; SA/NSA mode is not inferred from NR alone." : "Message timeline technology labels; these may include contextual inference."));
-        var bands = decoded.SelectMany(d =>
+        var bands = decoded.Where(IsServingCellRow).SelectMany(d =>
         {
             var raw = d.Fields.GetValueOrDefault("mbands") ?? d.Fields.GetValueOrDefault("band");
             if (raw == null) return Array.Empty<string>();
@@ -84,7 +87,8 @@ public static class L3SummaryReportBuilder
         report.Kpis.Add(new("Band", Join(bands), "Explicitly logged band values; no ARFCN-to-band guessing."));
         report.Kpis.Add(new("NR ARFCN", Join(Identifiers(Values("mNrArfcn", "NARFCN", "nrArfcn"))), "Decoded L3/Event fields; unavailable identifiers excluded."));
         report.Kpis.Add(new("LTE EARFCN", Join(Identifiers(Values("mEarfcn", "earfcn"))), "Decoded L3/Event fields."));
-        var pcis = Identifiers(Values("mPci").Concat(messages.SelectMany(m => Regex.Matches(m.Detail,
+        var pcis = Identifiers(decoded.Where(IsServingCellRow).SelectMany(d => d.Fields.TryGetValue("mpci", out var pci) ? new[] { pci } : Array.Empty<string>())
+            .Concat(messages.SelectMany(m => Regex.Matches(m.Detail,
             @"\bPCell\s+PCI\s*(\d+)", RegexOptions.IgnoreCase)).Select(m => m.Groups[1].Value))).Distinct().ToArray();
         report.Kpis.Add(new("Serving PCI count", pcis.Length == 0 ? Missing : $"{pcis.Length} ({Join(pcis)})", "Cell identity / PCell observations; neighbour PCIs excluded."));
         var ncis = Identifiers(Values("mNci").Concat(messages.SelectMany(m => Regex.Matches(m.Detail, @"\bNCI\s+(\d+)", RegexOptions.IgnoreCase))

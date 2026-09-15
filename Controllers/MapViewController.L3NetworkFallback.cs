@@ -56,7 +56,7 @@ public partial class MapViewController
             await using var reader = await schema.ExecuteReaderAsync(cancellation);
             while (await reader.ReadAsync(cancellation)) available.Add(reader.GetString(0));
         }
-        var fields = new[] { "id", "session_id", "timestamp", "network", "band", "pci", "mci", "cell_id", "earfcn", "tac",
+        var fields = new[] { "id", "session_id", "timestamp", "network", "band", "pci", "mci", "cell_id", "earfcn", "tac", "primary",
             "mcc", "mnc", "m_mcc", "m_mnc", "rsrp", "rsrq", "sinr", "cqi", "dl_tpt", "ul_tpt",
             "dls", "uls", "direction", "channel", "extra_json" };
         await using var command = conn.CreateCommand();

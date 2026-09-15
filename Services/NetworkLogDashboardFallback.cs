@@ -92,6 +92,9 @@ public static class NetworkLogDashboardFallback
 
     public static void Apply(L3SummaryReport report, IReadOnlyList<NetworkDashboardSample> samples)
     {
+        // Neighbour rows are useful for a separate neighbour view, but must
+        // never affect serving-cell dashboard KPIs.
+        samples = samples.Where(IsServingSample).ToList();
         report.NetworkLogRows = samples.Count;
         if (samples.Count == 0) return;
         void Fill(List<L3DashboardValue> group, string name, string? value, string note, string source = "Network Log")
@@ -137,6 +140,18 @@ public static class NetworkLogDashboardFallback
             var note = $"{numbers.Length} valid {technology} Network Log samples; sample-weighted, not time-weighted or Event-change statistics.";
             Fill(report.Kpis, "Average " + label, numbers.Average().ToString("0.0", Inv), note);
             Fill(report.Kpis, "Min / Max " + label, $"{numbers.Min().ToString("0.#", Inv)} / {numbers.Max().ToString("0.#", Inv)}", note);
+        }
+
+        static bool IsServingSample(NetworkDashboardSample sample)
+        {
+            var primary = sample.Get("primary");
+            if (Available(primary))
+                return primary.Equals("yes", StringComparison.OrdinalIgnoreCase)
+                    || primary.Equals("true", StringComparison.OrdinalIgnoreCase)
+                    || primary.Equals("1", StringComparison.OrdinalIgnoreCase);
+
+            // Older rows may not have the dedicated primary column.
+            return !Regex.IsMatch(sample.Get("network") ?? "", @"\bneighbou?r\b", RegexOptions.IgnoreCase);
         }
 
         // Derive only radio values with a physically meaningful formula and
