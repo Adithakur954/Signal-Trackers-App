@@ -118,8 +118,8 @@ public static class NetworkLogDashboardFallback
         Fill(report.Kpis, "Technology", Join(samples.Select(r => r.Technology)), "captured Network Type; SA/NSA is not inferred.");
         Fill(report.Kpis, "Band", Join(Values("band").Where(v => v != "-1")), "captured band values.");
         Ids("Serving PCI count", Values("pci"), true);
-        Ids("NR Cell Identity count", samples.Where(r => r.Technology == "5G").Select(r => r.Get("mci", "nci", "cell_id")), true);
-        Ids("NR ARFCN", samples.Where(r => r.Technology == "5G").Select(r => r.Get("earfcn", "nrArfcn")));
+        Ids("NR Cell Identity count", samples.Where(IsNrSample).Select(r => r.Get("mci", "nci", "cell_id")), true);
+        Ids("NR ARFCN", samples.Where(IsNrSample).Select(r => r.Get("nrArfcn", "NARFCN")));
         Ids("LTE EARFCN", samples.Where(r => r.Technology == "LTE").Select(r => r.Get("earfcn")));
         Ids("TAC", Values("tac").Where(v => !string.Equals(v?.Trim(), "65535", StringComparison.OrdinalIgnoreCase)));
         Fill(report.Kpis, "PLMN", Join(samples.Select(r =>
@@ -154,6 +154,20 @@ public static class NetworkLogDashboardFallback
             return !Regex.IsMatch(sample.Get("network") ?? "", @"\bneighbou?r\b", RegexOptions.IgnoreCase);
         }
 
+        static bool IsNrSample(NetworkDashboardSample sample)
+        {
+            if (sample.Technology == "5G") return true;
+            // NSA exports often label the row as LTE Anchor while carrying
+            // NR measurements in the same row. Only NR-specific evidence can
+            // promote such a row; a generic LTE CQI/MCS is not enough.
+            return new[]
+            {
+                "NR Serving (DIAG)", "NR MAC Thpt DL (Mbps)", "NR MAC Thpt UL (Mbps)",
+                "NR DL RB", "NR DL Slot Usage (%)", "NR DL Modulation", "NR DL Rank",
+                "NR CQI", "NR MCS", "NR Cell Identity", "NR ARFCN", "RI", "ENDC State"
+            }.Any(name => NetworkLogDashboardFallback.Available(sample.Get(name)));
+        }
+
         // Derive only radio values with a physically meaningful formula and
         // only when every required measurement is present in the same sample.
         // Never estimate a value from a loosely related field or a default.
@@ -161,7 +175,7 @@ public static class NetworkLogDashboardFallback
             Func<NetworkDashboardSample, double?> calculate, string formula)
         {
             var values = samples
-                .Where(sample => sample.Technology == technology)
+                .Where(sample => technology == "5G" ? IsNrSample(sample) : sample.Technology == technology)
                 .Select(calculate)
                 .OfType<double>()
                 .Where(value => value >= min && value <= max)
@@ -215,7 +229,7 @@ public static class NetworkLogDashboardFallback
 
         void Metric(string label, string[] aliases, double min, double max, string unit, bool nrOnly)
         {
-            var numbers = samples.Where(r => !nrOnly || r.Technology == "5G")
+            var numbers = samples.Where(r => !nrOnly || IsNrSample(r))
                 .Select(r => Numeric(r.Get(aliases), min, max)).OfType<double>().ToArray();
             if (numbers.Length == 0) return;
             Fill(report.Kpis, label, numbers.Average().ToString("0.###", Inv) + unit,
@@ -232,19 +246,22 @@ public static class NetworkLogDashboardFallback
                 var aliases = rat.Item2 == "LTE"
                     ? new[] { $"LTE MAC Thpt {direction} (Mbps)", $"LTE MAC Thpt {direction} delivered (Mbps)" }
                     : new[] { $"NR MAC Thpt {direction} (Mbps)", $"NR MAC Thpt {direction} delivered (Mbps)" };
-                var vals = samples.Where(r => r.Technology == rat.Item1)
+                var vals = samples.Where(r => rat.Item2 == "NR" ? IsNrSample(r) : r.Technology == rat.Item1)
                     .Select(r => Numeric(r.Get(aliases), 0, 1000000)).OfType<double>().ToArray();
                 if (vals.Length > 0) parts.Add($"{rat.Item2}: {vals.Average().ToString("0.###", Inv)} Mbps ({vals.Length} samples)");
             }
             Fill(report.Kpis, direction + " MAC throughput", parts.Count == 0 ? null : string.Join("; ", parts), "captured MAC throughput means, grouped by RAT.");
         }
-        Metric("NR CQI", ["NR CQI", "cqi"], 0, 15, "", true);
-        Metric("NR MCS", ["NR MCS", "DL MCS"], 0, 31, "", true);
+        Metric("NR CQI", ["NR CQI"], 0, 15, "", true);
+        Metric("NR MCS", ["NR MCS", "NR DL MCS"], 0, 31, "", true);
         Metric("NR resource blocks", ["NR DL RB"], 0, 10000, "", true);
         Metric("NR slot usage", ["NR DL Slot Usage (%)"], 0, 100, "%", true);
         Metric("NR Tx power", ["PUSCH Tx (dBm)"], -100, 100, " dBm", true);
-        Fill(report.Kpis, "NR rank", Join(samples.Where(r => r.Technology == "5G").Select(r => r.Get("NR DL Rank")).Where(v => Numeric(v, 1, 8).HasValue)), "distinct captured NR ranks.");
-        Fill(report.Kpis, "NR modulation", Join(samples.Where(r => r.Technology == "5G").Select(r => r.Get("NR DL Modulation"))), "captured NR modulation labels.");
+        Fill(report.Kpis, "NR rank", Join(samples.Where(IsNrSample)
+            .Select(r => r.Get("NR DL Rank", "RI"))
+            .Where(v => Numeric(v, 1, 8).HasValue)), "captured NR rank/RI values.");
+        Fill(report.Kpis, "NR modulation", Join(samples.Where(IsNrSample)
+            .Select(r => r.Get("NR DL Modulation"))), "captured NR modulation labels.");
         foreach (var (label, alias) in new[]
         {
             ("q-RxLevMin", "qRxLevMin"), ("q-QualMin", "qQualMin"), ("q-Hyst", "qHyst"),
