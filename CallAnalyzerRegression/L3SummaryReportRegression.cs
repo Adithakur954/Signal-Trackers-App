@@ -125,7 +125,7 @@ internal static class L3SummaryReportRegression
     private static string CheckJson(L3SummaryReport report)
     {
         var payload = typeof(MapViewController).GetMethod("BuildL3SummaryJson", BindingFlags.NonPublic | BindingFlags.Static)!
-            .Invoke(null, [report]);
+            .Invoke(null, [report, Array.CreateInstance(typeof(MapViewController).GetNestedType("DiagnosticTimelineRow", BindingFlags.NonPublic)!, 0)]);
         // Mirror Program.cs: property naming policy is null, so field names must be explicit.
         var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true });
         using var document = JsonDocument.Parse(json);
@@ -139,7 +139,7 @@ internal static class L3SummaryReportRegression
         foreach (var (key, values) in new[] { ("kpis", report.Kpis), ("mobility", report.Mobility), ("parameters", report.Parameters) })
         {
             var actual = data.GetProperty(key).EnumerateArray().Select(v => new L3DashboardValue(
-                v.GetProperty("parameter").GetString()!, v.GetProperty("result").GetString()!, v.GetProperty("observation").GetString()!));
+                v.GetProperty("parameter").GetString()!, v.GetProperty("result").GetString()!, v.GetProperty("observation").GetString()!) { Source = v.GetProperty("source").GetString()! });
             Check(actual.SequenceEqual(values), "JSON/Excel/PDF calculation parity: " + key);
         }
         Check(data.GetProperty("technologies").EnumerateArray().Sum(t => t.GetProperty("rows").GetInt32()) == report.Messages.Count, "JSON technology counts");

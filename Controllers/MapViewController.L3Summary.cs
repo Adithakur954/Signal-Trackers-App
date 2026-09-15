@@ -70,6 +70,9 @@ public partial class MapViewController
             var scope = $"Sessions: {string.Join(",", request.SessionIds)}; Upload: {request.UploadId?.ToString() ?? "all selected"}; " +
                 (filters.ToString().Length == 0 ? "All selected L3/Event messages" : filters.ToString());
             var report = L3SummaryReportBuilder.Build(source, scope, selected.Select(p => p.Message).ToList(), selectedCalls);
+            var fallback = await LoadNetworkDashboardFallbackAsync(conn, request, filters, access);
+            if (fallback.Error != null) return fallback.Error;
+            NetworkLogDashboardFallback.Apply(report, fallback.Rows);
             HttpContext.RequestAborted.ThrowIfCancellationRequested();
             if (json) return Json(BuildL3SummaryJson(report, selected.Select(pair => pair.Row).ToList()));
             var stem = SanitizeDiagnosticFileStem(source);
@@ -88,7 +91,7 @@ public partial class MapViewController
         // Explicit camel-case properties: the application's global JSON naming policy is null.
         static object[] Values(IEnumerable<L3DashboardValue> rows) => rows.Select(row => (object)new
         {
-            parameter = row.Parameter, result = row.Result, observation = row.Observation
+            parameter = row.Parameter, result = row.Result, observation = row.Observation, source = row.Source
         }).ToArray();
 
         return new
@@ -99,7 +102,10 @@ public partial class MapViewController
                 sourceFile = report.SourceFile,
                 scope = report.Scope,
                 generatedAt = report.GeneratedAt,
-                hasData = report.Messages.Count > 0,
+                hasData = report.Messages.Count > 0 || report.HasNetworkLogFallback,
+                networkLogRows = report.NetworkLogRows,
+                hasNetworkLogFallback = report.HasNetworkLogFallback,
+                dashboardSources = report.DashboardSources,
                 totalRows = report.Messages.Count,
                 l3Rows = report.Messages.Count(row => row.Source.Equals("l3", StringComparison.OrdinalIgnoreCase)),
                 eventRows = report.Messages.Count(row => row.Source.Equals("event", StringComparison.OrdinalIgnoreCase)),
@@ -136,7 +142,7 @@ public partial class MapViewController
         layout.AddWrapped($"Source File: {report.SourceFile}");
         layout.AddWrapped($"Report Scope: {report.Scope}");
         layout.AddWrapped($"Generated At: {report.GeneratedAt:yyyy-MM-dd HH:mm:ss} UTC");
-        layout.AddWrapped($"Selected Rows: {report.Messages.Count}; Sources: L3 and Event only.");
+        layout.AddWrapped($"Selected Rows: {report.Messages.Count}; Dashboard sources: {report.DashboardSources}; Network Log samples: {report.NetworkLogRows}.");
         layout.AddWrapped($"Exported message rows: {Math.Min(reportRows, report.Messages.Count)}. Dashboard uses all {report.Messages.Count} selected rows.");
         layout.AddSpacer();
         layout.AddLine("Call Summary", "F2", 14);
@@ -154,7 +160,7 @@ public partial class MapViewController
             layout.AddLine(title, "F2", 12);
             foreach (var value in values)
             {
-                layout.AddWrapped($"{value.Parameter}: {value.Result}", "F2", 10);
+                layout.AddWrapped($"{value.Parameter}: {value.Result} [Source: {value.Source}]", "F2", 10);
                 if (value.Observation.Length > 0) layout.AddWrapped(value.Observation, "F1", 9);
             }
             layout.AddSpacer();

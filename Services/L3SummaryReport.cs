@@ -11,7 +11,10 @@ public sealed record L3ReportMessage(string Id, int? SessionId, string Source, s
     string Technology, string Direction, string Channel, string Interface, string Message, string Detail);
 public sealed record L3ReportCall(string Call, string Technology, string Start, string End,
     string Result, string SetupTime, string Duration, string Reason);
-public sealed record L3DashboardValue(string Parameter, string Result, string Observation = "");
+public sealed record L3DashboardValue(string Parameter, string Result, string Observation = "")
+{
+    public string Source { get; init; } = "";
+}
 public sealed record L3ReportTechnology(string Technology, int Rows, string Interfaces);
 
 public sealed class L3SummaryReport
@@ -22,12 +25,15 @@ public sealed class L3SummaryReport
     public IReadOnlyList<L3ReportMessage> Messages { get; init; } = [];
     public IReadOnlyList<L3ReportCall> Calls { get; init; } = [];
     public IReadOnlyList<L3ReportTechnology> Technologies { get; init; } = [];
+    public int NetworkLogRows { get; set; }
+    public bool HasNetworkLogFallback => Kpis.Concat(Mobility).Concat(Parameters).Any(v => v.Source == "Network Log");
+    public string DashboardSources => HasNetworkLogFallback ? "L3/Event with Network Log fallback" : "L3/Event";
     public List<L3DashboardValue> Kpis { get; } = [];
     public List<L3DashboardValue> Mobility { get; } = [];
     public List<L3DashboardValue> Parameters { get; } = [];
 }
 
-/// <summary>Calculations use captured L3/Event rows, never network-log samples or template values.</summary>
+/// <summary>Builds primary L3/Event statistics. Missing dashboard values may subsequently use Network Log fallback.</summary>
 public static class L3SummaryReportBuilder
 {
     private const string Missing = "Not available";
@@ -153,6 +159,9 @@ public static class L3SummaryReportBuilder
         // Keep technology context when more than one RAT contributes decoded parameters.
         report.Parameters.Add(new("Parameter source technologies", Join(decoded.Where(d => d.Fields.Keys.Any(k =>
             k is "qrxlevmin" or "qhyst" or "scscommon")).Select(d => d.Row.Technology))));
+        foreach (var group in new[] { report.Kpis, report.Mobility, report.Parameters })
+            for (var i = 0; i < group.Count; i++)
+                group[i] = group[i] with { Source = NetworkLogDashboardFallback.Available(group[i].Result) ? "L3/Event" : "Not available" };
         return report;
     }
 
@@ -188,7 +197,8 @@ public static class L3SummaryReportBuilder
         summary.Rows.Add(XlsxRow.FromText("Generated At", report.GeneratedAt.ToString("yyyy-MM-dd HH:mm:ss.fff 'UTC'", Inv)));
         summary.Rows.Add(XlsxRow.FromText("Exported Rows", report.Messages.Count.ToString(Inv)));
         summary.Rows.Add(XlsxRow.FromText("Technologies", Join(report.Technologies.Select(t => t.Technology))));
-        summary.Rows.Add(XlsxRow.FromText("Sources", "L3 and Event only"));
+        summary.Rows.Add(XlsxRow.FromText("Sources", report.DashboardSources));
+        summary.Rows.Add(XlsxRow.FromText("Network Log fallback samples", report.NetworkLogRows.ToString(Inv)));
         summary.Rows.Add(XlsxRow.FromText("Call Scope", "Calls associated with filtered rows; outcomes use the complete loaded session window."));
         var calls = Sheet("Call Summary", [16, 18, 20, 20, 22, 20, 20, 90]);
         calls.Rows.Add(XlsxRow.Blank());
@@ -200,14 +210,14 @@ public static class L3SummaryReportBuilder
         tech.Rows.Add(XlsxRow.Header("Technology", "Rows", "Interfaces"));
         foreach (var t in report.Technologies) tech.Rows.Add(Data(t.Technology, t.Rows.ToString(Inv), t.Interfaces));
         var dashboard = Sheet("L3 Dashboard", [36, 48, 75, 4, 46, 50, 4, 32, 48]);
-        dashboard.Rows.Add(XlsxRow.Data("Calculated from selected L3/Event rows. Missing values are not treated as zero."));
+        dashboard.Rows.Add(XlsxRow.Data("L3/Event values take priority; missing values use matching Network Log samples where available. Sources are labelled."));
         dashboard.Rows.Add(XlsxRow.Blank());
         dashboard.Rows.Add(XlsxRow.Header("KPI / Parameter", "Result from Log", "Observation", "", "Mobility KPI", "Result", "", "Decoded Parameter", "Decoded Value"));
         for (var i = 0; i < new[] { report.Kpis.Count, report.Mobility.Count, report.Parameters.Count }.Max(); i++)
         {
             var k = report.Kpis.ElementAtOrDefault(i); var m = report.Mobility.ElementAtOrDefault(i); var p = report.Parameters.ElementAtOrDefault(i);
-            dashboard.Rows.Add(Data(k?.Parameter, k?.Result, k?.Observation, "", m?.Parameter,
-                m == null ? "" : m.Result + (m.Observation.Length > 0 ? " — " + m.Observation : ""), "", p?.Parameter, p?.Result));
+            dashboard.Rows.Add(Data(k?.Parameter, k?.Result, k == null ? "" : $"Source: {k.Source}. {k.Observation}", "", m?.Parameter,
+                m == null ? "" : m.Result + (m.Observation.Length > 0 ? " — " + m.Observation : ""), "", p?.Parameter, p == null ? "" : p.Result + " [Source: " + p.Source + "]"));
         }
         var messages = Sheet("Sheet Messages", [24, 16, 24, 24, 48, 120]);
         messages.Rows.Add(XlsxRow.Data("Captured or decoded detail. Long details continue on additional rows with repeated message columns."));

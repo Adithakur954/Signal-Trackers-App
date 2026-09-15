@@ -34,16 +34,17 @@ The response has `status: 1` and a `data` object with these fields:
 | Field | Contents |
 | --- | --- |
 | `sourceFile`, `scope`, `generatedAt` | Source label, actual query scope and UTC generation time |
-| `hasData`, `totalRows`, `l3Rows`, `eventRows` | Whether any filtered rows exist and the row counts |
-| `kpis` | Dashboard KPI rows: `{ parameter, result, observation }` |
-| `mobility` | Mobility rows with the same three fields |
-| `parameters` | Decoded parameter rows with the same three fields |
+| `hasData`, `totalRows`, `l3Rows`, `eventRows` | Availability and L3/Event message counts; `hasData` can also be true for a dashboard filled from Network Log |
+| `networkLogRows`, `hasNetworkLogFallback`, `dashboardSources` | Number of eligible Network Log samples, whether a fallback value was used, and source label |
+| `kpis` | Dashboard KPI rows: `{ parameter, result, observation, source }` |
+| `mobility` | Mobility rows with the same fields, including `source` |
+| `parameters` | Decoded parameter rows with the same fields, including `source` |
 | `technologies` | `{ technology, rows, interfaces }` entries |
 | `calls` | `{ call, technology, start, end, result, setupTime, duration, reason }` entries; timing strings are in seconds |
 
 Render `data.kpis`, `data.mobility` and `data.parameters` as the three dashboard tables.
 Results preserve the report's display strings, including units and `Not available`. The JSON
-omits full Sheet Messages to keep the response focused on the summary. Empty selections currently
+retains the existing `rows` timeline; Network Log samples are not appended to it. Empty selections currently
 return `status: 1`, `hasData: false`, zero row counts and the unavailable-value dashboard; the frontend
 should show a no-data state. Validation/access/load-limit errors use the shared HTTP error responses.
 This endpoint does not change the existing `GetDiagnosticAnalyzerSummary` contract.
@@ -86,8 +87,9 @@ sessions. Time/search filters are applied after loading; they cannot bypass this
 
 ## Calculation rules
 
-- Sources are the imported `tbl_l3_log` and `tbl_event_log` records only. Export does not reimport ZIPs
-  or read NetworkLog/KPI files. ZIP TXT records that were not imported cannot contribute to the report.
+- Primary sources are imported `tbl_l3_log` and `tbl_event_log` records. Missing dashboard parameters
+  fall back to imported `tbl_network_log` measurements for the authorized session/upload scope.
+  Export does not reimport ZIPs or read arbitrary files. Unimported TXT records cannot contribute.
 - Direction/channel columns take priority; missing values fall back to captured/decoded detail.
 - Reference workbooks supply the layout, never fixed report values.
 - Event signal-change statistics use the new value once per event. Unavailable sentinels and
@@ -116,3 +118,44 @@ distinction, long Unicode details and formula-like text, the five-sheet XLSX str
 and shared calculation results. With the Sunil sample ZIP it verifies 1,773 imported rows,
 76 measurement reports, 19 reconfigurations, 19 completions, 8 handover RACH success events,
 and SS-RSRP/RSRQ/SINR averages of -83.2/-12.5/11.3.
+
+
+## Network Log dashboard fallback
+
+Fallback runs automatically in the JSON, Excel and PDF endpoints. L3/Event values always take priority
+for each dashboard parameter in the selected scope, including valid zero counts. Only missing values
+are filled. Each KPI/parameter includes a `source` (`L3/Event`, `Network Log`, or `Not available`), also
+printed in the Excel/PDF dashboard. Network Log values use sample-weighted means and are labelled;
+they are not combined with Event-change measurements into a single average.
+
+Network measurements come from `tbl_network_log`, populated by the network Excel/CSV upload flow.
+The loader resolves a diagnostic history/upload ID or an original network upload ID to its linked
+sessions. Explicit session IDs and upload IDs are intersected. Every resolved session is checked
+against the caller's access rights before loading measurements. No unrelated upload or unlinked
+session is used; a standalone diagnostic upload with no linked session has no Network Log fallback.
+
+Supported fallbacks include technology, band, serving-cell IDs, PLMN/TAC, LTE EARFCN / NR ARFCN,
+LTE RSRP/RSRQ and NR SS-RSRP/SS-RSRQ/SS-SINR, plus explicitly stored application/MAC throughput,
+NR MCS/CQI/rank/modulation/RB/slot usage/Tx power and named decoded configuration parameters.
+Generic LTE measurements never fill NR metrics; CSI-RSRP is not treated as SS-RSRP. Application
+throughput requires the explicit PS App measurement; a capacity estimate or generic DL THPT column
+is not relabelled as application throughput. Mobility counts and procedure success ratios still
+require signaling evidence and are not invented from sampled RF values.
+
+Time, technology, direction and channel filters apply to Network Log samples. The `sources` filter
+selects primary L3/Event messages and does not disable the requested fallback. Search, interface
+(other than `all`) and failures-only filters disable fallback because sampled Network Log rows cannot
+satisfy signaling-message predicates. The default load guard also applies to Network Log rows:
+exceeding `take` returns 422 `NETWORK_FALLBACK_LIMIT`, rather than a partial fallback calculation.
+
+The importer now retains supported extra dashboard columns under `extra_json.network_log_fields`
+on new uploads, without per-row database lookups. Dedicated columns take priority over extra JSON.
+Older uploads can use their existing stored columns; fields that were previously discarded require
+reimporting the original Network Log file. This change does not modify L3 list eligibility: actual
+L3 rows are still required for an upload to appear in that list.
+
+Run the focused fallback regressions:
+
+```powershell
+dotnet run --project CallAnalyzerRegression/CallAnalyzerRegression.csproj -- --network-fallback artifacts/network-fallback-test
+```

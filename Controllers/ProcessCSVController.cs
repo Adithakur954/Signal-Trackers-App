@@ -1328,6 +1328,7 @@ public IActionResult UploadSitePrediction(
                 .Select(x => x.user_id)
                 .FirstOrDefault();
 
+            int[]? dashboardFieldIndexes = null;
             foreach (var row in csv.GetRecords<NetworkLogModel>())
             {
                 hasAnyRecord = true;
@@ -1397,7 +1398,14 @@ public IActionResult UploadSitePrediction(
                 entity.altitude   = ParseFloat(row.Altitude);
                 entity.indoor_outdoor = row.IndoorOutdoor;
                 entity.battery    = ParseInt(row.Battery);
-                entity.extra_json = BuildNetworkLogExtraJson(row);
+                dashboardFieldIndexes ??= (csv.HeaderRecord ?? Array.Empty<string>())
+                    .Select((header, index) => (header, index))
+                    .Where(h => SignalTracker.Services.NetworkLogDashboardFallback.CapturedHeaders
+                        .Any(name => SignalTracker.Services.NetworkLogDashboardFallback.Normalize(name) == SignalTracker.Services.NetworkLogDashboardFallback.Normalize(h.header)))
+                    .GroupBy(h => h.header.Trim(), StringComparer.OrdinalIgnoreCase)
+                    .Select(group => group.First().index).ToArray();
+                entity.extra_json = BuildNetworkLogExtraJson(row, dashboardFieldIndexes.ToDictionary(
+                    index => csv.HeaderRecord![index].Trim(), index => csv.GetField(index)));
 
                 entity.dls        = row.dls;
                 entity.uls        = row.uls;
@@ -2178,7 +2186,7 @@ public IActionResult UploadSitePrediction(
             return null;
         }
 
-        private static string? BuildNetworkLogExtraJson(NetworkLogModel row)
+        private static string? BuildNetworkLogExtraJson(NetworkLogModel row, IReadOnlyDictionary<string, string?>? dashboardFields = null)
         {
             var data = new SortedDictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
             AddExtraValue(data, "altitude", row.Altitude);
@@ -2189,6 +2197,11 @@ public IActionResult UploadSitePrediction(
             AddExtraValue(data, "sub_session_details", row.SubSessionDetails);
             AddExtraValue(data, "cs", row.CS);
             AddExtraValue(data, "ps", row.PS);
+            if (dashboardFields != null)
+            {
+                var captured = dashboardFields.Where(p => !string.IsNullOrWhiteSpace(p.Value)).ToDictionary(p => p.Key, p => p.Value);
+                if (captured.Count > 0) data["network_log_fields"] = captured;
+            }
 
             return data.Count == 0 ? null : System.Text.Json.JsonSerializer.Serialize(data);
         }

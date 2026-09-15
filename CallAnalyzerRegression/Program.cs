@@ -10,6 +10,12 @@ if (args.FirstOrDefault() == "--l3-report")
     return;
 }
 
+if (args.FirstOrDefault() == "--network-fallback")
+{
+    NetworkDashboardFallbackRegression.Run(args.ElementAtOrDefault(1) ?? "artifacts/network-fallback-test");
+    return;
+}
+
 DiagnosticFieldRegression.Run();
 
 static List<DiagnosticAnalyzerInput> ReadRows(string zipPath, string prefix)
