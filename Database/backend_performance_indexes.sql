@@ -18,6 +18,17 @@ BEGIN
         WHERE table_schema = DATABASE()
           AND table_name = table_name_in
           AND index_name = index_name_in
+    ) AND NOT EXISTS (
+        -- A previous deployment may have created the same index under a
+        -- different name. Do not create another equivalent index.
+        SELECT 1
+        FROM information_schema.statistics s
+        WHERE s.table_schema = DATABASE()
+          AND s.table_name = table_name_in
+          AND s.non_unique = 1
+        GROUP BY s.index_name
+        HAVING REPLACE(GROUP_CONCAT(s.column_name ORDER BY s.seq_in_index), ' ', '')
+             = REPLACE(index_columns_in, ' ', '')
     ) THEN
         SET @sql = CONCAT(
             'CREATE INDEX ',
@@ -41,6 +52,10 @@ CALL add_index_if_missing('tbl_network_log', 'ix_network_log_timestamp_session',
 CALL add_index_if_missing('tbl_network_log', 'ix_network_log_company_session', 'company_id, session_id');
 CALL add_index_if_missing('tbl_network_log', 'ix_network_log_session_kpi', 'session_id, rsrp, rsrq, sinr, mos');
 CALL add_index_if_missing('tbl_network_log_neighbour', 'ix_network_log_neighbour_session_time_id', 'session_id, timestamp, id');
+-- Diagnostic summary loads both tables by session and returns rows in id order.
+-- These indexes avoid a full scan/filesort for the summary endpoint.
+CALL add_index_if_missing('tbl_event_log', 'ix_event_log_session_id_id', 'session_id, id');
+CALL add_index_if_missing('tbl_l3_log', 'ix_l3_log_session_id_id', 'session_id, id');
 CALL add_index_if_missing('tbl_project_clutter_tile', 'ix_project_clutter_tile_active', 'project_id, is_active');
 
 CALL add_index_if_missing('tbl_session', 'ix_session_user_start_id', 'user_id, start_time, id');

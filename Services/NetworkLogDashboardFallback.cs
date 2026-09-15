@@ -81,7 +81,7 @@ public static class NetworkLogDashboardFallback
     [
         "PS App DL (Mbps)", "PS App UL (Mbps)", "NR MAC Thpt DL (Mbps)", "NR MAC Thpt UL (Mbps)",
         "LTE MAC Thpt DL (Mbps)", "LTE MAC Thpt UL (Mbps)", "NR MCS", "DL MCS", "NR CQI", "NR DL Rank",
-        "NR DL Modulation", "NR DL RB", "NR DL Slot Usage (%)", "PUSCH Tx (dBm)",
+        "NR DL Modulation", "NR DL RB", "NR DL Slot Usage (%)", "PUSCH Tx (dBm)", "RI", "ENDC Setup",
         "qRxLevMin", "qQualMin", "qHyst", "sIntraSearchP", "sNonIntraSearchP", "threshServingLowP",
         "cellReselectionPriority", "tReselNR", "scsCommon", "ssbOffset", "coreset0", "ss0"
     ];
@@ -264,9 +264,27 @@ public static class NetworkLogDashboardFallback
         Metric("NR Tx power", ["PUSCH Tx (dBm)"], -100, 100, " dBm", true);
         Fill(report.Kpis, "NR rank", Join(samples.Where(IsNrSample)
             .Select(r => r.Get("NR DL Rank", "RI"))
-            .Where(v => Numeric(v, 1, 8).HasValue)), "captured NR rank/RI values.");
+            .Where(v => Numeric(v, 1, 8).HasValue)), "captured NR rank/RI values; source label is RI when NR DL Rank is absent.");
         Fill(report.Kpis, "NR modulation", Join(samples.Where(IsNrSample)
             .Select(r => r.Get("NR DL Modulation"))), "captured NR modulation labels.");
+        var endcOutcomes = samples.Select(r => r.Get("ENDC Setup"))
+            .Where(Available)
+            .Select(value => value!.Trim())
+            .Select(value => value.ToLowerInvariant() switch
+            {
+                "yes" or "true" or "success" or "successful" or "1" => true,
+                "no" or "false" or "fail" or "failed" or "failure" or "0" => false,
+                _ => (bool?)null
+            })
+            .Where(value => value.HasValue)
+            .Select(value => value!.Value)
+            .ToArray();
+        if (endcOutcomes.Length > 0 && endcOutcomes.Any(value => !value))
+        {
+            var successful = endcOutcomes.Count(value => value);
+            Fill(report.Kpis, "ENDC Setup SR", $"{(100d * successful / endcOutcomes.Length).ToString("0.0", Inv)}% ({successful}/{endcOutcomes.Length})",
+                "explicit ENDC Setup success/failure outcomes from serving Network Log rows.");
+        }
         foreach (var (label, alias) in new[]
         {
             ("q-RxLevMin", "qRxLevMin"), ("q-QualMin", "qQualMin"), ("q-Hyst", "qHyst"),
