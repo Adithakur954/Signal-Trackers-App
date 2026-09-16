@@ -7,6 +7,17 @@ namespace SignalTracker.Controllers;
 
 public partial class MapViewController
 {
+    private static readonly Dictionary<string, string[]> SavedSourceLayerNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["buildings"] = new[] { "overture_auto" },
+        ["roads"] = new[] { "overture_road" },
+        ["highways"] = new[] { "overture_highway" },
+        ["railways"] = new[] { "overture_railway" },
+        ["water"] = new[] { "overture_water" },
+        ["land_use"] = new[] { "overture_land_use" },
+        ["land_cover"] = new[] { "overture_land_cover" },
+    };
+
     private static string NormalizeClutterClass(string? clutterClass, string? landCoverClass, out string source)
     {
         var raw = !string.IsNullOrWhiteSpace(clutterClass) ? clutterClass.Trim()
@@ -196,5 +207,193 @@ LIMIT @limit OFFSET @offset;";
             nextOffset,
             data = rows
         });
+    }
+
+    /// <summary>
+    /// Returns real source geometry stored in tbl_savepolygon for optional map overlays.
+    /// Roads/railways/highways are returned from the geometry column so the client
+    /// can render them as lines; polygon-like sources fall back to region.
+    /// </summary>
+    [HttpGet("GetProjectSavedSourceGeometries")]
+    public async Task<IActionResult> GetProjectSavedSourceGeometries(
+        [FromQuery] long projectId,
+        [FromQuery] string? layer = null,
+        [FromQuery] int limit = 5000,
+        [FromQuery] int offset = 0,
+        CancellationToken cancellationToken = default)
+    {
+        if (projectId <= 0)
+            return BadRequest(new { status = 0, message = "projectId must be positive." });
+        if (offset < 0)
+            return BadRequest(new { status = 0, message = "offset cannot be negative." });
+
+        var layerKey = string.IsNullOrWhiteSpace(layer) ? "all" : layer.Trim().ToLowerInvariant();
+        if (layerKey != "all" && !SavedSourceLayerNames.ContainsKey(layerKey))
+            return BadRequest(new { status = 0, message = "layer must be one of all, buildings, roads, highways, railways, water, land_use, land_cover." });
+
+        var isSuperAdmin = _userScope.IsSuperAdmin(User);
+        var targetCompanyId = GetTargetCompanyId(null);
+        var connection = new MySqlConnection(_connectionProvider.GetConnectionString());
+        await connection.OpenAsync(cancellationToken);
+
+        object? company;
+        await using (var access = connection.CreateCommand())
+        {
+            access.CommandText = "SELECT company_id FROM tbl_project WHERE id = @projectId LIMIT 1;";
+            Add(access, "@projectId", projectId);
+            company = await access.ExecuteScalarAsync(cancellationToken);
+        }
+
+        var shouldTryTaiwan = !string.Equals(connection.Database, "TaiwanDB", StringComparison.OrdinalIgnoreCase);
+        if (shouldTryTaiwan && company != null && company != DBNull.Value)
+        {
+            await using var sourceCheck = connection.CreateCommand();
+            sourceCheck.CommandText = "SELECT COUNT(*) FROM tbl_savepolygon WHERE project_id = @projectId AND is_active = 1;";
+            Add(sourceCheck, "@projectId", projectId);
+            var sourceCount = await sourceCheck.ExecuteScalarAsync(cancellationToken);
+            shouldTryTaiwan = Convert.ToInt64(sourceCount, System.Globalization.CultureInfo.InvariantCulture) == 0;
+        }
+
+        if ((company == null || company == DBNull.Value || shouldTryTaiwan)
+            && !string.Equals(connection.Database, "TaiwanDB", StringComparison.OrdinalIgnoreCase))
+        {
+            await connection.DisposeAsync();
+            connection = new MySqlConnection(MySqlConnectionStringHelper.EnsureZeroDateTimeHandling(
+                _configuration.GetConnectionString("MySqlConnection2")));
+            await connection.OpenAsync(cancellationToken);
+            await using var twAccess = connection.CreateCommand();
+            twAccess.CommandText = "SELECT company_id FROM tbl_project WHERE id = @projectId LIMIT 1;";
+            Add(twAccess, "@projectId", projectId);
+            company = await twAccess.ExecuteScalarAsync(cancellationToken);
+        }
+
+        if (company == null || company == DBNull.Value)
+            return NotFound(new { status = 0, message = "Project not found." });
+
+        var projectCompanyId = Convert.ToInt32(company, System.Globalization.CultureInfo.InvariantCulture);
+        if (!isSuperAdmin && projectCompanyId != targetCompanyId)
+            return Forbid();
+
+        await using var ownedConnection = connection;
+
+        var maxRows = Math.Clamp(limit, 1, 5000);
+        var rows = new List<object>();
+        long totalCount;
+        var where = new StringBuilder("WHERE s.project_id = @projectId AND s.is_active = 1");
+        var prefixes = layerKey == "all"
+            ? SavedSourceLayerNames.SelectMany(pair => pair.Value).Distinct(StringComparer.OrdinalIgnoreCase).ToArray()
+            : SavedSourceLayerNames[layerKey];
+
+        where.Append(" AND (");
+        for (var i = 0; i < prefixes.Length; i++)
+        {
+            if (i > 0) where.Append(" OR ");
+            where.Append($"s.source_name = @source{i} OR s.name = @source{i} OR s.name LIKE @sourcePrefix{i}");
+        }
+        where.Append(')');
+
+        await using (var countCommand = connection.CreateCommand())
+        {
+            countCommand.CommandText = $"SELECT COUNT(*) FROM tbl_savepolygon s {where};";
+            Add(countCommand, "@projectId", projectId);
+            for (var i = 0; i < prefixes.Length; i++)
+            {
+                Add(countCommand, $"@source{i}", prefixes[i]);
+                Add(countCommand, $"@sourcePrefix{i}", prefixes[i] + "_%");
+            }
+            totalCount = Convert.ToInt64(await countCommand.ExecuteScalarAsync(cancellationToken),
+                System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandTimeout = 60;
+            command.CommandText = $@"
+SELECT
+    s.id,
+    s.name,
+    s.source_name,
+    s.area,
+    s.height_m,
+    ST_GeometryType(
+        CASE
+            WHEN boundary.project_geom IS NULL THEN COALESCE(s.geometry, s.region)
+            ELSE ST_Intersection(COALESCE(s.geometry, s.region), boundary.project_geom)
+        END
+    ) AS geometry_type,
+    ST_AsText(
+        CASE
+            WHEN boundary.project_geom IS NULL THEN COALESCE(s.geometry, s.region)
+            ELSE ST_Intersection(COALESCE(s.geometry, s.region), boundary.project_geom)
+        END
+    ) AS geometry_wkt
+FROM tbl_savepolygon s
+LEFT JOIN (
+    SELECT region AS project_geom
+    FROM map_regions
+    WHERE tbl_project_id = @projectId AND status = 1
+    ORDER BY id DESC
+    LIMIT 1
+) boundary ON TRUE
+{where}
+HAVING geometry_wkt IS NOT NULL AND geometry_wkt <> 'GEOMETRYCOLLECTION EMPTY'
+ORDER BY s.id
+LIMIT @limit OFFSET @offset;";
+            Add(command, "@projectId", projectId);
+            Add(command, "@limit", maxRows);
+            Add(command, "@offset", offset);
+            for (var i = 0; i < prefixes.Length; i++)
+            {
+                Add(command, $"@source{i}", prefixes[i]);
+                Add(command, $"@sourcePrefix{i}", prefixes[i] + "_%");
+            }
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var id = reader.GetInt64(0);
+                var name = reader.IsDBNull(1) ? null : reader.GetString(1);
+                var sourceName = reader.IsDBNull(2) ? null : reader.GetString(2);
+                rows.Add(new
+                {
+                    id,
+                    name,
+                    sourceName,
+                    layer = ResolveSavedSourceLayer(name, sourceName),
+                    area = reader.IsDBNull(3) ? (double?)null : Convert.ToDouble(reader.GetValue(3), System.Globalization.CultureInfo.InvariantCulture),
+                    heightM = reader.IsDBNull(4) ? (double?)null : Convert.ToDouble(reader.GetValue(4), System.Globalization.CultureInfo.InvariantCulture),
+                    geometryType = reader.IsDBNull(5) ? null : reader.GetString(5),
+                    geometryWkt = reader.IsDBNull(6) ? null : reader.GetString(6)
+                });
+            }
+        }
+
+        var nextOffset = offset + maxRows;
+        return Ok(new
+        {
+            status = 1,
+            projectId,
+            layer = layerKey,
+            database = connection.Database,
+            matchedCount = totalCount,
+            returnedCount = rows.Count,
+            offset,
+            limit = maxRows,
+            hasMore = nextOffset < totalCount,
+            nextOffset,
+            data = rows
+        });
+    }
+
+    private static string ResolveSavedSourceLayer(string? name, string? sourceName)
+    {
+        var value = $"{sourceName} {name}".ToLowerInvariant();
+        if (value.Contains("overture_road")) return "roads";
+        if (value.Contains("overture_highway")) return "highways";
+        if (value.Contains("overture_railway")) return "railways";
+        if (value.Contains("overture_water")) return "water";
+        if (value.Contains("overture_land_use")) return "land_use";
+        if (value.Contains("overture_land_cover")) return "land_cover";
+        return "buildings";
     }
 }
