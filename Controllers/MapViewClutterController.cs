@@ -33,6 +33,49 @@ public partial class MapViewController
             && envelope.MinY >= 90 && envelope.MaxY <= 180;
     }
 
+    private static string? NormalizeClutterClass(string? clutterClass, string? landCoverClass, string? polygonName,
+        string polygonSource, out string source)
+    {
+        var raw = string.Join(" ", new[] { clutterClass, landCoverClass, polygonName }
+            .Where(value => !string.IsNullOrWhiteSpace(value)))
+            .Trim();
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            source = "unavailable";
+            return null;
+        }
+
+        var value = raw.ToLowerInvariant();
+        source = !string.IsNullOrWhiteSpace(clutterClass) ? "tbl_project_clutter_tile.clutter_class"
+            : !string.IsNullOrWhiteSpace(landCoverClass) ? "tbl_project_clutter_tile.land_cover_class"
+            : polygonSource;
+
+        if (value.Contains("water") || value.Contains("river") || value.Contains("lake") || value.Contains("sea"))
+            return "water";
+        if (value.Contains("highway") || value.Contains("motorway") || value.Contains("road")
+            || value.Contains("street") || value.Contains("freeway") || value.Contains("transport"))
+            return "highway";
+        if (value.Contains("building") || value.Contains("built") || value.Contains("roof")
+            || value.Contains("structure"))
+            return "building";
+        if (value.Contains("suburban") || value.Contains("sub-urban") || value.Contains("peri urban"))
+            return "suburban";
+        if (value.Contains("urban") || value.Contains("city") || value.Contains("residential"))
+            return "urban";
+        if (value.Contains("green") || value.Contains("park") || value.Contains("garden"))
+            return "green";
+        if (value.Contains("vegetation") || value.Contains("forest") || value.Contains("wood")
+            || value.Contains("crop") || value.Contains("grass") || value.Contains("shrub"))
+            return "vegetation";
+
+        // A save polygon is the building geometry source in this endpoint.
+        if (string.Equals(polygonSource, "tbl_savepolygon", StringComparison.OrdinalIgnoreCase))
+            return "building";
+
+        source = "unmapped";
+        return raw;
+    }
+
     private static readonly SemaphoreSlim ClutterSpatialSetupLock = new(1, 1);
     private static volatile bool ClutterSpatialSetupComplete;
 
@@ -130,13 +173,16 @@ WHERE TABLE_SCHEMA = DATABASE()
     public async Task<IActionResult> GetProjectBuildingClutterTiles(
         [FromQuery] long projectId,
         [FromQuery] long? buildingPolygonId = null,
-        [FromQuery] int limit = 50000,
+        [FromQuery] int limit = 1000,
+        [FromQuery] int offset = 0,
         CancellationToken cancellationToken = default)
     {
         if (projectId <= 0)
             return BadRequest(new { status = 0, message = "projectId must be positive." });
         if (buildingPolygonId is <= 0)
             return BadRequest(new { status = 0, message = "buildingPolygonId must be positive when supplied." });
+        if (offset < 0)
+            return BadRequest(new { status = 0, message = "offset cannot be negative." });
 
         var isSuperAdmin = _userScope.IsSuperAdmin(User);
         var targetCompanyId = GetTargetCompanyId(null);
@@ -252,6 +298,9 @@ WHERE p.id = @projectId AND p.polygon IS NOT NULL {projectPolygonFilter}
         }
 
         var rows = new List<object>();
+        var returnedBuildingIds = new HashSet<long>();
+        var matchedBeforePage = 0;
+        var hasMore = false;
         var candidateTileCount = 0;
         var tileBounds = new Envelope();
         foreach (var building in buildingPolygons)
@@ -277,7 +326,9 @@ FROM tbl_project_clutter_tile
 WHERE project_id = @projectId AND geometry_wkt IS NOT NULL
 ORDER BY id;";
 
-            var maxRows = Math.Clamp(limit, 1, 50000);
+            // A single response containing tens of thousands of WKT polygons
+            // can exhaust browser memory. Callers can request subsequent pages.
+            var maxRows = Math.Clamp(limit, 1, 5000);
             var tileReader = new WKTReader();
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
@@ -300,23 +351,36 @@ ORDER BY id;";
                     if (!building.Geometry.EnvelopeInternal.Intersects(tileGeometry.EnvelopeInternal)
                         || !building.Geometry.Intersects(tileGeometry)) continue;
 
+                    if (matchedBeforePage++ < offset) continue;
+                    if (rows.Count >= maxRows)
+                    {
+                        hasMore = true;
+                        break;
+                    }
+
+                    var rawClutterClass = ReadTextValue(reader, 2);
+                    var rawLandCoverClass = ReadTextValue(reader, 3);
+                    var normalizedClass = NormalizeClutterClass(rawClutterClass, rawLandCoverClass,
+                        building.Name, building.Source, out var classSource);
+
                     rows.Add(new
                     {
                         buildingPolygonId = building.Id,
                         buildingPolygonName = building.Name,
                         buildingPolygonSource = building.Source,
-                        buildingPolygonWkt = building.Wkt,
                         clutterTileId = reader.GetInt64(0),
                         clusterTile = ReadTextValue(reader, 1),
                         gridId = ReadTextValue(reader, 1),
-                        clutterClass = ReadTextValue(reader, 2),
-                        landCoverClass = ReadTextValue(reader, 3),
+                        clutterClass = normalizedClass,
+                        clutterClassSource = classSource,
+                        rawClutterClass,
+                        landCoverClass = rawLandCoverClass,
                         resolutionM = reader.IsDBNull(4) ? (decimal?)null : reader.GetDecimal(4),
                         clutterPolygonWkt = tileWkt
                     });
-                    if (rows.Count >= maxRows) break;
+                    returnedBuildingIds.Add(building.Id);
                 }
-                if (rows.Count >= maxRows) break;
+                if (hasMore) break;
             }
         }
 
@@ -331,6 +395,19 @@ ORDER BY id;";
             buildingBounds = new { minX = buildingBounds.MinX, minY = buildingBounds.MinY, maxX = buildingBounds.MaxX, maxY = buildingBounds.MaxY },
             tileBounds = new { minX = tileBounds.MinX, minY = tileBounds.MinY, maxX = tileBounds.MaxX, maxY = tileBounds.MaxY },
             matchedCount = rows.Count,
+            offset,
+            limit = Math.Clamp(limit, 1, 5000),
+            hasMore,
+            nextOffset = offset + rows.Count,
+            // Send each building geometry once. Repeating a large building WKT
+            // on every intersecting tile can exhaust the browser memory.
+            buildingPolygons = buildingPolygons.Select(building => new
+            {
+                buildingPolygonId = building.Id,
+                buildingPolygonName = building.Name,
+                buildingPolygonSource = building.Source,
+                buildingPolygonWkt = building.Wkt
+            }).Where(building => returnedBuildingIds.Contains(building.buildingPolygonId)).ToArray(),
             data = rows
         });
     }
