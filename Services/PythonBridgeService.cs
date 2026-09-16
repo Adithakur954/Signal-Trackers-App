@@ -2124,6 +2124,11 @@ namespace SignalTracker.Services
                     await conn.OpenAsync(cancellationToken);
                 }
 
+                if (request.ReplaceExisting)
+                {
+                    await EnsureGeoFeatureProjectRegionIndexAsync(conn, cancellationToken);
+                }
+
                 await using var transaction = await BeginTransactionWithReconnectAsync(
                     conn,
                     nameof(SaveLtePredictionGeoFeaturesAsync),
@@ -2285,6 +2290,38 @@ namespace SignalTracker.Services
                 {
                     await contextToUse.DisposeAsync();
                 }
+            }
+        }
+
+        private async Task EnsureGeoFeatureProjectRegionIndexAsync(
+            DbConnection conn,
+            CancellationToken cancellationToken)
+        {
+            await using var indexCheck = conn.CreateCommand();
+            indexCheck.CommandText = @"
+                SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = 'lte_prediction_geo_features'
+                  AND INDEX_NAME = 'ix_lte_prediction_geo_features_project_region';";
+
+            if (Convert.ToInt64(await indexCheck.ExecuteScalarAsync(cancellationToken)) > 0)
+            {
+                return;
+            }
+
+            await using var createIndex = conn.CreateCommand();
+            createIndex.CommandText = @"
+                CREATE INDEX ix_lte_prediction_geo_features_project_region
+                ON lte_prediction_geo_features (project_id, region);";
+            try
+            {
+                await createIndex.ExecuteNonQueryAsync(cancellationToken);
+            }
+            catch (MySqlConnector.MySqlException ex) when (ex.Number == 1061)
+            {
+                _logger.LogInformation(
+                    "Geo feature project/region index already exists: database={Database}",
+                    conn.Database);
             }
         }
 
