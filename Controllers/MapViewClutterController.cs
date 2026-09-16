@@ -1,184 +1,57 @@
-using System.Data;
 using System.Text;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Mvc;
 using MySqlConnector;
-using NetTopologySuite.Geometries;
-using NetTopologySuite.Index.Strtree;
-using NetTopologySuite.IO;
 using SignalTracker.Services;
-using NtsGeometry = NetTopologySuite.Geometries.Geometry;
 
 namespace SignalTracker.Controllers;
 
 public partial class MapViewController
 {
-    private sealed class SwapCoordinateAxesFilter : ICoordinateSequenceFilter
+    private static string NormalizeClutterClass(string? clutterClass, string? landCoverClass, out string source)
     {
-        public bool Done => false;
-        public bool GeometryChanged => true;
-
-        public void Filter(CoordinateSequence sequence, int index)
-        {
-            var x = sequence.GetX(index);
-            var y = sequence.GetY(index);
-            sequence.SetOrdinate(index, Ordinate.X, y);
-            sequence.SetOrdinate(index, Ordinate.Y, x);
-        }
-    }
-
-    private static bool LooksLikeLatitudeLongitude(Envelope envelope)
-    {
-        return envelope.MinX >= -90 && envelope.MaxX <= 90
-            && envelope.MinY >= 90 && envelope.MaxY <= 180;
-    }
-
-    private static string? NormalizeClutterClass(string? clutterClass, string? landCoverClass, string? polygonName,
-        string polygonSource, out string source)
-    {
-        var raw = string.Join(" ", new[] { clutterClass, landCoverClass, polygonName }
-            .Where(value => !string.IsNullOrWhiteSpace(value)))
-            .Trim();
+        var raw = !string.IsNullOrWhiteSpace(clutterClass) ? clutterClass.Trim()
+            : !string.IsNullOrWhiteSpace(landCoverClass) ? landCoverClass.Trim()
+            : string.Empty;
         if (string.IsNullOrWhiteSpace(raw))
         {
             source = "unavailable";
-            return null;
+            return "Unclassified";
         }
 
         var value = raw.ToLowerInvariant();
         var compactValue = new string(value.Where(char.IsLetterOrDigit).ToArray());
         source = !string.IsNullOrWhiteSpace(clutterClass) ? "tbl_project_clutter_tile.clutter_class"
-            : !string.IsNullOrWhiteSpace(landCoverClass) ? "tbl_project_clutter_tile.land_cover_class"
-            : polygonSource;
+            : "tbl_project_clutter_tile.land_cover_class";
 
-        if (value.Contains("water") || value.Contains("river") || value.Contains("lake") || value.Contains("sea"))
-            return "water";
-        if (value.Contains("railway") || value.Contains("railroad") || value.Contains("rail line"))
-            return "railway";
-        if (value.Contains("highway") || value.Contains("motorway") || value.Contains("freeway"))
-            return "highway";
-        if (value.Contains("road") || value.Contains("street") || value.Contains("transport"))
-            return "road";
-        if (value.Contains("building") || value.Contains("built") || value.Contains("roof")
-            || value.Contains("structure"))
-            return "building";
-        if (compactValue.Contains("suburban") || compactValue.Contains("periurban"))
-            return "suburban";
         if (compactValue.Contains("denseurban") || value.Contains("high density"))
-            return "dense urban";
-        if (value.Contains("urban") || value.Contains("city") || value.Contains("residential"))
-            return "urban";
-        if (value.Contains("rural") || value.Contains("countryside"))
-            return "rural";
-        if (value.Contains("open land") || value.Contains("open area") || value == "open")
-            return "open";
-        if (value.Contains("green") || value.Contains("park") || value.Contains("garden"))
-            return "green";
+            return "Dense Urban";
+        if (compactValue.Contains("suburban") || compactValue.Contains("periurban"))
+            return "Suburban";
+        if (value.Contains("water") || value.Contains("river") || value.Contains("lake") || value.Contains("sea"))
+            return "Water";
         if (value.Contains("vegetation") || value.Contains("forest") || value.Contains("wood")
-            || value.Contains("crop") || value.Contains("grass") || value.Contains("shrub"))
-            return "vegetation";
-
-        // A save polygon is the building geometry source in this endpoint.
-        if (string.Equals(polygonSource, "tbl_savepolygon", StringComparison.OrdinalIgnoreCase))
-            return "building";
+            || value.Contains("crop") || value.Contains("grass") || value.Contains("shrub")
+            || value.Contains("green") || value.Contains("park") || value.Contains("garden"))
+            return "Vegetation";
+        if (value.Contains("rural") || value.Contains("countryside") || value.Contains("open")
+            || value.Contains("bare") || value.Contains("agricultur"))
+            return "Rural/Open";
+        if (value.Contains("urban") || value.Contains("city") || value.Contains("residential")
+            || value.Contains("building") || value.Contains("built") || value.Contains("roof")
+            || value.Contains("structure") || value.Contains("road") || value.Contains("street")
+            || value.Contains("highway") || value.Contains("motorway") || value.Contains("freeway")
+            || value.Contains("rail") || value.Contains("transport"))
+            return "Urban";
 
         source = "unmapped";
-        return raw;
-    }
-
-    private static readonly SemaphoreSlim ClutterSpatialSetupLock = new(1, 1);
-    private static volatile bool ClutterSpatialSetupComplete;
-
-    private async Task<bool> EnsureClutterSpatialSupportAsync(System.Data.Common.DbConnection connection,
-        CancellationToken cancellationToken)
-    {
-        if (ClutterSpatialSetupComplete) return true;
-        await ClutterSpatialSetupLock.WaitAsync(cancellationToken);
-        try
-        {
-            if (ClutterSpatialSetupComplete) return true;
-
-            async Task<object?> ScalarAsync(string sql)
-            {
-                await using var command = connection.CreateCommand();
-                command.CommandText = sql;
-                command.CommandTimeout = 600;
-                return await command.ExecuteScalarAsync(cancellationToken);
-            }
-
-            try
-            {
-                var column = await ScalarAsync(@"
-SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
-WHERE TABLE_SCHEMA = DATABASE()
-  AND TABLE_NAME = 'tbl_project_clutter_tile'
-  AND COLUMN_NAME = 'geometry_geom';");
-                if (Convert.ToInt32(column, System.Globalization.CultureInfo.InvariantCulture) == 0)
-                {
-                    await using var addColumn = connection.CreateCommand();
-                    addColumn.CommandText = "ALTER TABLE tbl_project_clutter_tile ADD COLUMN geometry_geom GEOMETRY NULL;";
-                    addColumn.CommandTimeout = 600;
-                    await addColumn.ExecuteNonQueryAsync(cancellationToken);
-                }
-
-                // The primary-key predicate keeps this update compatible with
-                // MySQL safe-update mode. It runs only once for old rows.
-                await using (var fill = connection.CreateCommand())
-                {
-                    fill.CommandText = @"
-UPDATE tbl_project_clutter_tile
-SET geometry_geom = ST_GeomFromText(geometry_wkt, 0)
-WHERE id > 0 AND geometry_geom IS NULL AND geometry_wkt IS NOT NULL;";
-                    fill.CommandTimeout = 600;
-                    await fill.ExecuteNonQueryAsync(cancellationToken);
-                }
-
-                var missing = await ScalarAsync(@"
-SELECT COUNT(*) FROM tbl_project_clutter_tile
-WHERE geometry_wkt IS NOT NULL AND geometry_geom IS NULL;");
-                if (Convert.ToInt64(missing, System.Globalization.CultureInfo.InvariantCulture) != 0)
-                    return false;
-
-                await using (var notNull = connection.CreateCommand())
-                {
-                    notNull.CommandText = "ALTER TABLE tbl_project_clutter_tile MODIFY COLUMN geometry_geom GEOMETRY NOT NULL;";
-                    notNull.CommandTimeout = 600;
-                    await notNull.ExecuteNonQueryAsync(cancellationToken);
-                }
-
-                var spatialIndex = await ScalarAsync(@"
-SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS
-WHERE TABLE_SCHEMA = DATABASE()
-  AND TABLE_NAME = 'tbl_project_clutter_tile'
-  AND INDEX_NAME = 'sx_clutter_geometry';");
-                if (Convert.ToInt32(spatialIndex, System.Globalization.CultureInfo.InvariantCulture) == 0)
-                {
-                    await using var addIndex = connection.CreateCommand();
-                    addIndex.CommandText = "ALTER TABLE tbl_project_clutter_tile ADD SPATIAL INDEX sx_clutter_geometry (geometry_geom);";
-                    addIndex.CommandTimeout = 600;
-                    await addIndex.ExecuteNonQueryAsync(cancellationToken);
-                }
-
-                ClutterSpatialSetupComplete = true;
-                return true;
-            }
-            catch
-            {
-                // Keep the endpoint usable if an old row has malformed WKT or
-                // the database user cannot perform schema maintenance.
-                return false;
-            }
-        }
-        finally
-        {
-            ClutterSpatialSetupLock.Release();
-        }
+        return "Unclassified";
     }
 
     /// <summary>
-    /// Returns only clutter tiles that spatially overlap the project's building
-    /// polygons. Geometry is returned as WKT so the existing map clients can use it.
+    /// Returns active classified clutter tiles for the project. Geometry is returned
+    /// as WKT and paged so clients can render each page as it arrives.
     /// </summary>
+    [HttpGet("GetProjectClutterTiles")]
     [HttpGet("GetProjectBuildingClutterTiles")]
     public async Task<IActionResult> GetProjectBuildingClutterTiles(
         [FromQuery] long projectId,
@@ -247,10 +120,6 @@ WHERE project_id = @projectId AND is_active = 1 AND geometry_wkt IS NOT NULL;";
 
         await using var ownedConnection = connection;
 
-        var polygonFilter = buildingPolygonId.HasValue ? "AND sp.id = @buildingPolygonId" : "";
-        var mapRegionFilter = buildingPolygonId.HasValue ? "AND mr.id = @buildingPolygonId" : "";
-        var projectPolygonFilter = buildingPolygonId.HasValue ? "AND 1 = 0" : "";
-        var buildingPolygons = new List<(long Id, string? Name, string Source, string Wkt, NtsGeometry Geometry)>();
         static string? ReadTextValue(System.Data.Common.DbDataReader reader, int ordinal)
         {
             if (reader.IsDBNull(ordinal)) return null;
@@ -263,136 +132,55 @@ WHERE project_id = @projectId AND is_active = 1 AND geometry_wkt IS NOT NULL;";
             };
         }
 
-        await using (var buildingCommand = connection.CreateCommand())
+        var maxRows = Math.Clamp(limit, 1, 5000);
+        var rows = new List<object>();
+        long totalCount;
+        await using (var countCommand = connection.CreateCommand())
         {
-            buildingCommand.CommandTimeout = 30;
-            Add(buildingCommand, "@projectId", projectId);
-            if (buildingPolygonId.HasValue)
-                Add(buildingCommand, "@buildingPolygonId", buildingPolygonId.Value);
-            buildingCommand.CommandText = $@"
-SELECT sp.id, CONVERT(sp.name USING utf8mb4), 'tbl_savepolygon', ST_AsText(sp.region)
-FROM tbl_savepolygon sp
-WHERE sp.project_id = @projectId AND sp.region IS NOT NULL {polygonFilter}
-UNION ALL
-SELECT mr.id, CAST('Project region' AS CHAR CHARACTER SET utf8mb4), 'map_regions', ST_AsText(mr.region)
-FROM map_regions mr
-WHERE mr.tbl_project_id = @projectId AND mr.region IS NOT NULL {mapRegionFilter}
-  AND NOT EXISTS (SELECT 1 FROM tbl_savepolygon sp3 WHERE sp3.project_id = @projectId AND sp3.region IS NOT NULL)
-UNION ALL
-SELECT p.id, CONVERT(p.project_name USING utf8mb4), 'tbl_project', ST_AsText(p.polygon)
-FROM tbl_project p
-WHERE p.id = @projectId AND p.polygon IS NOT NULL {projectPolygonFilter}
-  AND NOT EXISTS (SELECT 1 FROM tbl_savepolygon sp4 WHERE sp4.project_id = @projectId AND sp4.region IS NOT NULL)
-  AND NOT EXISTS (SELECT 1 FROM map_regions mr2 WHERE mr2.tbl_project_id = @projectId AND mr2.region IS NOT NULL);";
-
-            var wktReader = new WKTReader();
-            await using var buildingReader = await buildingCommand.ExecuteReaderAsync(cancellationToken);
-            while (await buildingReader.ReadAsync(cancellationToken))
-            {
-                if (buildingReader.IsDBNull(3)) continue;
-                try
-                {
-                    var wkt = ReadTextValue(buildingReader, 3);
-                    if (string.IsNullOrWhiteSpace(wkt)) continue;
-                    var geometry = wktReader.Read(wkt);
-                    if (LooksLikeLatitudeLongitude(geometry.EnvelopeInternal))
-                    {
-                        geometry.Apply(new SwapCoordinateAxesFilter());
-                        wkt = new WKTWriter().Write(geometry);
-                    }
-                    buildingPolygons.Add((buildingReader.GetInt64(0), ReadTextValue(buildingReader, 1),
-                        ReadTextValue(buildingReader, 2) ?? "unknown", wkt, geometry));
-                }
-                catch (Exception) { /* Skip malformed building geometry instead of failing the whole API. */ }
-            }
+            countCommand.CommandText = @"
+SELECT COUNT(*) FROM tbl_project_clutter_tile
+WHERE project_id = @projectId AND is_active = 1 AND geometry_wkt IS NOT NULL;";
+            Add(countCommand, "@projectId", projectId);
+            totalCount = Convert.ToInt64(await countCommand.ExecuteScalarAsync(cancellationToken),
+                System.Globalization.CultureInfo.InvariantCulture);
         }
 
-        var rows = new List<object>();
-        var returnedBuildingIds = new HashSet<long>();
-        var matchedBeforePage = 0;
-        var hasMore = false;
-        var candidateTileCount = 0;
-        var tileBounds = new Envelope();
-        foreach (var building in buildingPolygons)
-            tileBounds.ExpandToInclude(building.Geometry.EnvelopeInternal);
-        var buildingBounds = tileBounds;
-        tileBounds = new Envelope();
-        if (buildingPolygons.Count > 0)
+        await using (var command = connection.CreateCommand())
         {
-            // Use an in-memory spatial index for the building polygons. The
-            // imported native geometry column is not reliable for older rows,
-            // so relying on its MBR can incorrectly return zero candidates.
-            var buildingIndex = new STRtree<(long Id, string? Name, string Source, string Wkt, NtsGeometry Geometry)>();
-            foreach (var building in buildingPolygons)
-                buildingIndex.Insert(building.Geometry.EnvelopeInternal, building);
-            buildingIndex.Build();
-
-            await using var command = connection.CreateCommand();
             command.CommandTimeout = 60;
             Add(command, "@projectId", projectId);
+            Add(command, "@limit", maxRows);
+            Add(command, "@offset", offset);
             command.CommandText = @"
 SELECT id, grid_id, clutter_class, land_cover_class, resolution_m, geometry_wkt
 FROM tbl_project_clutter_tile
-WHERE project_id = @projectId AND geometry_wkt IS NOT NULL
-ORDER BY id;";
-
-            // A single response containing tens of thousands of WKT polygons
-            // can exhaust browser memory. Callers can request subsequent pages.
-            var maxRows = Math.Clamp(limit, 1, 5000);
-            var tileReader = new WKTReader();
+WHERE project_id = @projectId AND is_active = 1 AND geometry_wkt IS NOT NULL
+ORDER BY id
+LIMIT @limit OFFSET @offset;";
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
-                candidateTileCount++;
-                if (reader.IsDBNull(5)) continue;
-                NtsGeometry tileGeometry;
-                string tileWkt;
-                try
+                var rawClutterClass = ReadTextValue(reader, 2);
+                var rawLandCoverClass = ReadTextValue(reader, 3);
+                var normalizedClass = NormalizeClutterClass(rawClutterClass, rawLandCoverClass, out var classSource);
+
+                rows.Add(new
                 {
-                    tileWkt = ReadTextValue(reader, 5) ?? string.Empty;
-                    if (string.IsNullOrWhiteSpace(tileWkt)) continue;
-                    tileGeometry = tileReader.Read(tileWkt);
-                    tileBounds.ExpandToInclude(tileGeometry.EnvelopeInternal);
-                }
-                catch (Exception) { continue; }
-
-                foreach (var building in buildingIndex.Query(tileGeometry.EnvelopeInternal))
-                {
-                    if (!building.Geometry.EnvelopeInternal.Intersects(tileGeometry.EnvelopeInternal)
-                        || !building.Geometry.Intersects(tileGeometry)) continue;
-
-                    if (matchedBeforePage++ < offset) continue;
-                    if (rows.Count >= maxRows)
-                    {
-                        hasMore = true;
-                        break;
-                    }
-
-                    var rawClutterClass = ReadTextValue(reader, 2);
-                    var rawLandCoverClass = ReadTextValue(reader, 3);
-                    var normalizedClass = NormalizeClutterClass(rawClutterClass, rawLandCoverClass,
-                        building.Name, building.Source, out var classSource);
-
-                    rows.Add(new
-                    {
-                        buildingPolygonId = building.Id,
-                        buildingPolygonName = building.Name,
-                        buildingPolygonSource = building.Source,
-                        clutterTileId = reader.GetInt64(0),
-                        clusterTile = ReadTextValue(reader, 1),
-                        gridId = ReadTextValue(reader, 1),
-                        clutterClass = normalizedClass,
-                        clutterClassSource = classSource,
-                        rawClutterClass,
-                        landCoverClass = rawLandCoverClass,
-                        resolutionM = reader.IsDBNull(4) ? (decimal?)null : reader.GetDecimal(4),
-                        clutterPolygonWkt = tileWkt
-                    });
-                    returnedBuildingIds.Add(building.Id);
-                }
-                if (hasMore) break;
+                    clutterTileId = reader.GetInt64(0),
+                    clusterTile = ReadTextValue(reader, 1),
+                    gridId = ReadTextValue(reader, 1),
+                    clutterClass = normalizedClass,
+                    clutterClassSource = classSource,
+                    rawClutterClass,
+                    landCoverClass = rawLandCoverClass,
+                    resolutionM = reader.IsDBNull(4) ? (decimal?)null : reader.GetDecimal(4),
+                    clutterPolygonWkt = ReadTextValue(reader, 5)
+                });
             }
         }
+
+        var nextOffset = offset + rows.Count;
+        var hasMore = nextOffset < totalCount;
 
         return Ok(new
         {
@@ -400,24 +188,12 @@ ORDER BY id;";
             projectId,
             buildingPolygonId,
             database = connection.Database,
-            buildingPolygonCount = buildingPolygons.Count,
-            candidateTileCount,
-            buildingBounds = new { minX = buildingBounds.MinX, minY = buildingBounds.MinY, maxX = buildingBounds.MaxX, maxY = buildingBounds.MaxY },
-            tileBounds = new { minX = tileBounds.MinX, minY = tileBounds.MinY, maxX = tileBounds.MaxX, maxY = tileBounds.MaxY },
-            matchedCount = rows.Count,
+            matchedCount = totalCount,
+            returnedCount = rows.Count,
             offset,
-            limit = Math.Clamp(limit, 1, 5000),
+            limit = maxRows,
             hasMore,
-            nextOffset = offset + rows.Count,
-            // Send each building geometry once. Repeating a large building WKT
-            // on every intersecting tile can exhaust the browser memory.
-            buildingPolygons = buildingPolygons.Select(building => new
-            {
-                buildingPolygonId = building.Id,
-                buildingPolygonName = building.Name,
-                buildingPolygonSource = building.Source,
-                buildingPolygonWkt = building.Wkt
-            }).Where(building => returnedBuildingIds.Contains(building.buildingPolygonId)).ToArray(),
+            nextOffset,
             data = rows
         });
     }
