@@ -46,22 +46,32 @@ public partial class MapViewController
         }
 
         var value = raw.ToLowerInvariant();
+        var compactValue = new string(value.Where(char.IsLetterOrDigit).ToArray());
         source = !string.IsNullOrWhiteSpace(clutterClass) ? "tbl_project_clutter_tile.clutter_class"
             : !string.IsNullOrWhiteSpace(landCoverClass) ? "tbl_project_clutter_tile.land_cover_class"
             : polygonSource;
 
         if (value.Contains("water") || value.Contains("river") || value.Contains("lake") || value.Contains("sea"))
             return "water";
-        if (value.Contains("highway") || value.Contains("motorway") || value.Contains("road")
-            || value.Contains("street") || value.Contains("freeway") || value.Contains("transport"))
+        if (value.Contains("railway") || value.Contains("railroad") || value.Contains("rail line"))
+            return "railway";
+        if (value.Contains("highway") || value.Contains("motorway") || value.Contains("freeway"))
             return "highway";
+        if (value.Contains("road") || value.Contains("street") || value.Contains("transport"))
+            return "road";
         if (value.Contains("building") || value.Contains("built") || value.Contains("roof")
             || value.Contains("structure"))
             return "building";
-        if (value.Contains("suburban") || value.Contains("sub-urban") || value.Contains("peri urban"))
+        if (compactValue.Contains("suburban") || compactValue.Contains("periurban"))
             return "suburban";
+        if (compactValue.Contains("denseurban") || value.Contains("high density"))
+            return "dense urban";
         if (value.Contains("urban") || value.Contains("city") || value.Contains("residential"))
             return "urban";
+        if (value.Contains("rural") || value.Contains("countryside"))
+            return "rural";
+        if (value.Contains("open land") || value.Contains("open area") || value == "open")
+            return "open";
         if (value.Contains("green") || value.Contains("park") || value.Contains("garden"))
             return "green";
         if (value.Contains("vegetation") || value.Contains("forest") || value.Contains("wood")
