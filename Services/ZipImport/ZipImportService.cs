@@ -17,7 +17,9 @@ namespace SignalTracker.Services.ZipImport
 {
     public sealed class ZipImportService
     {
-        private const int BatchSize = 5000;
+        // Keep more rows in memory so large ZIP imports perform fewer
+        // duplicate-check queries and SaveChanges round-trips.
+        private const int BatchSize = 20000;
         private readonly ApplicationDbContext _db;
         private readonly ILogger<ZipImportService> _logger;
 

@@ -1,4 +1,5 @@
 using System.Globalization;
+using MySqlConnector;
 using Microsoft.AspNetCore.Mvc;
 using SignalTracker.Helper;
 using SignalTracker.Models;
@@ -50,8 +51,16 @@ public partial class MapViewController
             if (denied != null) return denied;
 
             var conn = await OpenDiagnosticConnectionAsync();
-            var events = await LoadDiagnosticEventRowsAsync(conn, request.SessionIds, request.UploadId, request.Take + 1);
-            var l3 = await LoadDiagnosticL3RowsAsync(conn, request.SessionIds, request.UploadId, request.Take + 1);
+            // Event and L3 tables are independent. Read them concurrently so
+            // a large upload does not make the summary wait for two scans in
+            // sequence. Keep the original connection for the fallback query.
+            await using var l3Conn = new MySqlConnection(_connectionProvider.GetConnectionString());
+            await l3Conn.OpenAsync(HttpContext.RequestAborted);
+            var eventsTask = LoadDiagnosticEventRowsAsync(conn, request.SessionIds, request.UploadId, request.Take + 1);
+            var l3Task = LoadDiagnosticL3RowsAsync(l3Conn, request.SessionIds, request.UploadId, request.Take + 1);
+            await Task.WhenAll(eventsTask, l3Task);
+            var events = await eventsTask;
+            var l3 = await l3Task;
             if (events.Count > request.Take || l3.Count > request.Take)
                 return UnprocessableEntity(new { status = 0, message = $"The selected scope exceeds take={request.Take} rows per source. Increase take (maximum 50000) or select fewer sessions. No partial dashboard was generated." });
             HttpContext.RequestAborted.ThrowIfCancellationRequested();
