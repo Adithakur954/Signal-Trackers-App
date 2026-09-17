@@ -536,7 +536,9 @@ namespace SignalTracker.Services.ZipImport
                 pci = GetField(csv, map, "PCI", "NR-PCI / PCI / PSC"),
                 rssi = ParseFloat(GetField(csv, map, "RSSI", "RSSI  (2G-RxLEV)", "rssi")),
                 rsrp = ParseFloat(GetField(csv, map, "RSRP", "ssRSRP / RSRP / RSCP")),
-                rsrq = ParseFloat(GetField(csv, map, "RSRQ", "ssRSRQ / RSRQ / EcNo")),
+                // Some devices use 2147483647 as an invalid/unavailable RSRQ
+                // sentinel. Do not write that value to the database.
+                rsrq = ParseRsrq(GetField(csv, map, "RSRQ", "ssRSRQ / RSRQ / EcNo")),
                 sinr = ParseFloat(GetField(csv, map, "SINR", "NR-SINR / SINR / RxQual")),
                 dl_tpt = GetField(csv, map, "DL THPT", "dl_tpt"),
                 ul_tpt = GetField(csv, map, "UL THPT", "ul_tpt"),
@@ -648,6 +650,13 @@ namespace SignalTracker.Services.ZipImport
             AddExtraValue(data, "sub_session_details", GetField(csv, map, "Sub Session Details", "sub_session_details"));
             AddExtraValue(data, "cs", GetField(csv, map, "CS"));
             AddExtraValue(data, "ps", GetField(csv, map, "PS"));
+            var captured = new SortedDictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+            foreach (var header in NetworkLogDashboardFallback.CapturedHeaders)
+            {
+                var value = GetField(csv, map, header);
+                if (!string.IsNullOrWhiteSpace(value)) captured[header] = value;
+            }
+            if (captured.Count > 0) data["network_log_fields"] = captured;
             return data.Count == 0 ? null : JsonSerializer.Serialize(data);
         }
 
@@ -663,6 +672,10 @@ namespace SignalTracker.Services.ZipImport
             await EnsureTextColumnAsync("tbl_network_log_neighbour", "extra_json", cancellationToken);
             await EnsureColumnAsync("tbl_network_log", "altitude", "DOUBLE NULL", cancellationToken);
             await EnsureColumnAsync("tbl_network_log_neighbour", "altitude", "DOUBLE NULL", cancellationToken);
+            await EnsureColumnAsync("tbl_network_log", "direction", "VARCHAR(64) NULL", cancellationToken);
+            await EnsureColumnAsync("tbl_network_log", "channel", "VARCHAR(128) NULL", cancellationToken);
+            await EnsureColumnAsync("tbl_network_log_neighbour", "direction", "VARCHAR(64) NULL", cancellationToken);
+            await EnsureColumnAsync("tbl_network_log_neighbour", "channel", "VARCHAR(128) NULL", cancellationToken);
             await EnsureColumnAsync("tbl_network_log", "tbl_sub_session_ps_id", "BIGINT NULL", cancellationToken);
             await EnsureColumnAsync("tbl_network_log", "tbl_sub_session_cs_id", "BIGINT NULL", cancellationToken);
             await EnsureColumnAsync("tbl_network_log_neighbour", "tbl_sub_session_ps_id", "BIGINT NULL", cancellationToken);
@@ -1177,6 +1190,12 @@ namespace SignalTracker.Services.ZipImport
                    !float.IsInfinity(parsed)
                 ? parsed
                 : null;
+        }
+
+        private static float? ParseRsrq(string? value)
+        {
+            var parsed = ParseFloat(value);
+            return parsed is >= -100 and <= 20 ? parsed : null;
         }
 
         private static double? ParseDouble(string? value)

@@ -8,7 +8,9 @@ using CsvHelper;
 using CsvHelper.Configuration;
 using SignalTracker.Helper;
 using SignalTracker.Models;
+using SignalTracker.Models.ZipImport;
 using SignalTracker.Services;
+using SignalTracker.Services.ZipImport;
 using System.Data;
 using System.Globalization;
 using System.IO.Compression;
@@ -813,6 +815,27 @@ public L3EventController(
                         : [];
                     preparedInsightFiles = [];
                     originalUploadName = string.Join(", ", preparedL3Files.Concat(preparedEventFiles).Select(file => file.FileName));
+                }
+
+                // The L3/Event screen uploads a combined ZIP, but its diagnostic
+                // importer historically ignored NetworkLog CSV entries. Import
+                // those rows into the same selected session so the summary can
+                // use the Network Log KPI fallback as well. If the upload did
+                // not specify a session, keep the session created by the import
+                // and use it for the L3/Event rows too.
+                ZipImportSummary? networkImport = null;
+                if (zipFile is { Length: > 0 })
+                {
+                    var zipImport = HttpContext.RequestServices.GetRequiredService<ZipImportService>();
+                    networkImport = await zipImport.ImportAsync(
+                        zipFile,
+                        userId,
+                        linkedSessionId,
+                        remarks,
+                        cancellationToken);
+
+                    if (!linkedSessionId.HasValue && networkImport.SessionId > 0)
+                        linkedSessionId = networkImport.SessionId;
                 }
 
                 var hasL3 = preparedL3Files.Count > 0;

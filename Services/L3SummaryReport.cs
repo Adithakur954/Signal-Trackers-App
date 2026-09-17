@@ -172,8 +172,16 @@ public static class L3SummaryReportBuilder
             var complete = group.Count(m => Has(m.Message, @"reconfig(?:uration)?\s*complete\b"));
             report.Mobility.Add(new(prefix + "RRC Reconfiguration", reconfig.ToString(Inv)));
             report.Mobility.Add(new(prefix + "RRC Reconfiguration Complete", complete.ToString(Inv)));
-            report.Mobility.Add(new(prefix + "Observed completion count ratio", Ratio(complete, reconfig),
-                "Counts are not correlated transactions and do not establish procedure success."));
+            // These are message observations, not correlated request/response pairs.
+            // Show a bounded observation ratio only when the counts are mathematically
+            // valid; never expose a misleading value above 100%.
+            var observationRatio = reconfig > 0 && complete <= reconfig
+                ? Ratio(complete, reconfig)
+                : Missing;
+            var ratioNote = reconfig > 0 && complete <= reconfig
+                ? "Bounded message-observation ratio; it is not a correlated procedure success rate."
+                : "Not available: setup count is zero or completion observations exceed setup observations.";
+            report.Mobility.Add(new(prefix + "Observed completion count ratio", observationRatio, ratioNote));
             report.Mobility.Add(new(prefix + "Paging messages", group.Count(m => Has(m.Message, @"\bpaging\b")).ToString(Inv)));
         }
         var rach = messages.Where(m => m.Source.Equals("event", StringComparison.OrdinalIgnoreCase)

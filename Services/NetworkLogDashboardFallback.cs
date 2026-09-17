@@ -79,9 +79,9 @@ public static class NetworkLogDashboardFallback
     // Extra CSV headers retained at import for metrics not represented by dedicated DB columns.
     public static readonly string[] CapturedHeaders =
     [
-        "PS App DL (Mbps)", "PS App UL (Mbps)", "NR MAC Thpt DL (Mbps)", "NR MAC Thpt UL (Mbps)",
-        "LTE MAC Thpt DL (Mbps)", "LTE MAC Thpt UL (Mbps)", "NR MCS", "DL MCS", "NR CQI", "NR DL Rank",
-        "NR DL Modulation", "NR DL RB", "NR DL Slot Usage (%)", "PUSCH Tx (dBm)", "RI", "ENDC Setup",
+        "PS App DL (Mbps)", "PS App UL (Mbps)", "DL THPT", "UL THPT", "NR MAC Thpt DL (Mbps)", "NR MAC Thpt UL (Mbps)",
+        "LTE MAC Thpt DL (Mbps)", "LTE MAC Thpt UL (Mbps)", "NR MCS", "NR DL MCS", "DL MCS", "UL MCS", "NR CQI", "CQI", "NR DL Rank",
+        "NR DL Modulation", "DL Modulation", "UL Modulation", "NR DL RB", "NR DL Slot Usage (%)", "PUSCH Tx (dBm)", "RI", "ENDC Setup",
         "qRxLevMin", "qQualMin", "qHyst", "sIntraSearchP", "sNonIntraSearchP", "threshServingLowP",
         "cellReselectionPriority", "tReselNR", "scsCommon", "ssbOffset", "coreset0", "ss0"
     ];
@@ -257,8 +257,8 @@ public static class NetworkLogDashboardFallback
             }
             Fill(report.Kpis, direction + " MAC throughput", parts.Count == 0 ? null : string.Join("; ", parts), "captured MAC throughput means, grouped by RAT.");
         }
-        Metric("NR CQI", ["NR CQI"], 0, 15, "", true);
-        Metric("NR MCS", ["NR MCS", "NR DL MCS"], 0, 31, "", true);
+        Metric("NR CQI", ["NR CQI", "CQI"], 0, 15, "", true);
+        Metric("NR MCS", ["NR MCS", "NR DL MCS", "DL MCS"], 0, 31, "", true);
         Metric("NR resource blocks", ["NR DL RB"], 0, 10000, "", true);
         Metric("NR slot usage", ["NR DL Slot Usage (%)"], 0, 100, "%", true);
         Metric("NR Tx power", ["PUSCH Tx (dBm)"], -100, 100, " dBm", true);
@@ -279,7 +279,7 @@ public static class NetworkLogDashboardFallback
             .Where(value => value.HasValue)
             .Select(value => value!.Value)
             .ToArray();
-        if (endcOutcomes.Length > 0 && endcOutcomes.Any(value => !value))
+        if (endcOutcomes.Length > 0)
         {
             var successful = endcOutcomes.Count(value => value);
             Fill(report.Kpis, "ENDC Setup SR", $"{(100d * successful / endcOutcomes.Length).ToString("0.0", Inv)}% ({successful}/{endcOutcomes.Length})",
