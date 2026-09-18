@@ -610,23 +610,14 @@ public IActionResult UploadSitePrediction(
         using (var fs = new FileStream(savedPath, FileMode.Create))
             file.CopyTo(fs);
 
-        // Validate only the columns needed to create a site prediction row here.
-        // Optional phone/IP metrics are added below when present; requiring all of
-        // them makes valid frontend exports fail before they ever reach the DB.
-        string[] expectedHeaders = new string[]
-        {
-            "longitude",
-            "latitude"
-        };
-
-        string missingHeaders;
-        if (!ValidateCsvHeadersFlexible(savedPath, expectedHeaders, out missingHeaders))
+        var headerError = SiteCsvSchema.ValidateUpload(savedPath, IsValidZip(savedPath));
+        if (headerError != null)
         {
             // if header validation fails, we return a proper error
             return BadRequest(new
             {
                 success = false,
-                message = $"Invalid file: '{missingHeaders}' columns are missing."
+                message = headerError
             });
         }
 
@@ -753,6 +744,18 @@ public IActionResult UploadSitePrediction(
             {
                 if (System.IO.File.Exists(directorypath))
                 {
+                    // Validate every site CSV before extraction, schema updates or inserts.
+                    // This also covers uploads coming through ExcelUploadController.
+                    if (fileType == 15)
+                    {
+                        var headerError = SiteCsvSchema.ValidateUpload(directorypath, IsValidZip(directorypath));
+                        if (headerError != null)
+                        {
+                            errorMsag = headerError;
+                            return false;
+                        }
+                    }
+
                     extractpath = Path.Combine(Directory.GetCurrentDirectory(), "UploadedExcels", "Extract" + DateTime.Now.ToString("MMddyyyyHmmss"));
 
                     List<string> files = new();
@@ -923,7 +926,10 @@ public IActionResult UploadSitePrediction(
                             else if (fileType == 2)
                                 IsValidSheet = ProcessCtrPredictionSheet(file, excelID, projectId, ref rowInserted, ref rowUpdated, out errorList);
                             else if (fileType == 15)
-                                IsValidSheet = ProcessSitePredictionSheet(file, excelID, projectId, ref rowInserted, ref rowUpdated, out errorList, uploadedSuccessSheetList);
+                            {
+                                bool siteOk = ProcessSitePredictionSheet(file, excelID, projectId, ref rowInserted, ref rowUpdated, out errorList, uploadedSuccessSheetList);
+                                IsValidSheet = IsValidSheet && siteOk;
+                            }
 
                             if (errorList.Count > 0)
                                 allErrorList.AddRange(errorList);
@@ -2971,26 +2977,19 @@ public bool ProcessSitePredictionSheet(
 
     try
     {
+        var headerError = SiteCsvSchema.ValidateFile(filePath);
+        if (headerError != null)
+        {
+            errorList.Add($"{fileName}: {headerError}");
+            return false;
+        }
+
         EnsureSitePredictionUploadColumns();
 
         using var reader = new StreamReader(filePath, Encoding.UTF8);
         var config = CreateLenientCsvConfiguration();
+        config.PrepareHeaderForMatch = args => SiteCsvSchema.NormalizeHeader(args.Header);
         using var csv = new CsvReader(reader, config);
-
-        // Only lat/lon are mandatory for storing a point. Other site, RF, phone,
-        // and IP columns are optional and are stored when the CSV contains them.
-        string[] expectedHeaders = new string[]
-        {
-            "longitude",
-            "latitude"
-        };
-
-        string missingHeaders;
-        if (!ValidateCsvHeadersFlexible(filePath, expectedHeaders, out missingHeaders))
-        {
-            errorList.Add(fileName + " invalid file:- '" + missingHeaders + "' columns are missing");
-            return false;
-        }
 
 	        var records = csv.GetRecords<SitePredictionCsvModel>().ToList();
 	        if (records.Count == 0)

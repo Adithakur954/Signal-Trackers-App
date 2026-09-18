@@ -12257,27 +12257,12 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
     if (req == null || req.ProjectId <= 0 || req.File == null || req.File.Length == 0)
         return BadRequest(new { Status = 0, Message = "ProjectId and CSV file are required." });
 
-    var required = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
-        "site","sector","cell_id","longitude","latitude","pci","azimuth",
-        "band","earfcn","cluster","technology",
-        "m_tilt","e_tilt","height"   // âœ… ADDED
-    };
-
     var inserted = 0;
     using var reader = new StreamReader(req.File.OpenReadStream());
     var headerLine = await reader.ReadLineAsync();
-    if (string.IsNullOrWhiteSpace(headerLine))
-        return BadRequest(new { Status = 0, Message = "Empty CSV." });
-
-    var headers = headerLine.Split(',', StringSplitOptions.TrimEntries);
-    var headerSet = new HashSet<string>(
-        headers.Select(h => h.Trim().Trim('"')),
-        StringComparer.OrdinalIgnoreCase
-    );
-
-    var missing = required.Where(h => !headerSet.Contains(h)).ToList();
-    if (missing.Count > 0)
-        return BadRequest(new { Status = 0, Message = "Missing required CSV columns: " + string.Join(", ", missing) });
+    var headerError = SiteCsvSchema.ValidateHeader(headerLine, out var headers);
+    if (headerError != null)
+        return BadRequest(new { Status = 0, Message = headerError });
 
     int Col(string name) =>
         Array.FindIndex(headers, h =>

@@ -4,6 +4,12 @@ using CsvHelper;
 using CsvHelper.Configuration;
 using SignalTracker.Controllers;
 
+if (args.FirstOrDefault() == "--site-csv")
+{
+    await SiteCsvValidationRegression.RunAsync(args.ElementAtOrDefault(1) ?? "Template-Files/Site_Template.csv");
+    return;
+}
+
 if (args.FirstOrDefault() == "--l3-report")
 {
     L3SummaryReportRegression.Run(args.ElementAtOrDefault(1), args.ElementAtOrDefault(2));
