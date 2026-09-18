@@ -93,14 +93,14 @@ namespace SignalTracker.Controllers
             EF.CompileAsyncQuery((ApplicationDbContext db, string emailNormalized) =>
                 db.tbl_user
                   .AsNoTracking()
-                  .Where(u => u.email.ToLower() == emailNormalized && u.isactive == 1)
+                  .Where(u => u.email != null && u.email.ToLower() == emailNormalized && u.isactive == 1)
                   .Select(u => new UserLite
                   {
                       id = u.id,
                       name = u.name,
-                      email = u.email,
+                      email = u.email ?? string.Empty,
                       m_user_type_id = u.m_user_type_id,
-                      password = u.password,
+                      password = u.password ?? string.Empty,
                       company_id = u.company_id,
                       country_code = u.country_code
                   })
@@ -123,14 +123,14 @@ namespace SignalTracker.Controllers
 
             return await twDb.tbl_user
                 .AsNoTracking()
-                .Where(u => u.email.ToLower() == emailNormalized && u.isactive == 1)
+                .Where(u => u.email != null && u.email.ToLower() == emailNormalized && u.isactive == 1)
                 .Select(u => new UserLite
                 {
                     id = u.id,
                     name = u.name,
-                    email = u.email,
+                    email = u.email ?? string.Empty,
                     m_user_type_id = u.m_user_type_id,
-                    password = u.password,
+                    password = u.password ?? string.Empty,
                     company_id = u.company_id,
                     country_code = u.country_code
                 })
@@ -258,7 +258,7 @@ namespace SignalTracker.Controllers
                 var lockValue = $"{user!.id}:{user.email}:{DateTimeOffset.UtcNow:O}";
                 userLockKey = BuildUserLoginLockKey(user.id);
 
-                if (_redis?.IsConnected == true)
+                if (_redis.IsConnected)
                 {
                     if (obj.ForceLogin == true)
                     {
@@ -375,7 +375,7 @@ namespace SignalTracker.Controllers
                 {
                     try
                     {
-                        if (_redis?.IsConnected == true && !string.IsNullOrWhiteSpace(userLockKey))
+                        if (_redis.IsConnected && !string.IsNullOrWhiteSpace(userLockKey))
                             await _redis.DeleteAsync(userLockKey);
                     }
                     catch { }
@@ -410,11 +410,11 @@ namespace SignalTracker.Controllers
 
                 var user = _db.tbl_user
                               .AsNoTracking()
-                              .Where(a => a.email.ToLower() == emailNorm && a.isactive == 1 && a.m_user_type_id != 4)
+                              .Where(a => a.email != null && a.email.ToLower() == emailNorm && a.isactive == 1 && a.m_user_type_id != 4)
                               .Select(a => new { a.id, a.name, a.email, a.uid })
                               .FirstOrDefault();
 
-                if (user == null)
+                if (user == null || string.IsNullOrWhiteSpace(user.email))
                 {
                     message.Message = "You have entered wrong email id.";
                     return Json(message);
@@ -525,7 +525,7 @@ namespace SignalTracker.Controllers
         {
             try
             {
-                var username = HttpContext?.Session.GetString("UserName");
+                var username = HttpContext.Session.GetString("UserName");
                 if (!string.IsNullOrEmpty(username))
                 {
                     var objAudit = new tbl_user_login_audit_details
@@ -539,10 +539,10 @@ namespace SignalTracker.Controllers
                     await _db.SaveChangesAsync();
                 }
 
-                if (_redis?.IsConnected == true)
+                if (_redis.IsConnected)
                 {
                     var claimUserId = User?.FindFirst("UserId")?.Value;
-                    var sessionUserId = HttpContext?.Session.GetInt32("UserID")?.ToString();
+                    var sessionUserId = HttpContext.Session.GetInt32("UserID")?.ToString();
                     var userIdValue = !string.IsNullOrWhiteSpace(claimUserId) ? claimUserId : sessionUserId;
 
                     if (int.TryParse(userIdValue, out var parsedUserId) && parsedUserId > 0)

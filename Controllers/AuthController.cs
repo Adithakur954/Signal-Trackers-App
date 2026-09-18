@@ -76,9 +76,9 @@ namespace SignalTracker.Controllers
                 .Select(u => new LoginUserDto
                 {
                     id = u.id,
-                    email = u.email,
+                    email = u.email ?? string.Empty,
                     name = u.name,
-                    password = u.password,
+                    password = u.password ?? string.Empty,
                     m_user_type_id = u.m_user_type_id,
                     country_code = u.country_code,
                     company_id = u.company_id
@@ -288,9 +288,9 @@ namespace SignalTracker.Controllers
                     .Select(u => new LoginUserDto
                     {
                         id = u.id,
-                        email = u.email,
+                        email = u.email ?? string.Empty,
                         name = u.name,
-                        password = u.password,
+                        password = u.password ?? string.Empty,
                         m_user_type_id = u.m_user_type_id,
                         country_code = u.country_code,
                         company_id = u.company_id
@@ -334,7 +334,7 @@ namespace SignalTracker.Controllers
             var lockValue = BuildLoginLockValue(activeLoginInfo);
             var userLockKey = BuildUserLoginLockKey(user.id);
             var loginLockAcquired = false;
-            if (_redis?.IsConnected == true)
+            if (_redis.IsConnected)
             {
                 if (model.ForceLogin == true)
                 {
@@ -467,10 +467,10 @@ namespace SignalTracker.Controllers
         {
             try
             {
-                if (_redis?.IsConnected == true)
+                if (_redis.IsConnected)
                 {
                     var claimUserId = User?.FindFirst("UserId")?.Value;
-                    var sessionUserId = HttpContext?.Session.GetInt32("UserID")?.ToString();
+                    var sessionUserId = HttpContext.Session.GetInt32("UserID")?.ToString();
                     var userIdValue = !string.IsNullOrWhiteSpace(claimUserId) ? claimUserId : sessionUserId;
 
                     if (int.TryParse(userIdValue, out var parsedUserId) && parsedUserId > 0)
@@ -531,7 +531,7 @@ namespace SignalTracker.Controllers
                     {
                         id = u.id,
                         name = u.name,
-                        email = u.email,
+                        email = u.email ?? string.Empty,
                         m_user_type_id = u.m_user_type_id,
                         country_code = u.country_code, // Added to DTO
                         company_id = u.company_id

@@ -55,11 +55,13 @@ namespace SignalTracker.Helper
         private static int GetLineNumber(Exception ex)
         {
             const string lineSearch = ":line ";
-            int index = ex.StackTrace?.LastIndexOf(lineSearch) ?? -1;
+            var stackTrace = ex.StackTrace;
+            if (stackTrace == null) return 0;
+            int index = stackTrace.LastIndexOf(lineSearch, StringComparison.Ordinal);
 
             if (index != -1)
             {
-                string lineNumberText = ex.StackTrace.Substring(index + lineSearch.Length);
+                string lineNumberText = stackTrace.Substring(index + lineSearch.Length);
                 if (int.TryParse(lineNumberText, out int lineNumber))
                 {
                     return lineNumber;

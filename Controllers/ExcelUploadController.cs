@@ -720,7 +720,7 @@ namespace SignalTracker.Controllers
     where h.file_type == fileType
     && (targetCompanyId == 0 || (u != null && u.company_id == targetCompanyId))
     && (s == null || s.type != "l3_event")
-    && (h.remarks == null || !h.remarks.StartsWith("L3/Event"))
+    && (h.remarks == null || !(h.remarks ?? string.Empty).StartsWith("L3/Event"))
 
     select new
     {
@@ -1056,7 +1056,7 @@ namespace SignalTracker.Controllers
 
                 short? status = manifest?.Status;
                 string? error = manifest?.ErrorMessage;
-                if (uploadId.GetValueOrDefault() > 0)
+                if (uploadId is > 0)
                 {
                     var history = await db.tbl_upload_history
                         .AsNoTracking()

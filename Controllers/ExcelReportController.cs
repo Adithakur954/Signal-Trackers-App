@@ -1280,10 +1280,7 @@ namespace SignalTracker.Controllers
                 if (r.Y.HasValue && (float.IsNaN(r.Y.Value) || float.IsInfinity(r.Y.Value))) r.Y = null;
                 if (r.X == 0 && r.Y == 0) { r.X = null; r.Y = null; }
 
-                bool hasXY = r.X.HasValue && r.Y.HasValue;
-                bool hasLatLon = r.Lat.HasValue && r.Lon.HasValue;
-
-                if (hasXY)
+                if (r.X.HasValue && r.Y.HasValue)
                 {
                     var roundX = (float)Math.Round(r.X.Value, 2);
                     var roundY = (float)Math.Round(r.Y.Value, 2);
@@ -1300,7 +1297,7 @@ namespace SignalTracker.Controllers
                     }
                     groupList.Add(r);
                 }
-                else if (hasLatLon)
+                else if (r.Lat.HasValue && r.Lon.HasValue)
                 {
                     var roundLat = (float)Math.Round(r.Lat.Value, 6);
                     var roundLon = (float)Math.Round(r.Lon.Value, 6);
@@ -1656,7 +1653,7 @@ namespace SignalTracker.Controllers
         private static string CleanZipProvider(string? value) =>
             (value ?? "").Trim().Trim('"').Trim('\'');
 
-        private static float? ParseFloatSafe(string s)
+        private static float? ParseFloatSafe(string? s)
         {
             if (string.IsNullOrWhiteSpace(s)) return null;
             var m = Regex.Match(s, @"-?\d+(\.\d+)?");

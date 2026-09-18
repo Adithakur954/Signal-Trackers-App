@@ -306,9 +306,9 @@ namespace SignalTracker.Models
             }
         }
 
-        internal async Task<IEnumerable<object>> GetKeysAsync(object pattern, object limit)
+        internal Task<IEnumerable<object>> GetKeysAsync(object pattern, object limit)
         {
-            throw new NotImplementedException();
+            return Task.FromException<IEnumerable<object>>(new NotImplementedException());
         }
 
         internal async Task DeleteKeyAsync(string redisKey)
@@ -319,9 +319,9 @@ namespace SignalTracker.Models
             await WithTimeoutAsync(_db.KeyDeleteAsync(redisKey, flags: CommandFlags.FireAndForget), true);
         }
 
-        internal async Task<bool> SetObjectAsync(object cacheKey, MapViewController.NetworkLogFullResponse cacheModel, int ttlSeconds)
+        internal Task<bool> SetObjectAsync(object cacheKey, MapViewController.NetworkLogFullResponse cacheModel, int ttlSeconds)
         {
-            throw new NotImplementedException();
+            return Task.FromException<bool>(new NotImplementedException());
         }
 
         private static byte[] CreateStoredPayload(ReadOnlySpan<byte> jsonBytes)

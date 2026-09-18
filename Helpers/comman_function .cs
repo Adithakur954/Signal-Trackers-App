@@ -32,7 +32,7 @@ public class CommonFunction
         db = context;
         _httpContextAccessor = httpContextAccessor;
 
-        var http = _httpContextAccessor?.HttpContext;
+        var http = _httpContextAccessor.HttpContext;
         var session = http?.Session;
         if (session == null) return;
 
@@ -294,7 +294,7 @@ public int GetCompanyId()
                     isGreater = true;
             }
         }
-        catch (Exception ex)
+        catch (Exception)
         {
 
         }

@@ -19,7 +19,7 @@ public sealed class CookiePartitionMiddleware
             {
                 var updated = cookies
                     .Select(cookie =>
-                        cookie.Contains("SameSite=None", StringComparison.OrdinalIgnoreCase)
+                        cookie != null && cookie.Contains("SameSite=None", StringComparison.OrdinalIgnoreCase)
                         && cookie.Contains("Secure", StringComparison.OrdinalIgnoreCase)
                         && !cookie.Contains("Partitioned", StringComparison.OrdinalIgnoreCase)
                             ? cookie + "; Partitioned"

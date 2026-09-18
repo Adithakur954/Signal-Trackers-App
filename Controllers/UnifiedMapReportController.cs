@@ -1123,7 +1123,7 @@ namespace SignalTracker.Controllers
             }
         }
 
-        public static ReportThresholdConfig FromDb(thresholds setting, string source)
+        public static ReportThresholdConfig FromDb(Thresholds setting, string source)
         {
             var fallback = Hardcoded();
             return new ReportThresholdConfig

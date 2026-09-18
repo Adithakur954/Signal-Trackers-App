@@ -200,9 +200,10 @@ public IActionResult GetThresholdSettings()
 }
 
 [HttpPost("SaveThreshold")]
-public IActionResult SaveThreshold([FromBody] thresholds model)
+public IActionResult SaveThreshold([FromBody] Thresholds? model)
 {
     var response = new ReturnAPIResponse();
+    if (model == null) return BadRequest(new { Status = 0, Message = "Threshold data is required." });
 
     try
     {
@@ -211,10 +212,10 @@ public IActionResult SaveThreshold([FromBody] thresholds model)
         _thresholdDefaults.EnsureForUserAsync(uid).GetAwaiter().GetResult();
         EnsureMacDetailThresholdColumns();
 
-        thresholds? existing = null;
+        Thresholds? existing = null;
 
         // Prefer explicit row id when client sends it (prevents updating stale/older rows).
-        if (model?.id.HasValue == true && model.id.Value > 0)
+        if (model.id.HasValue && model.id.Value > 0)
         {
             existing = db.thresholds.FirstOrDefault(x =>
                 x.id == model.id &&

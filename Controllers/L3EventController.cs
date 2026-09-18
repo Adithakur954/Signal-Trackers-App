@@ -118,7 +118,7 @@ public L3EventController(
             [FromQuery] int take = 5000,
             CancellationToken cancellationToken = default)
         {
-            if (sessionId.GetValueOrDefault() <= 0 && uploadId.GetValueOrDefault() <= 0)
+            if (sessionId is null or <= 0 && uploadId is null or <= 0)
                 return BadRequest(new { status = 0, message = "sessionId or uploadId is required." });
 
             var denied = await ValidateDiagnosticAccessAsync(sessionId, null, null, uploadId, cancellationToken);
@@ -130,7 +130,7 @@ public L3EventController(
             // Insights are loaded automatically when the screen opens. If the
             // session already has L3 data but its insight rows are missing,
             // import the insight TXT files from the same remote ZIP used by sync.
-            if (sessionId.GetValueOrDefault() > 0 && uploadId.GetValueOrDefault() <= 0)
+            if (sessionId is > 0 && uploadId is null or <= 0)
             {
                 var existingInsights = await CountUploadInsightsAsync(sessionId.Value, cancellationToken);
                 if (existingInsights == 0)
@@ -576,7 +576,7 @@ public L3EventController(
             if (string.IsNullOrWhiteSpace(url))
                 return BadRequest(new { status = 0, message = "ZIP URL is required." });
 
-            if (sessionId.GetValueOrDefault() > 0)
+            if (sessionId is > 0)
             {
                 var denied = await ValidateDiagnosticAccessAsync(sessionId.Value, null, null, null, cancellationToken);
                 if (denied != null)
@@ -673,14 +673,14 @@ public L3EventController(
             var eventRows = await CountDiagnosticRowsAsync("tbl_event_log", projectId, sessionId, uploadId, cancellationToken);
             const short status = 1;
 
-            if (projectId.GetValueOrDefault() > 0)
+            if (projectId is > 0)
             {
                 var projectInfo = await GetAuthorizedProjectInfoAsync(projectId!.Value, userId, cancellationToken);
                 if (projectInfo == null)
                     return NotFound(new { status = 0, message = "Project was not found or is not available for this user." });
             }
 
-            if (sessionId.GetValueOrDefault() > 0)
+            if (sessionId is > 0)
             {
                 var denied = await ValidateDiagnosticAccessAsync(sessionId, null, null, null, cancellationToken);
                 if (denied != null)
@@ -688,7 +688,7 @@ public L3EventController(
             }
 
             var historyId = await InsertL3EventHistoryAsync(
-                projectId.GetValueOrDefault() > 0 ? projectId : null,
+                projectId is > 0 ? projectId : null,
                 uploadId.GetValueOrDefault(),
                 sessionId.GetValueOrDefault(),
                 originalFileName!,
@@ -699,7 +699,7 @@ public L3EventController(
                 status,
                 cancellationToken);
 
-            if (projectId.GetValueOrDefault() > 0)
+            if (projectId is > 0)
             {
                 await RecalculateProjectL3EventFlagsAsync(projectId!.Value, cancellationToken);
                 await InvalidateProjectListCachesAsync();
@@ -743,7 +743,7 @@ public L3EventController(
             await EnsureL3EventSchemaAsync(cancellationToken);
             remarks = remarks.Trim();
 
-            int? linkedProjectId = projectId.GetValueOrDefault() > 0 ? projectId.Value : null;
+            int? linkedProjectId = projectId is > 0 ? projectId.Value : null;
             ProjectInfo? linkedProjectInfo = null;
             if (linkedProjectId.HasValue)
             {
@@ -752,7 +752,7 @@ public L3EventController(
                     return NotFound(new { status = 0, message = "Project was not found or is not available for this user." });
             }
 
-            int? linkedSessionId = sessionId.GetValueOrDefault() > 0 ? sessionId.Value : null;
+            int? linkedSessionId = sessionId is > 0 ? sessionId.Value : null;
             if (!linkedSessionId.HasValue && linkedProjectInfo != null)
                 linkedSessionId = TryGetFirstRefSessionId(linkedProjectInfo.RefSessionId);
 
@@ -763,15 +763,15 @@ public L3EventController(
                     return denied;
             }
 
-            var replaceHistory = historyId.GetValueOrDefault() > 0
+            var replaceHistory = historyId is > 0
                 ? await GetAuthorizedL3EventHistoryForUpdateAsync(historyId.Value, userId, cancellationToken)
                 : null;
-            if (historyId.GetValueOrDefault() > 0 && replaceHistory == null)
+            if (historyId is > 0 && replaceHistory == null)
                 return NotFound(new { status = 0, message = "The selected L3 session was not found or is not available for this user." });
             if (replaceHistory != null)
             {
-                linkedProjectId = projectId.GetValueOrDefault() > 0 ? projectId.Value : replaceHistory.ProjectId;
-                linkedSessionId = sessionId.GetValueOrDefault() > 0 ? sessionId.Value : replaceHistory.SessionId;
+                linkedProjectId = projectId is > 0 ? projectId.Value : replaceHistory.ProjectId;
+                linkedSessionId = sessionId is > 0 ? sessionId.Value : replaceHistory.SessionId;
             }
 
             var tempFiles = new List<string>();
@@ -852,7 +852,7 @@ public L3EventController(
                         {
                             uploadHistoryId = checked((int)replaceHistory.Id);
                             await ExecuteDeleteAsync("DELETE FROM tbl_l3_event_call_summary WHERE tbl_l3_event_history_id = @historyId;", cancellationToken, ("@historyId", replaceHistory.Id));
-                            if (replaceHistory.UploadId.GetValueOrDefault() > 0)
+                            if (replaceHistory.UploadId is > 0)
                             {
                                 await ExecuteDeleteAsync("DELETE FROM tbl_l3_log WHERE tbl_upload_id = @uploadId;", cancellationToken, ("@uploadId", replaceHistory.UploadId.Value));
                                 await ExecuteDeleteAsync("DELETE FROM tbl_event_log WHERE tbl_upload_id = @uploadId;", cancellationToken, ("@uploadId", replaceHistory.UploadId.Value));
@@ -1046,14 +1046,14 @@ public L3EventController(
             var nextEventRows = Math.Max(0, GetJsonInt(payload, "events_rows", "eventsRows", "eventRows") ?? existing.EventRows);
             var nextStatus = (short)Math.Clamp(GetJsonInt(payload, "status") ?? existing.Status, 0, short.MaxValue);
 
-            if (nextProjectId.GetValueOrDefault() > 0)
+            if (nextProjectId is > 0)
             {
                 var projectInfo = await GetAuthorizedProjectInfoAsync(nextProjectId!.Value, userId, cancellationToken);
                 if (projectInfo == null)
                     return NotFound(new { status = 0, message = "Project was not found or is not available for this user." });
             }
 
-            if (nextSessionId.GetValueOrDefault() > 0)
+            if (nextSessionId is > 0)
             {
                 var denied = await ValidateDiagnosticAccessAsync(nextSessionId.Value, null, null, null, cancellationToken);
                 if (denied != null)
@@ -1085,9 +1085,9 @@ public L3EventController(
                         WHERE id = @historyId;",
                         cancellationToken,
                         ("@historyId", historyId),
-                        ("@projectId", nextProjectId.GetValueOrDefault() > 0 ? nextProjectId : DBNull.Value),
+                        ("@projectId", nextProjectId is > 0 ? nextProjectId : DBNull.Value),
                         ("@uploadId", nextUploadId > 0 ? nextUploadId : DBNull.Value),
-                        ("@sessionId", nextSessionId.GetValueOrDefault() > 0 ? nextSessionId : DBNull.Value),
+                        ("@sessionId", nextSessionId is > 0 ? nextSessionId : DBNull.Value),
                         ("@originalFileName", nextFileName),
                         ("@l3Rows", nextL3Rows),
                         ("@eventRows", nextEventRows),
@@ -1095,19 +1095,19 @@ public L3EventController(
 
                     if (nextUploadId > 0)
                     {
-                        await ExecuteNonQueryAsync("UPDATE tbl_l3_log SET session_id = @sessionId WHERE tbl_upload_id = @uploadId;", cancellationToken, ("@sessionId", nextSessionId.GetValueOrDefault() > 0 ? nextSessionId : DBNull.Value), ("@uploadId", nextUploadId));
-                        await ExecuteNonQueryAsync("UPDATE tbl_event_log SET session_id = @sessionId WHERE tbl_upload_id = @uploadId;", cancellationToken, ("@sessionId", nextSessionId.GetValueOrDefault() > 0 ? nextSessionId : DBNull.Value), ("@uploadId", nextUploadId));
+                        await ExecuteNonQueryAsync("UPDATE tbl_l3_log SET session_id = @sessionId WHERE tbl_upload_id = @uploadId;", cancellationToken, ("@sessionId", nextSessionId is > 0 ? nextSessionId : DBNull.Value), ("@uploadId", nextUploadId));
+                        await ExecuteNonQueryAsync("UPDATE tbl_event_log SET session_id = @sessionId WHERE tbl_upload_id = @uploadId;", cancellationToken, ("@sessionId", nextSessionId is > 0 ? nextSessionId : DBNull.Value), ("@uploadId", nextUploadId));
                     }
 
-                    await ExecuteNonQueryAsync("UPDATE tbl_l3_event_call_summary SET session_id = @sessionId WHERE tbl_l3_event_history_id = @historyId;", cancellationToken, ("@sessionId", nextSessionId.GetValueOrDefault() > 0 ? nextSessionId : DBNull.Value), ("@historyId", historyId));
+                    await ExecuteNonQueryAsync("UPDATE tbl_l3_event_call_summary SET session_id = @sessionId WHERE tbl_l3_event_history_id = @historyId;", cancellationToken, ("@sessionId", nextSessionId is > 0 ? nextSessionId : DBNull.Value), ("@historyId", historyId));
 
-                    if (existing.SessionId.GetValueOrDefault() > 0)
+                    if (existing.SessionId is > 0)
                         await RecalculateSessionL3EventFlagsAsync(existing.SessionId.Value, cancellationToken);
-                    if (nextSessionId.GetValueOrDefault() > 0 && nextSessionId != existing.SessionId)
+                    if (nextSessionId is > 0 && nextSessionId != existing.SessionId)
                         await RecalculateSessionL3EventFlagsAsync(nextSessionId.Value, cancellationToken);
-                    if (existing.ProjectId.GetValueOrDefault() > 0)
+                    if (existing.ProjectId is > 0)
                         await RecalculateProjectL3EventFlagsAsync(existing.ProjectId.Value, cancellationToken);
-                    if (nextProjectId.GetValueOrDefault() > 0 && nextProjectId != existing.ProjectId)
+                    if (nextProjectId is > 0 && nextProjectId != existing.ProjectId)
                         await RecalculateProjectL3EventFlagsAsync(nextProjectId.Value, cancellationToken);
 
                     await tx.CommitAsync(cancellationToken);
@@ -1175,7 +1175,7 @@ public L3EventController(
                 uploadedOn = reader.GetDateTime(reader.GetOrdinal("uploaded_on"));
             }
 
-            if (sessionId.GetValueOrDefault() > 0)
+            if (sessionId is > 0)
             {
                 var denied = await ValidateDiagnosticAccessAsync(sessionId, null, null, null, cancellationToken);
                 if (denied != null)
@@ -1199,7 +1199,7 @@ public L3EventController(
                 uploadedOn,
                 cancellationToken);
             var uploadIdsToDelete = new HashSet<int>();
-            if (uploadId.GetValueOrDefault() > 0)
+            if (uploadId is > 0)
                 uploadIdsToDelete.Add(uploadId.Value);
             if (historyId <= int.MaxValue)
                 uploadIdsToDelete.Add(checked((int)historyId));
@@ -1232,7 +1232,7 @@ public L3EventController(
                         cancellationToken,
                         ("@historyId", historyId));
 
-                    if (sessionId.GetValueOrDefault() > 0)
+                    if (sessionId is > 0)
                     {
                         var remainingL3 = Convert.ToInt64(await ExecuteScalarAsync(
                             "SELECT COUNT(*) FROM tbl_l3_log WHERE session_id = @sessionId;",
@@ -1270,7 +1270,7 @@ public L3EventController(
                         message = "L3/Event upload data deleted successfully.",
                         historyId,
                         sessionId,
-                        uploadId = uploadId.GetValueOrDefault() > 0 ? uploadId : null,
+                        uploadId = uploadId is > 0 ? uploadId : null,
                         deleted = new { calls = deletedCalls, l3Rows = deletedL3Rows, eventRows = deletedEventRows }
                     });
                 }
@@ -1294,7 +1294,7 @@ public L3EventController(
                     LIMIT 1
                 ), 0);",
                 cancellationToken,
-                ("@projectId", projectId.GetValueOrDefault() > 0 ? projectId.Value : 0));
+                ("@projectId", projectId is > 0 ? projectId.Value : 0));
 
             return value == null || value == DBNull.Value
                 ? 0
@@ -1303,7 +1303,7 @@ public L3EventController(
 
         private async Task<IActionResult?> EnsureSessionDiagnosticDataAsync(int? sessionId, CancellationToken cancellationToken)
         {
-            if (sessionId.GetValueOrDefault() <= 0)
+            if (sessionId is null or <= 0)
                 return null;
 
             await EnsureL3EventSchemaAsync(cancellationToken);
@@ -1476,7 +1476,7 @@ public L3EventController(
 
             var requestedSessionIds = ParseSessionIds(sessionIds);
             requestedSessionIds.UnionWith(ParseSessionIds(sessionIdsAlt));
-            if (sessionId.GetValueOrDefault() > 0)
+            if (sessionId is > 0)
                 requestedSessionIds.Add(sessionId!.Value);
 
             if (requestedSessionIds.Count > 0)
@@ -1490,7 +1490,7 @@ public L3EventController(
                         && (companyId.GetValueOrDefault() > 0
                             ? owner.company_id == companyId
                             : session.user_id == currentUserId)
-                    select session.id.Value)
+                    select session.id.GetValueOrDefault())
                     .Distinct()
                     .CountAsync(cancellationToken);
 
@@ -1498,7 +1498,7 @@ public L3EventController(
                     return StatusCode(StatusCodes.Status403Forbidden, new { status = 0, message = "One or more requested sessions are not available for this user." });
             }
 
-            if (uploadId.GetValueOrDefault() > 0)
+            if (uploadId is > 0)
             {
                 var authorizedUpload = await (
                     from upload in _context.Set<tbl_upload_history>().AsNoTracking()
@@ -2001,7 +2001,7 @@ public L3EventController(
             int? uploadId,
             CancellationToken cancellationToken)
         {
-            if (uploadId.GetValueOrDefault() > 0)
+            if (uploadId is > 0)
             {
                 return Convert.ToInt32(await ExecuteScalarAsync(
                     $"SELECT COUNT(*) FROM {tableName} WHERE tbl_upload_id = @uploadId;",
@@ -2009,7 +2009,7 @@ public L3EventController(
                     ("@uploadId", uploadId!.Value)), CultureInfo.InvariantCulture);
             }
 
-            if (sessionId.GetValueOrDefault() > 0)
+            if (sessionId is > 0)
             {
                 return Convert.ToInt32(await ExecuteScalarAsync(
                     $"SELECT COUNT(*) FROM {tableName} WHERE session_id = @sessionId;",
@@ -2017,7 +2017,7 @@ public L3EventController(
                     ("@sessionId", sessionId!.Value)), CultureInfo.InvariantCulture);
             }
 
-            if (projectId.GetValueOrDefault() > 0)
+            if (projectId is > 0)
             {
                 var historyColumn = tableName.Equals("tbl_l3_log", StringComparison.OrdinalIgnoreCase)
                     ? "l3_rows"
@@ -2292,15 +2292,15 @@ public L3EventController(
                     cancellationToken);
             }
 
-            if (projectId.GetValueOrDefault() > 0)
+            if (projectId is > 0)
             {
-                if (sessionId.GetValueOrDefault() > 0)
+                if (sessionId is > 0)
                     await UpdateProjectForL3EventSessionAsync(projectId!.Value, sessionId.Value, l3Rows > 0, eventRows > 0, cancellationToken);
                 else
                     await UpdateProjectL3EventFlagsAsync(projectId!.Value, l3Rows > 0, eventRows > 0, cancellationToken);
             }
 
-            if (sessionId.GetValueOrDefault() > 0)
+            if (sessionId is > 0)
                 await UpdateSessionL3EventFlagsAsync(sessionId.Value, l3Rows > 0, eventRows > 0, cancellationToken);
 
             await CreateMapViewController().PersistDiagnosticCallSummaryAsync(sessionId.GetValueOrDefault(), existingHistoryId, uploadId, cancellationToken);

@@ -36,9 +36,9 @@ public sealed class ThresholdDefaultsService
         await _db.SaveChangesAsync(cancellationToken);
     }
 
-    private static thresholds CloneTemplate(thresholds template, int userId)
+    private static Thresholds CloneTemplate(Thresholds template, int userId)
     {
-        return new thresholds
+        return new Thresholds
         {
             user_id = userId,
             is_default = 0,
@@ -77,9 +77,9 @@ public sealed class ThresholdDefaultsService
         };
     }
 
-    private static thresholds CreateDefaults(int userId)
+    private static Thresholds CreateDefaults(int userId)
     {
-        return new thresholds
+        return new Thresholds
         {
             user_id = userId,
             is_default = 0,

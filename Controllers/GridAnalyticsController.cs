@@ -796,7 +796,7 @@ namespace SignalTracker.Controllers
             [FromQuery] string? technology = null)
         {
             var bridgeAuthorized = IsPythonBridgeAuthorized();
-            var userAuthenticated = User?.Identity?.IsAuthenticated == true;
+            var userAuthenticated = User.Identity?.IsAuthenticated == true;
             if (!bridgeAuthorized && !userAuthenticated)
             {
                 return Unauthorized(new { Status = 0, Message = "Unauthorized." });

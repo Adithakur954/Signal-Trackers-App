@@ -156,9 +156,9 @@ public static class NetworkLogDashboardFallback
         {
             var primary = sample.Get("primary");
             if (Available(primary))
-                return primary.Equals("yes", StringComparison.OrdinalIgnoreCase)
-                    || primary.Equals("true", StringComparison.OrdinalIgnoreCase)
-                    || primary.Equals("1", StringComparison.OrdinalIgnoreCase);
+                return string.Equals(primary, "yes", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(primary, "true", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(primary, "1", StringComparison.OrdinalIgnoreCase);
 
             // Older rows may not have the dedicated primary column.
             return !Regex.IsMatch(sample.Get("network") ?? "", @"\bneighbou?r\b", RegexOptions.IgnoreCase);

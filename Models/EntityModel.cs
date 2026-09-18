@@ -11,11 +11,9 @@ namespace SignalTracker.Models
     // ========================= Users & Auth =========================
     public class tbl_user
     {
-        internal object app_version;
-        internal DateTime signup_date;
 
-        public  string country_code{ get; set;}
-         public string  isd_code{get; set;}
+        public  string country_code{ get; set;} = string.Empty;
+         public string  isd_code{get; set;} = string.Empty;
         public int id { get; set; }
         public string? uid { get; set; }
         public string? token { get; set; }
@@ -269,8 +267,8 @@ public class tbl_company
         public int id { get; set; }
         public string? company_name { get; set; }
         public string? contact_person { get; set; }
-        public string country_code{ get; set;}
-        public string  isd_code{get; set;}
+        public string country_code{ get; set;} = string.Empty;
+        public string  isd_code{get; set;} = string.Empty;
         public string? mobile { get; set; }
         public string? email { get; set; }
         public string? password { get; set; }
@@ -340,13 +338,13 @@ public class tbl_company_license_grant_history
     public DateTime timestamp { get; set; }
     public double lat { get; set; }
     public double lon { get; set; }
-    public string indoor_outdoor { get; set; }
-    public string provider { get; set; }
+    public string? indoor_outdoor { get; set; }
+    public string? provider { get; set; }
 
     // Primary KPIs (Added ? for null safety)
-    public string primary_network { get; set; }
-    public string primary_band { get; set; }
-    public string primary_pci { get; set; }
+    public string? primary_network { get; set; }
+    public string? primary_band { get; set; }
+    public string? primary_pci { get; set; }
     public double? primary_rsrp { get; set; }
     public double? primary_rsrq { get; set; }
     public double? primary_sinr { get; set; }
@@ -355,10 +353,10 @@ public class tbl_company_license_grant_history
     public decimal? ul_tpt { get; set; }
 
     // Neighbour KPIs (Added ? for null safety)
-    public string neighbour_network { get; set; }
-    public string neighbour_provider { get; set; }
-    public string neighbour_band { get; set; }
-    public string neighbour_pci { get; set; }
+    public string? neighbour_network { get; set; }
+    public string? neighbour_provider { get; set; }
+    public string? neighbour_band { get; set; }
+    public string? neighbour_pci { get; set; }
     public double? neighbour_rsrp { get; set; }
     public double? neighbour_rsrq { get; set; }
     public double? neighbour_sinr { get; set; }
@@ -369,8 +367,6 @@ public class tbl_company_license_grant_history
     // ========================= Network Logs =========================
     public class tbl_network_log
     {
-        internal string? band_resolved;
-        internal object created_by;
 
         public int id { get; set; }
         
@@ -476,9 +472,9 @@ public class N78NeighbourSimpleDto
     public double? lat { get; set; }
     public double? lon { get; set; }
 
-    public string provider { get; set; }
-    public string primary_network { get; set; }
-    public string primary_band { get; set; }
+    public string? provider { get; set; }
+    public string? primary_network { get; set; }
+    public string? primary_band { get; set; }
 
     // âœ… KPIs from PRIMARY table
     public double? rsrp { get; set; }
@@ -488,15 +484,14 @@ public class N78NeighbourSimpleDto
     public double? dl_tpt { get; set; }
     public double? ul_tpt { get; set; }
 
-    public string neighbour_network { get; set; }
-    public string neighbour_band { get; set; }
+    public string? neighbour_network { get; set; }
+    public string? neighbour_band { get; set; }
 }
 
 
   public class tbl_network_log_neighbour
     {
-        internal string? band_resolved;
-          public  string primary{get;set;}
+          public  string? primary{get;set;}
 
         public int id { get; set; }
          
@@ -509,7 +504,7 @@ public class N78NeighbourSimpleDto
          public string? network_id { get; set; }
         public string? indoor_outdoor { get; set; }
          public string?nodeb_id { get;set;}
-          public string cell_id{get;set;}
+          public string? cell_id{get;set;}
      
          [NotMapped]
          public float? speed{ get; set;}
@@ -743,7 +738,6 @@ public class IndoorOutdoorLogDto
 
     public class tbl_prediction_data
     {
-        internal object mos;
 
         public int id { get; set; }
         // IMPORTANT: project id MUST be int? (not float?)
@@ -970,7 +964,6 @@ public class IndoorOutdoorLogDto
     // ========================= Projects & Regions =========================
     public class tbl_project
     {
-        internal object created_by;
 
         public int id { get; set; }
         public string? Download_path { get; set; }
@@ -1053,7 +1046,7 @@ public class IndoorOutdoorLogDto
         public string? wkt { get; set; }
     }
 
-    public class thresholds
+    public class Thresholds
     {
 
         public string? num_cells { get; set; }
@@ -1110,32 +1103,32 @@ public class Company
     [Key]
     public int id { get; set; }
 
-    public string company_name { get; set; }
-    public string contact_person { get; set; }
-    public string mobile { get; set; }
-    public string email { get; set; }
-    public string password { get; set; }
-    public string address { get; set; }
-    public string pincode { get; set; }
-    public string gst_id { get; set; }
-    public string company_code { get; set; }
+    public string company_name { get; set; } = string.Empty;
+    public string contact_person { get; set; } = string.Empty;
+    public string mobile { get; set; } = string.Empty;
+    public string email { get; set; } = string.Empty;
+    public string password { get; set; } = string.Empty;
+    public string address { get; set; } = string.Empty;
+    public string pincode { get; set; } = string.Empty;
+    public string gst_id { get; set; } = string.Empty;
+    public string company_code { get; set; } = string.Empty;
 
     public int license_validity_in_months { get; set; }
     public int total_granted_licenses { get; set; }
     public int total_used_licenses { get; set; }
 
-    public string otp_phone_number { get; set; }
+    public string otp_phone_number { get; set; } = string.Empty;
     public bool ask_for_otp { get; set; }
 
-    public string blacklisted_phone_number { get; set; }
-    public string remarks { get; set; }
+    public string blacklisted_phone_number { get; set; } = string.Empty;
+    public string remarks { get; set; } = string.Empty;
 
     public DateTime created_on { get; set; }
     public bool status { get; set; }
 
     public DateTime? last_login { get; set; }
-    public string token { get; set; }
-    public string uid { get; set; }
+    public string token { get; set; } = string.Empty;
+    public string uid { get; set; } = string.Empty;
 }
 public class TempPlainDto
     {
@@ -1318,13 +1311,13 @@ public class OperatorTechTimeFilter
 
 public class ProviderNetworkTime
 {
-    public string Provider { get; set; }
-    public string Network { get; set; }
+    public string Provider { get; set; } = string.Empty;
+    public string Network { get; set; } = string.Empty;
     public double TimeSeconds { get; set; }
 }
 public class SessionIdsRequest
 {
-    public List<int> SessionIds { get; set; }
+    public List<int> SessionIds { get; set; } = new();
 }
 public  sealed class AppAgg
 {

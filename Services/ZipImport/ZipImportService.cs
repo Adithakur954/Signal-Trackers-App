@@ -113,7 +113,7 @@ namespace SignalTracker.Services.ZipImport
                                 entry,
                                 targetSessionId,
                                 userId,
-                                subSessionType.Value,
+                                subSessionType ?? throw new InvalidDataException("Missing sub-session type."),
                                 pendingSubSessions,
                                 existingSubSessionIds,
                                 () => nextGeneratedSubSessionId++,
@@ -149,7 +149,7 @@ namespace SignalTracker.Services.ZipImport
 
         private async Task<int> ResolveSessionAsync(int userId, int? sessionId, string? notes, CancellationToken cancellationToken)
         {
-            if (sessionId.GetValueOrDefault() > 0)
+            if (sessionId is > 0)
             {
                 var exists = await _db.tbl_session.AnyAsync(x => x.id == sessionId.Value, cancellationToken);
                 if (!exists)

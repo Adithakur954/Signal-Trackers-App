@@ -2,7 +2,6 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;     // for Regex
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
@@ -728,7 +727,7 @@ public async Task<IActionResult> GetProjectPolygons(
 
         return Ok(rows);
     }
-    catch (Exception ex)
+    catch (Exception)
     {
         totalStopwatch.Stop();
         Console.WriteLine("Stack trace available in server logs.");
@@ -1526,7 +1525,7 @@ public class ProjectPolygonItem
             try
             {
                 var polygonId = model?.PolygonId > 0 ? model.PolygonId : model?.Id ?? 0;
-                if (model == null || polygonId <= 0 || model.ProjectId <= 0 || string.IsNullOrWhiteSpace(model.WKT))
+                if (model == null || polygonId <= 0 || model.ProjectId is null or <= 0 || string.IsNullOrWhiteSpace(model.WKT))
                 {
                     message.Status = 0;
                     message.Message = "Invalid polygon data (PolygonId, ProjectId and WKT are required).";
@@ -5940,7 +5939,7 @@ public class AvailablePolygonsResponse
                           && model.SessionIds.Contains(s.id.Value)
                           && u.company_id.HasValue
                           && u.company_id.Value > 0
-                    select u.company_id.Value
+                    select u.company_id.GetValueOrDefault()
                 )
                 .Distinct()
                 .Take(2)
@@ -6214,7 +6213,7 @@ private sealed class AppAgg
     public AppAgg(string name) { AppName = name; }
 
     // This was the missing method causing your error
-    public void AddSample(DateTime ts, double? rsrp, double? rsrq, double? sinr, double? mos, string dl_tpt, string ul_tpt)
+    public void AddSample(DateTime ts, double? rsrp, double? rsrq, double? sinr, double? mos, string? dl_tpt, string? ul_tpt)
     {
         // 1. Accumulate Signal KPIs
         if (rsrp.HasValue) { RsrpSum += rsrp.Value; RsrpCnt++; }
@@ -6381,7 +6380,7 @@ private async Task<JsonResult> GetNetworkLogCore(MapFilter1 filters)
     var sessionIds = _networkLogData.ParseSessionIds(filters?.GetRawSessionIds())
         .ToList();
 
-    if (sessionIds.Count == 0)
+    if (filters == null || sessionIds.Count == 0)
         return Json(new { message = "No valid session IDs provided", data = new List<object>() });
 
     try
@@ -6394,8 +6393,8 @@ private async Task<JsonResult> GetNetworkLogCore(MapFilter1 filters)
             ? $":cursor:{filters.cursor_timestamp.Value.Ticks}:{filters.cursor_id.Value}"
             : "";
         var summaryKey = filters.include_summary ? ":summary:1" : ":summary:0";
-        string connString = db.Database.GetConnectionString();
-        string providerNormalized = null;
+        string connString = db.Database.GetConnectionString() ?? throw new InvalidOperationException("Database connection is not configured.");
+        string? providerNormalized = null;
         await InvalidateObsoleteNetworkLogCachesAsync();
         await EnsureNetworkLogUpdatedAtColumnAsync(connString);
 
@@ -6519,7 +6518,7 @@ private async Task<JsonResult> GetNetworkLogCore(MapFilter1 filters)
 private async Task RefreshNetworkLogLatestPageCacheAsync(
     string connString,
     List<long> sessionIds,
-    string provider,
+    string? provider,
     MapFilter1 filters,
     int limit,
     int pageOffset,
@@ -6563,7 +6562,7 @@ private async Task RefreshNetworkLogLatestPageCacheAsync(
 private async Task<NetworkLogFullResponse> BuildNetworkLogPageCacheAsync(
     string connString,
     List<long> sessionIds,
-    string provider,
+    string? provider,
     MapFilter1 filters,
     int limit,
     int pageOffset,
@@ -6657,10 +6656,10 @@ private static object ToNetworkLogResponseObject(
 // 1ï¸âƒ£ MAIN DATA (Full filtered fetch via EF Core)
 // ---------------------------------------------------------
 private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyEF(
-    List<long> sessionIds, string provider, MapFilter1 filters)
+    List<long> sessionIds, string? provider, MapFilter1 filters)
 {
     IQueryable<tbl_network_log> query = db.tbl_network_log.AsNoTracking()
-        .Where(log => sessionIds.Contains((long)log.session_id));
+        .Where(log => log.session_id.HasValue && sessionIds.Contains((long)log.session_id.Value));
 
     query = query.Where(log =>
         log.band == null ||
@@ -6832,7 +6831,7 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyEF(
 }
 
 private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
-    string connString, List<long> sessionIds, string provider, MapFilter1 filters, int limit, int offset)
+    string connString, List<long> sessionIds, string? provider, MapFilter1 filters, int limit, int offset)
 {
     using var conn = new MySqlConnection(connString);
     await conn.OpenAsync();
@@ -7016,7 +7015,7 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
 //  APP SUMMARY (Fixed: Shows Multiple Operators)
 // ---------------------------------------------------------
 private async Task<Dictionary<string, object>> GetAppSummaryRaw(
-    string connString, List<long> sessionIds, string provider, MapFilter1 filters)
+    string connString, List<long> sessionIds, string? provider, MapFilter1 filters)
 {
     using var conn = new MySqlConnection(connString);
     await conn.OpenAsync();
@@ -7120,7 +7119,7 @@ private async Task<Dictionary<string, object>> GetAppSummaryRaw(
 // 3ï¸âƒ£ COMBINED STATS (Volume + IO + Sessions in ONE Query)
 // ---------------------------------------------------------
 private async Task<CombinedStatsDto> GetCombinedStatsRaw(
-    string connString, List<long> sessionIds, string provider, MapFilter1 filters)
+    string connString, List<long> sessionIds, string? provider, MapFilter1 filters)
 {
     using var conn = new MySqlConnection(connString);
     await conn.OpenAsync();
@@ -7187,7 +7186,7 @@ private async Task<string?> ResolveProjectFilterWktAsync(long? projectId)
     if (!projectId.HasValue || projectId.Value <= 0)
         return null;
 
-    string connString = db.Database.GetConnectionString();
+    string connString = db.Database.GetConnectionString() ?? throw new InvalidOperationException("Database connection is not configured.");
     using var conn = new MySqlConnection(connString);
     await conn.OpenAsync();
 
@@ -7225,7 +7224,7 @@ private async Task<string?> ResolveProjectFilterWktAsync(long? projectId)
 }
 
 private async Task<(string Clause, Dictionary<string, object> Params)> BuildSqlWhereAsync(
-    List<long> ids, string provider, MapFilter1 filters)
+    List<long> ids, string? provider, MapFilter1 filters)
 {
     var (clause, p) = BuildSqlWhere(ids, provider, filters);
 
@@ -7241,7 +7240,7 @@ private async Task<(string Clause, Dictionary<string, object> Params)> BuildSqlW
 }
 
 private (string Clause, Dictionary<string, object> Params) BuildSqlWhere(
-    List<long> ids, string provider, MapFilter1 filters)
+    List<long> ids, string? provider, MapFilter1 filters)
 {
     return _networkLogData.BuildNetworkLogSqlWhere(
         ids,
@@ -7308,7 +7307,7 @@ private async Task EnsureNetworkLogUpdatedAtColumnAsync(string connString)
 private async Task<string> GetNetworkLogDataVersionAsync(
     string connString,
     List<long> sessionIds,
-    string provider,
+    string? provider,
     MapFilter1 filters)
 {
     if (sessionIds == null || sessionIds.Count == 0 || string.IsNullOrWhiteSpace(connString))
@@ -7367,7 +7366,7 @@ private async Task<string> GetNetworkLogDataVersionAsync(
 
 private string BuildNetworkLogCacheKey(
     List<long> sessionIds, 
-    string provider, 
+    string? provider,
     string networkType,
     DateTime? from, 
     DateTime? to,
@@ -7895,7 +7894,7 @@ public class NetworkLogFullResponse
     public List<NetworkLogCacheRow> data { get; set; } = new();
     public Dictionary<string, object> app_summary { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, object> io_summary { get; set; } = new(StringComparer.OrdinalIgnoreCase);
-    public object tpt_volume { get; set; }
+    public object? tpt_volume { get; set; }
     public DateTime CachedAt { get; set; }
     public string? DataVersion { get; set; }
     public int TotalCount { get; set; }
@@ -7909,7 +7908,7 @@ public class ProviderNetworkTime
 }
 public class SessionIdsRequest
 {
-    public List<int> SessionIds { get; set; }
+    public List<int> SessionIds { get; set; } = new();
 }
 
 public sealed class HandoverTargetObservationRequest
@@ -8008,7 +8007,7 @@ public class NetworkLogCacheRow
     public float? mos { get; set; }
     public float? jitter { get; set; }
     public float? latency { get; set; }
-    public string tac { get; set; } = "";
+    public string? tac { get; set; }
     public float? packet_loss { get; set; }
     public string dl_tpt { get; set; } = "";
     public string ul_tpt { get; set; } = "";
@@ -8344,7 +8343,7 @@ public async Task<IActionResult> GetCombinedProviderNetworkTime(
         var logs = await db.tbl_network_log
             .AsNoTracking()
             .Where(x =>
-                sessionIdList.Contains((int)x.session_id) &&
+                x.session_id.HasValue && sessionIdList.Contains(x.session_id.Value) &&
                 x.timestamp != null)
             .OrderBy(x => x.session_id)
             .ThenBy(x => x.timestamp)
@@ -8380,7 +8379,7 @@ public async Task<IActionResult> GetCombinedProviderNetworkTime(
                 continue;
 
             var diffSeconds =
-                (next.timestamp.Value - current.timestamp.Value).TotalSeconds;
+                (next.timestamp.GetValueOrDefault() - current.timestamp.GetValueOrDefault()).TotalSeconds;
 
             // Ignore invalid or abnormal gaps
             if (diffSeconds <= 0 || diffSeconds > 3600)
@@ -9902,7 +9901,7 @@ public async Task<JsonResult> GetProviderWiseVolume([FromQuery] MapFilter filter
         if (cached != null)
             return Json(cached);
 
-        string providerNormalized = _networkLogData.NormalizeProvider(filters.NetworkType);
+        string? providerNormalized = _networkLogData.NormalizeProvider(filters?.NetworkType);
         var networkLogFilters = new MapFilter1
         {
             session_ids = sessionIdsParam,
@@ -10394,7 +10393,7 @@ public async Task<IActionResult> GetNeighbourLogsByDateRange(
             .Select(l => new
             {
                 l.id,
-                session_id = l.session_id != null ? (int)l.session_id : 0,
+                session_id = l.session_id,
                 l.lat,
                 l.lon,
                 l.rsrp,
@@ -10496,7 +10495,7 @@ public async Task<IActionResult> GetNeighbourLogsByDateRange(
             return new DateRangeLogItem
             {
                 id = l.id,
-                session_id = (int)l.session_id,
+                session_id = l.session_id,
                 lat = offset.lat,
                 lon = offset.lon,
                 rsrp = l.rsrp,
@@ -10648,7 +10647,7 @@ public async Task<IActionResult> GetLogsByDateRange(
             query = query.Where(x => x.polygon_id == filters.PolygonId.Value);
 
         // Filter for Registered points only (Optimize Index Usage)
-        query = query.Where(x => x.primary_cell_info_1.Contains("mRegistered=YES"));
+        query = query.Where(x => x.primary_cell_info_1 != null && x.primary_cell_info_1.Contains("mRegistered=YES"));
 
         // =========================================================
         // 5. FAST PROJECTION (NO N+1 SUBQUERIES)
@@ -10720,7 +10719,7 @@ public async Task<IActionResult> GetLogsByDateRange(
             finalResultList.Add(new DateRangeLogItem
             {
                 id = l.id,
-                session_id = (int)l.session_id,
+                session_id = l.session_id.GetValueOrDefault(),
                 lat = l.lat,
                 lon = l.lon,
                 rsrp = l.rsrp,
@@ -11049,6 +11048,7 @@ public async Task<IActionResult> GetTotalUsageTime(
             .Where(x =>
                 x.timestamp >= startDateTime &&
                 x.timestamp <= endDateTime &&
+                x.primary_cell_info_1 != null &&
                 x.primary_cell_info_1.Contains("mRegistered=YES"));
 
         // OPTIONAL operator filter
@@ -11132,7 +11132,7 @@ public async Task<IActionResult> GetTotalUsageTime(
 
                 string key = $"{operatorName}||{technology}";
 
-                if (prevTs.HasValue && prevKey == key)
+                if (row.timestamp.HasValue && prevTs.HasValue && prevKey == key)
                 {
                     var diff =
                         (row.timestamp.Value - prevTs.Value).TotalSeconds;
@@ -11327,7 +11327,7 @@ private async Task<IActionResult> GetIndoorOutdoorSessionAnalyticsCore(IndoorOut
         var query = db.tbl_network_log
             .AsNoTracking()
             .Where(x =>
-                sessionIds.Contains((int)x.session_id) &&
+                x.session_id.HasValue && sessionIds.Contains(x.session_id.Value) &&
                 x.primary_cell_info_1 != null &&
                 x.primary_cell_info_1.Contains("mRegistered=YES"));
 
@@ -11353,7 +11353,7 @@ private async Task<IActionResult> GetIndoorOutdoorSessionAnalyticsCore(IndoorOut
             .ThenBy(x => x.timestamp)
             .Select(x => new IndoorOutdoorLogDto
             {
-                session_id = (int)x.session_id,
+                session_id = x.session_id.GetValueOrDefault(),
                 timestamp = x.timestamp,
 
                 indoor_outdoor = x.indoor_outdoor,
@@ -11389,7 +11389,7 @@ private async Task<IActionResult> GetIndoorOutdoorSessionAnalyticsCore(IndoorOut
 
         double Avg(IEnumerable<float?> v)
         {
-            var list = v.Where(x => x.HasValue).Select(x => x.Value).ToList();
+            var list = v.OfType<float>().ToList();
             return list.Any() ? Math.Round(list.Average(), 2) : 0;
         }
 
@@ -11443,6 +11443,7 @@ private async Task<IActionResult> GetIndoorOutdoorSessionAnalyticsCore(IndoorOut
 
             foreach (var group in opTechGroups)
             {
+                if (group.Key == null) continue;
                 // =============================
                 // KPI CALCULATION
                 // =============================
@@ -11691,7 +11692,7 @@ public JsonResult GetPredictionLog([FromBody] PredictionLogQueryDto q)
         var th = db.thresholds.FirstOrDefault(x => x.user_id == cf.UserId);
         if (th == null)
         {
-            th = new thresholds { user_id = cf.UserId, is_default = 0 };
+            th = new Thresholds { user_id = cf.UserId, is_default = 0 };
             db.thresholds.Add(th);
             db.SaveChanges();
         }
@@ -11831,10 +11832,10 @@ public JsonResult GetPredictionLog(
     var message = new ReturnAPIResponse();
     try
     {
-        thresholds th = db.thresholds.FirstOrDefault(x => x.user_id == cf.UserId);
+        Thresholds? th = db.thresholds.FirstOrDefault(x => x.user_id == cf.UserId);
         if (th == null)
         {
-            th = new thresholds { user_id = cf.UserId, is_default = 0 };
+            th = new Thresholds { user_id = cf.UserId, is_default = 0 };
             db.thresholds.Add(th);
             db.SaveChanges();
         }
@@ -11896,9 +11897,9 @@ public JsonResult GetPredictionLog(
                 : (metricKey == "RSRQ" ? a.rsrq : a.sinr)
         }).ToList();
 
-        double? averageRsrp = baseRows.Where(x => x.rsrp.HasValue).Average(x => (double?)x.rsrp.Value);
-        double? averageRsrq = baseRows.Where(x => x.rsrq.HasValue).Average(x => (double?)x.rsrq.Value);
-        double? averageSinr = baseRows.Where(x => x.sinr.HasValue).Average(x => (double?)x.sinr.Value);
+        double? averageRsrp = baseRows.Average(x => (double?)x.rsrp);
+        double? averageRsrq = baseRows.Average(x => (double?)x.rsrq);
+        double? averageSinr = baseRows.Average(x => (double?)x.sinr);
 
         GraphStruct coveragePerfGraph = new GraphStruct();
         var setting = db.thresholds
@@ -15672,7 +15673,7 @@ public async Task<IActionResult> AddSitePrediction([FromBody] AddSitePredictionM
     // Validate that all arrays have the same length based on Sectors
     int sectorCount = model.Sectors?.Count ?? 0;
     
-    if (sectorCount == 0)
+    if (model.Sectors == null || sectorCount == 0)
         return BadRequest("At least one sector is required.");
 
     if (model.Azimuths?.Count != sectorCount)
@@ -16355,7 +16356,7 @@ private async Task<List<object>> GetProjectsFromRawSqlAsync(
     int currentUserId)
 {
     var projects = new List<object>();
-    string connString = db.Database.GetConnectionString();
+    string connString = db.Database.GetConnectionString() ?? throw new InvalidOperationException("Database connection is not configured.");
 
     using var conn = new MySqlConnection(connString);
     await conn.OpenAsync();
@@ -16477,7 +16478,7 @@ private async Task<List<object>> GetProjectsFallbackAsync(
     int currentUserId)
 {
     var projects = new List<object>();
-    string connString = db.Database.GetConnectionString();
+    string connString = db.Database.GetConnectionString() ?? throw new InvalidOperationException("Database connection is not configured.");
 
     using var conn = new MySqlConnection(connString);
     await conn.OpenAsync();
@@ -16588,7 +16589,7 @@ public async Task<JsonResult> GetDominanceDetails([FromQuery] MapFilter1 filters
         if (cached != null)
             return Json(cached);
 
-        string connString = db.Database.GetConnectionString();
+        string connString = db.Database.GetConnectionString() ?? throw new InvalidOperationException("Database connection is not configured.");
         using var conn = new MySqlConnection(connString);
         await conn.OpenAsync();
 
@@ -16684,10 +16685,10 @@ public async Task<JsonResult> GetDominanceDetails([FromQuery] MapFilter1 filters
             }
 
             // Add value to the array
-            var domList = groupedData[logId]["dominance"] as List<double>;
+            var domList = groupedData[logId]["dominance"] as List<double> ?? throw new InvalidOperationException("Dominance list is missing.");
             domList.Add(domVal);
 
-            var detailList = groupedData[logId]["dominanceDetails"] as List<Dictionary<string, object?>>;
+            var detailList = groupedData[logId]["dominanceDetails"] as List<Dictionary<string, object?>> ?? throw new InvalidOperationException("Dominance details are missing.");
             detailList.Add(new Dictionary<string, object?>
             {
                 ["dominance"] = domVal,
@@ -17170,7 +17171,7 @@ private async Task<JsonResult> GetPciDistributionCore(MapFilter1 filters)
 {
     var sessionIds = filters?.GetSessionIds() ?? new List<long>();
     
-    if (sessionIds.Count == 0)
+    if (filters == null || sessionIds.Count == 0)
         return Json(new { message = "No valid session IDs provided" });
 
     try
@@ -17180,7 +17181,7 @@ private async Task<JsonResult> GetPciDistributionCore(MapFilter1 filters)
         if (cached != null)
             return Json(cached);
 
-        string connString = db.Database.GetConnectionString();
+        string connString = db.Database.GetConnectionString() ?? throw new InvalidOperationException("Database connection is not configured.");
 
         // Task 1: Primary YES (Normalized by Total Primary Count)
         var taskPrimary = GetPciDistributionGlobal(

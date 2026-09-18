@@ -9,17 +9,17 @@ namespace SignalTracker.Models
     public class LoggedInUser
     {
         public int UserID { get; set; }
-        public string UserAgent { get; set; }
-        public string IP { get; set; }
+        public string UserAgent { get; set; } = string.Empty;
+        public string IP { get; set; } = string.Empty;
     }
     public class LoginData
     {
-        public string Email { get; set; }
-        public string Password { get; set; }
+        public string Email { get; set; } = string.Empty;
+        public string Password { get; set; } = string.Empty;
         public string? country_code { get; set; }
         public bool? ForceLogin { get; set; }
-        public string Captcha { get; set; }
-        public string IP { get; set; }
+        public string Captcha { get; set; } = string.Empty;
+        public string IP { get; set; } = string.Empty;
     }
     public class ResetPasswordModel
     {
@@ -31,12 +31,12 @@ namespace SignalTracker.Models
     public class ReturnMessage
     {
         public int Status { get; set; }
-        public string Message { get; set; }
+        public string Message { get; set; } = string.Empty;
     }
     public class ReturnAPIResponse : ReturnMessage
     {
-        public object Data { get; set; }
-        public object token { get; set; }
+        public object? Data { get; set; }
+        public object? token { get; set; }
         public int UserType { get; set; }
     }
     public class NetworkLogModel
@@ -148,21 +148,21 @@ namespace SignalTracker.Models
     }
     public class GeoJson
     {
-        public string Type { get; set; }
-        public List<Feature> Features { get; set; }
+        public string Type { get; set; } = string.Empty;
+        public List<Feature> Features { get; set; } = new();
     }
 
     public class Feature
     {
-        public Geometry Geometry { get; set; }
-        public Dictionary<string, object> Properties { get; set; }
-        public string Type { get; set; }
+        public Geometry Geometry { get; set; } = new();
+        public Dictionary<string, object> Properties { get; set; } = new();
+        public string Type { get; set; } = string.Empty;
     }
 
     public class Geometry
     {
-        public string Type { get; set; }
-        public List<List<List<double>>> Coordinates { get; set; }  // For Polygon
+        public string Type { get; set; } = string.Empty;
+        public List<List<List<double>>> Coordinates { get; set; } = new();  // For Polygon
     }
 
 }

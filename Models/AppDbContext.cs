@@ -9,27 +9,13 @@ namespace SignalTracker.Models
 {
     public class ApplicationDbContext : DbContext
     {
-       private readonly IDbConnectionProvider? _connectionProvider;
-        internal object tbl_lte_prediction_results;
 
         public ApplicationDbContext(DbContextOptions<ApplicationDbContext> options) : base(options)
         {
         }
 
 
-protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
-{
-    if (!optionsBuilder.IsConfigured && _connectionProvider != null)
-    {
-        var connectionString = _connectionProvider.GetConnectionString();
-        var serverVersion = new MySqlServerVersion(new Version(8, 0, 29));
 
-        optionsBuilder.UseMySql(connectionString, serverVersion, mysqlOptions =>
-        {
-            mysqlOptions.EnableRetryOnFailure(3, TimeSpan.FromSeconds(5), null);
-        });
-    }
-}
 
         // ======= Users & Auth =======
         public DbSet<tbl_user> tbl_user => Set<tbl_user>();
@@ -38,17 +24,17 @@ protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
         public DbSet<tbl_user_deletion_audit> tbl_user_deletion_audit => Set<tbl_user_deletion_audit>();
         
 
-       public DbSet<tbl_company> tbl_company { get; set; }
-       public DbSet<tbl_lte_prediction_results> Tbl_lte_prediction_results { get; set; }
-       public DbSet<tbl_lte_prediction_results_refined> tbl_lte_prediction_results_refined { get; set; }
-       public DbSet<site_prediction_base> site_prediction_base { get; set; }
-       public DbSet<lte_prediction_optimised_results> lte_prediction_optimised_results { get; set; }
+       public DbSet<tbl_company> tbl_company => Set<tbl_company>();
+       public DbSet<tbl_lte_prediction_results> Tbl_lte_prediction_results => Set<tbl_lte_prediction_results>();
+       public DbSet<tbl_lte_prediction_results_refined> tbl_lte_prediction_results_refined => Set<tbl_lte_prediction_results_refined>();
+       public DbSet<site_prediction_base> site_prediction_base => Set<site_prediction_base>();
+       public DbSet<lte_prediction_optimised_results> lte_prediction_optimised_results => Set<lte_prediction_optimised_results>();
 
 
 
-       public DbSet<tbl_company_license_grant_history> tbl_company_license_grant_history { get; set; }
+       public DbSet<tbl_company_license_grant_history> tbl_company_license_grant_history => Set<tbl_company_license_grant_history>();
 
-       public DbSet<tbl_company_user_license_issued> tbl_company_user_license_issued { get; set; }
+       public DbSet<tbl_company_user_license_issued> tbl_company_user_license_issued => Set<tbl_company_user_license_issued>();
 
 
         public DbSet<tbl_user_login_audit_details> tbl_user_login_audit_details => Set<tbl_user_login_audit_details>();
@@ -66,23 +52,23 @@ protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
         public DbSet<tbl_prediction_data> tbl_prediction_data => Set<tbl_prediction_data>();
         public DbSet<site_prediction> site_prediction => Set<site_prediction>();
         public DbSet<site_prediction_optimized> site_prediction_optimized => Set<site_prediction_optimized>();
-        public DbSet<thresholds> thresholds => Set<thresholds>(); // Kept this one, removed duplicate 'tbl_threshold'
+        public DbSet<Thresholds> thresholds => Set<Thresholds>(); // Kept this one, removed duplicate 'tbl_threshold'
 
         // ======= Projects, Regions, Uploads =======
         public DbSet<tbl_project> tbl_project => Set<tbl_project>();
         public DbSet<tbl_indoor_planning_floor> tbl_indoor_planning_floor => Set<tbl_indoor_planning_floor>();
         public DbSet<map_regions> map_regions => Set<map_regions>();
         public DbSet<tbl_upload_history> tbl_upload_history => Set<tbl_upload_history>();
-        public DbSet<tbl_dashboard_cache> tbl_dashboard_cache { get; set; }
-        public DbSet<grid_analytics_results> grid_analytics_results { get; set; }
+        public DbSet<tbl_dashboard_cache> tbl_dashboard_cache => Set<tbl_dashboard_cache>();
+        public DbSet<grid_analytics_results> grid_analytics_results => Set<grid_analytics_results>();
 
         // ======= DTOs (Keyless Views) =======
-        public DbSet<N78NeighbourDto> N78NeighbourDto { get; set; }
+        public DbSet<N78NeighbourDto> N78NeighbourDto => Set<N78NeighbourDto>();
         public DbSet<TempPlainDto> TempPlainDto => Set<TempPlainDto>();
-        public DbSet<KpiDistributionRow> KpiDistributionRows { get; set; }
-        public DbSet<BandOpNetDto> BandOpNetDtos { get; set; }
-        public DbSet<N78NeighbourSimpleDto> N78NeighbourSimpleDto { get; set; }
-        public DbSet<LTE5GNeighbourDto> LTE5GNeighbourDto { get; set; }
+        public DbSet<KpiDistributionRow> KpiDistributionRows => Set<KpiDistributionRow>();
+        public DbSet<BandOpNetDto> BandOpNetDtos => Set<BandOpNetDto>();
+        public DbSet<N78NeighbourSimpleDto> N78NeighbourSimpleDto => Set<N78NeighbourSimpleDto>();
+        public DbSet<LTE5GNeighbourDto> LTE5GNeighbourDto => Set<LTE5GNeighbourDto>();
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -213,7 +199,7 @@ protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
                 entity.Property(e => e.timestamp).HasColumnName("timestamp");
             });
 
-            modelBuilder.Entity<thresholds>(e =>
+            modelBuilder.Entity<Thresholds>(e =>
             {
                 e.HasKey(x => x.id);
                 e.ToTable("thresholds");

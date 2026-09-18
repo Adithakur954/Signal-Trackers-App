@@ -2940,7 +2940,7 @@ WHERE dst.session_id = {sessionId}
 
 	                db.SaveChanges();
 	            }
-	            catch (Exception ex)
+	            catch (Exception)
 	            {
 	                foreach (var e in db.ChangeTracker.Entries().Where(e => e.State is EntityState.Added or EntityState.Modified)){
 	                    e.State = EntityState.Detached;
@@ -3110,7 +3110,7 @@ public bool ProcessSitePredictionSheet(
                 }
             }
 	        }
-	        catch (Exception ex)
+	        catch (Exception)
 	        {
 	            foreach (var e in db.ChangeTracker.Entries()
 	                         .Where(e => e.State is EntityState.Added or EntityState.Modified))
@@ -3364,7 +3364,7 @@ public bool ProcessSitePredictionSheet(
             { 78, "jio"    }, // 3.5 GHz NR
         };
 
-        private static string NormalizeOperator(string s)
+        private static string? NormalizeOperator(string? s)
         {
             s = s?.Trim().ToLowerInvariant() ?? "";
             if (s.Contains("airtel") || s.Contains("bharti")) return "airtel";

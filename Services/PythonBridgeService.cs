@@ -3259,7 +3259,7 @@ namespace SignalTracker.Services
             }
         }
 
-        public async Task<thresholds?> GetUserThresholdsAsync(
+        public async Task<Thresholds?> GetUserThresholdsAsync(
             int userId,
             CancellationToken cancellationToken = default
         )

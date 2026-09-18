@@ -35,7 +35,6 @@ namespace SignalTracker.Controllers
         private readonly RedisService _redis;
         // Cache for index-existence check to avoid hitting INFORMATION_SCHEMA repeatedly
         private static bool? _hasSessionUserIndex;
-        private string? m_alpha_long;
 
 private int GetTargetCompanyId(int? explicitCompanyId)
 {
@@ -297,7 +296,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
                 .CountAsync();
         }
 
-        private static IQueryable<tbl_network_log> FilterByNetworkType(IQueryable<tbl_network_log> q, string networkType)
+        private static IQueryable<tbl_network_log> FilterByNetworkType(IQueryable<tbl_network_log> q, string? networkType)
         {
             if (string.IsNullOrWhiteSpace(networkType) || networkType.Equals("All", StringComparison.OrdinalIgnoreCase))
                 return q;
@@ -310,7 +309,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
             return q;
         }
 
-        private static string NormalizeNetworkType(string raw)
+        private static string? NormalizeNetworkType(string? raw)
         {
             if (string.IsNullOrWhiteSpace(raw)) return null;
             var s = raw.Trim().Trim('{', '}');
@@ -319,7 +318,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
             return allowed.FirstOrDefault(a => a.Equals(s, StringComparison.OrdinalIgnoreCase));
         }
 
-        private static void Add(DbCommand cmd, string name, object value)
+        private static void Add(DbCommand cmd, string name, object? value)
         {
             var p = cmd.CreateParameter();
             p.ParameterName = name;
@@ -640,11 +639,11 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
         [HttpGet("GetUsers")]
         public async Task<JsonResult> GetUsers(
             int company_id = 0,
-            string UserName = null,
-            string Email = null,
-            string Mobile = null,
+            string? UserName = null,
+            string? Email = null,
+            string? Mobile = null,
             int? Status = null,
-            string CompanyName = null)
+            string? CompanyName = null)
         {
             var message = new ReturnAPIResponse();
             try
@@ -1168,7 +1167,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
         public class DeleteUserRequest
         {
             public int Id { get; set; }
-            public string Ip { get; set; }
+            public string Ip { get; set; } = string.Empty;
         }
 
 
@@ -1260,7 +1259,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
             public double? rsrp { get; set; }
             public double? rsrq { get; set; }
             public double? sinr { get; set; }
-            public string network { get; set; }
+            public string? network { get; set; }
             public DateTime? timestamp { get; set; }
         }
 
@@ -1273,7 +1272,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
             public double? rsrp { get; set; }
             public double? rsrq { get; set; }
             public double? sinr { get; set; }
-            public string network { get; set; }
+            public string? network { get; set; }
             public DateTime? timestamp { get; set; }
         }
 
@@ -1831,7 +1830,7 @@ public async Task<IActionResult> GetOperatorCoverageRanking(
         // ========================================
         public class OperatorQualityItem
         {
-            public string name { get; set; }
+            public string? name { get; set; }
             public int count { get; set; }
         }
 
@@ -2060,7 +2059,7 @@ public async Task<IActionResult> GetOperatorQualityRanking(
         [HttpGet("IndoorCount")]
 public async Task<IActionResult> IndoorCount(
     [FromQuery] string indoorColumn = "indoor_outdoor", 
-    [FromQuery] string networkType = null,
+    [FromQuery] string? networkType = null,
     [FromQuery] int? company_id = null)
 {
     try
@@ -2094,7 +2093,7 @@ public async Task<IActionResult> IndoorCount(
         [HttpGet("OutdoorCount")]
 public async Task<IActionResult> OutdoorCount(
     [FromQuery] string indoorColumn = "indoor_outdoor", 
-    [FromQuery] string networkType = null,
+    [FromQuery] string? networkType = null,
     [FromQuery] int? company_id = null) // <--- Added Parameter
 {
     try
@@ -2126,7 +2125,7 @@ public async Task<IActionResult> OutdoorCount(
     }
 }
         [HttpGet("IndoorKpis")]
-        public async Task<JsonResult> IndoorKpis(string networkType = null, string indoorColumn = "indoor_outdoor")
+        public async Task<JsonResult> IndoorKpis(string? networkType = null, string indoorColumn = "indoor_outdoor")
         {
             try
             {
@@ -2140,7 +2139,7 @@ public async Task<IActionResult> OutdoorCount(
         }
 
         [HttpGet("OutdoorKpis")]
-        public async Task<JsonResult> OutdoorKpis(string networkType = null, string indoorColumn = "indoor_outdoor")
+        public async Task<JsonResult> OutdoorKpis(string? networkType = null, string indoorColumn = "indoor_outdoor")
         {
             try
             {
@@ -2154,7 +2153,7 @@ public async Task<IActionResult> OutdoorCount(
         }
 
         // ---- helper: count with SAME filters as KPI (indoor/outdoor + networkType) ----
-        private async Task<long> CountForKpiSqlAsync(string indoorColumn, bool isIndoor, string networkType, int companyId = 0)
+        private async Task<long> CountForKpiSqlAsync(string indoorColumn, bool isIndoor, string? networkType, int companyId = 0)
 	{
 	    var cacheKey = $"{(isIndoor ? "indoorcount" : "outdoorcount")}:{GetCacheCountryScope()}:{companyId}:{NormalizeCacheSegment(indoorColumn)}:{NormalizeCacheSegment(networkType)}";
 
@@ -2243,7 +2242,7 @@ public async Task<IActionResult> OutdoorCount(
 }
         public class OperatorKpiRow
         {
-            public string name { get; set; }
+            public string? name { get; set; }
             public int samples { get; set; }
             public double avg_rsrp { get; set; }
             public double avg_rsrq { get; set; }
@@ -2257,7 +2256,7 @@ public async Task<IActionResult> OutdoorCount(
         }
 
         // Indoor/outdoor KPIs by operator
-        private async Task<List<OperatorKpiRow>> GetOperatorKpisSqlAsync(string networkType, string indoorColumn, bool isIndoor)
+        private async Task<List<OperatorKpiRow>> GetOperatorKpisSqlAsync(string? networkType, string indoorColumn, bool isIndoor)
         {
             var cacheKey = $"{(isIndoor ? "indoorkpis" : "outdoorkpis")}:{GetCacheCountryScope()}:{NormalizeCacheSegment(indoorColumn)}:{NormalizeCacheSegment(networkType)}";
 
@@ -2343,7 +2342,7 @@ public async Task<IActionResult> OutdoorCount(
             }
         }
 
-        private static object BuildCompactKpiResponse(IEnumerable<OperatorKpiRow> list, string appliedNetworkType)
+        private static object BuildCompactKpiResponse(IEnumerable<OperatorKpiRow> list, string? appliedNetworkType)
         {
             var operators = list.Select(x => new
             {
@@ -2382,7 +2381,7 @@ public async Task<IActionResult> OutdoorCount(
             string indoorColumn,
             bool isIndoor,
             bool isGood,
-            string networkType)
+            string? networkType)
         {
             var cacheKey = $"{(isIndoor ? (isGood ? "indoorgoodcount" : "indoorbadcount") : (isGood ? "outdoorgoodcount" : "outdoorbadcount"))}:{GetCacheCountryScope()}:{NormalizeCacheSegment(indoorColumn)}:{NormalizeCacheSegment(networkType)}";
 
@@ -2459,7 +2458,7 @@ public async Task<IActionResult> OutdoorCount(
         [HttpGet("IndoorBadCount")]
         public async Task<JsonResult> IndoorBadCount(
             string indoorColumn = "indoor_outdoor",
-            string networkType = null)
+            string? networkType = null)
         {
             try
             {
@@ -2491,7 +2490,7 @@ public async Task<IActionResult> OutdoorCount(
         [HttpGet("IndoorGoodCount")]
         public async Task<JsonResult> IndoorGoodCount(
             string indoorColumn = "indoor_outdoor",
-            string networkType = null)
+            string? networkType = null)
         {
             try
             {
@@ -2523,7 +2522,7 @@ public async Task<IActionResult> OutdoorCount(
         private async Task<List<object>> GetIndoorGoodBadPointsSqlAsync(
             bool isGood,
             string indoorColumn = "indoor_outdoor",
-            string networkType = null,
+            string? networkType = null,
             int maxRows = 1000)
         {
             var cacheKey = $"{(isGood ? "indoorgoodlogs" : "indoorbadlogs")}:{GetCacheCountryScope()}:{NormalizeCacheSegment(indoorColumn)}:{NormalizeCacheSegment(networkType)}:{maxRows}";
@@ -2609,7 +2608,7 @@ public async Task<IActionResult> OutdoorCount(
         [HttpGet("IndoorBadLogs")]
         public async Task<JsonResult> IndoorBadLogs(
             string indoorColumn = "indoor_outdoor",
-            string networkType = null,
+            string? networkType = null,
             int maxRows = 1000)
         {
             try
@@ -2643,7 +2642,7 @@ public async Task<IActionResult> OutdoorCount(
         [HttpGet("IndoorGoodLogs")]
         public async Task<JsonResult> IndoorGoodLogs(
             string indoorColumn = "indoor_outdoor",
-            string networkType = null,
+            string? networkType = null,
             int maxRows = 1000)
         {
             try
@@ -2675,7 +2674,7 @@ public async Task<IActionResult> OutdoorCount(
         }
 
         private async Task<List<object>> GetAllIndoorSessionLogsSqlAsync(
-            string networkType,
+            string? networkType,
             string indoorColumn = "indoor_outdoor",
             int maxRows = 200000
         )
@@ -2759,7 +2758,7 @@ public async Task<IActionResult> OutdoorCount(
 
         [HttpGet("AllIndoorSessionLogs")]
         public async Task<JsonResult> AllIndoorSessionLogs(
-            string networkType = null,
+            string? networkType = null,
             string indoorColumn = "indoor_outdoor",
             int maxRows = 200000)
         {
@@ -2799,7 +2798,7 @@ public async Task<IActionResult> OutdoorCount(
         // NEW: paginated endpoint for AllIndoorSessionLogs
         [HttpGet("AllIndoorSessionLogsPaged")]
         public async Task<JsonResult> AllIndoorSessionLogsPaged(
-            string networkType = null,
+            string? networkType = null,
             string indoorColumn = "indoor_outdoor",
             int pageNumber = 1,
             int pageSize = 5000)
@@ -2811,12 +2810,10 @@ public async Task<IActionResult> OutdoorCount(
                 if (pageSize > 20000) pageSize = 20000;
 
                 var conn = db.Database.GetDbConnection();
-                var shouldClose = false;
 
                 if (conn.State != ConnectionState.Open)
                 {
                     await conn.OpenAsync();
-                    shouldClose = true;
                 }
 
                 var nt = NormalizeNetworkType(networkType);
@@ -2890,7 +2887,7 @@ public async Task<IActionResult> OutdoorCount(
                 }
 
                 var totalPages = (int)Math.Ceiling(totalCount / (double)pageSize);
-                var appliedNetworkType = isAllNetworks ? "ALL" : nt.ToUpperInvariant();
+                var appliedNetworkType = string.IsNullOrEmpty(nt) ? "ALL" : nt.ToUpperInvariant();
 
                 return Json(new
                 {
@@ -2934,7 +2931,7 @@ public async Task<IActionResult> OutdoorCount(
             return notes.Trim();
         }
 
-        private static object CleanCachedSessions(object cachedData)
+        private static object? CleanCachedSessions(object? cachedData)
         {
             if (cachedData == null) return cachedData;
             try
@@ -3450,7 +3447,7 @@ public async Task<IActionResult> GetSessions(
                         model = u.model,
                         os = u.os,
                         operator_name = u.operator_name,
-                        Logs = (object)null
+                        Logs = (object?)null
                     })
                     .ToListAsync();
 
@@ -3545,10 +3542,10 @@ public async Task<IActionResult> GetSessions(
         public class PolygonGoodBadSummaryRow
         {
             public long id { get; set; }
-            public string name { get; set; }
+            public string? name { get; set; }
             public long? project_id { get; set; }
             public double? area { get; set; }
-            public string region_wkt { get; set; }
+            public string? region_wkt { get; set; }
             public int good_count { get; set; }
             public int bad_count { get; set; }
             public int total_count { get; set; }
@@ -3556,7 +3553,7 @@ public async Task<IActionResult> GetSessions(
 
         private async Task<List<PolygonGoodBadSummaryRow>> GetPolygonGoodBadSummarySqlAsync(
             double rsrpThreshold = -95,
-            string networkType = null,
+            string? networkType = null,
             long? projectId = null)
         {
             var cacheKey = $"polygongoodbad:{GetCacheCountryScope()}:{rsrpThreshold.ToString(CultureInfo.InvariantCulture)}:{NormalizeCacheSegment(networkType)}:{projectId?.ToString(CultureInfo.InvariantCulture) ?? "all"}";
@@ -3660,7 +3657,7 @@ public async Task<IActionResult> GetSessions(
         [HttpGet("PolygonGoodBadSummary")]
         public async Task<JsonResult> PolygonGoodBadSummary(
             double rsrpThreshold = -95,
-            string networkType = null,
+            string? networkType = null,
             long? projectId = null)
         {
             try
@@ -3712,7 +3709,7 @@ public async Task<IActionResult> GetSessions(
         private async Task<List<dynamic>> GetPolygonPointsSqlAsync(
             long polygonId,
             double rsrpThreshold = -95,
-            string networkType = null)
+            string? networkType = null)
         {
             var conn = db.Database.GetDbConnection();
             var shouldClose = false;
@@ -3808,7 +3805,7 @@ public async Task<IActionResult> GetSessions(
         public async Task<JsonResult> PolygonPoints(
      long polygonId,
      double rsrpThreshold = -95,
-     string networkType = null)
+     string? networkType = null)
         {
             var totalStopwatch = System.Diagnostics.Stopwatch.StartNew();
 
@@ -3860,7 +3857,7 @@ public async Task<IActionResult> GetSessions(
 
                         Console.WriteLine($" Cache MISS: {cacheKey}");
                     }
-                    catch (Exception redisEx)
+                    catch (Exception)
                     {
                         Console.WriteLine("Redis read error: operation failed (see server logs)");
                     }
@@ -3902,7 +3899,7 @@ public async Task<IActionResult> GetSessions(
                         Console.WriteLine($" Cached: {cacheKey} (TTL: 10 min)");
                         Console.WriteLine($"   Cache write: {cacheWriteStopwatch.ElapsedMilliseconds}ms");
                     }
-                    catch (Exception redisEx)
+                    catch (Exception)
                     {
                         Console.WriteLine("Failed to cache: operation failed (see server logs)");
                     }
@@ -3946,7 +3943,7 @@ public async Task<IActionResult> GetSessions(
         // ========================================
         public class PolygonPointsResponse
         {
-            public object samples { get; set; }
+            public object? samples { get; set; }
             public DateTime CachedAt { get; set; }
         }
         #endregion
@@ -3958,8 +3955,8 @@ public async Task<IActionResult> GetSessions(
 
         public class OpNetValueDto
         {
-            public string operatorName { get; set; }
-            public string network { get; set; }
+            public string? operatorName { get; set; }
+            public string? network { get; set; }
             public double value { get; set; }
 
             public double avg_rsrp { get; set; }
@@ -3997,7 +3994,7 @@ public async Task<IActionResult> GetSessions(
         private async Task<JsonResult> SafeOkV2<T>(
     string action,
     Func<Task<T>> fn,
-    string cacheKey = null,
+    string? cacheKey = null,
     int ttlSeconds = 300) where T : class
         {
             var totalStopwatch = System.Diagnostics.Stopwatch.StartNew();
@@ -4005,7 +4002,7 @@ public async Task<IActionResult> GetSessions(
 
             try
             {
-                T data = null;
+                T? data = null;
 
                 // ========================================
                 //  TRY GET FROM REDIS CACHE
@@ -4038,7 +4035,7 @@ public async Task<IActionResult> GetSessions(
 
                         Console.WriteLine($"Cache MISS [{action}]: {cacheKey}");
                     }
-                    catch (Exception redisEx)
+                    catch (Exception)
                     {
                         Console.WriteLine($"Redis read error [{action}]: operation failed (see server logs)");
                         // Continue without cache
@@ -4068,7 +4065,7 @@ public async Task<IActionResult> GetSessions(
                         Console.WriteLine($" Cached [{action}]: {cacheKey} (TTL: {ttlSeconds}s)");
                         Console.WriteLine($"    Cache write: {cacheWriteStopwatch.ElapsedMilliseconds}ms");
                     }
-                    catch (Exception redisEx)
+                    catch (Exception)
                     {
                         Console.WriteLine($"Failed to cache [{action}]: operation failed (see server logs)");
                     }
@@ -4104,7 +4101,7 @@ public async Task<IActionResult> GetSessions(
 
             return Json(msg);
         }
-        private static HashSet<string> ParseCsv(string csv) =>
+        private static HashSet<string>? ParseCsv(string? csv) =>
                     string.IsNullOrWhiteSpace(csv)
                         ? null
                         : new HashSet<string>(
@@ -4143,8 +4140,8 @@ public async Task<IActionResult> GetSessions(
 
         private static IQueryable<tbl_network_log> ApplyFilters(
             IQueryable<tbl_network_log> q,
-            string operatorCsv,
-            string networkCsv,
+            string? operatorCsv,
+            string? networkCsv,
             DateTime? from,
             DateTime? to)
         {
@@ -4180,15 +4177,15 @@ public async Task<IActionResult> GetSessions(
         /// 
         public class AvgMetricRow
         {
-            public string OperatorName { get; set; }
-            public string Network { get; set; }
+            public string? OperatorName { get; set; }
+            public string? Network { get; set; }
             public double Value { get; set; }
         }
 
 
         private async Task<List<object>> AveragePerOperatorNetworkAsync(
        string operatorName,
-       string networkType,
+       string? networkType,
        DateTime? from,
        DateTime? to,
        Metric metric,
@@ -4228,7 +4225,7 @@ public async Task<IActionResult> GetSessions(
                     {
                         OperatorName = g.Key.m_alpha_long,
                         Network = g.Key.network,
-                        Value = g.Average(x => (double)x.rsrp.Value)
+                        Value = g.Average(x => (double)x.rsrp.GetValueOrDefault())
                     }),
 
                 Metric.Rsrq => baseQuery
@@ -4238,7 +4235,7 @@ public async Task<IActionResult> GetSessions(
                     {
                         OperatorName = g.Key.m_alpha_long,
                         Network = g.Key.network,
-                        Value = g.Average(x => (double)x.rsrq.Value)
+                        Value = g.Average(x => (double)x.rsrq.GetValueOrDefault())
                     }),
 
                 Metric.Sinr => baseQuery
@@ -4248,7 +4245,7 @@ public async Task<IActionResult> GetSessions(
                     {
                         OperatorName = g.Key.m_alpha_long,
                         Network = g.Key.network,
-                        Value = g.Average(x => (double)x.sinr.Value)
+                        Value = g.Average(x => (double)x.sinr.GetValueOrDefault())
                     }),
 
                 Metric.Mos => baseQuery
@@ -4258,7 +4255,7 @@ public async Task<IActionResult> GetSessions(
                     {
                         OperatorName = g.Key.m_alpha_long,
                         Network = g.Key.network,
-                        Value = g.Average(x => (double)x.mos.Value)
+                        Value = g.Average(x => (double)x.mos.GetValueOrDefault())
                     }),
 
                 Metric.Jitter => baseQuery
@@ -4268,7 +4265,7 @@ public async Task<IActionResult> GetSessions(
                     {
                         OperatorName = g.Key.m_alpha_long,
                         Network = g.Key.network,
-                        Value = g.Average(x => (double)x.jitter.Value)
+                        Value = g.Average(x => (double)x.jitter.GetValueOrDefault())
                     }),
 
                 Metric.Latency => baseQuery
@@ -4278,7 +4275,7 @@ public async Task<IActionResult> GetSessions(
                     {
                         OperatorName = g.Key.m_alpha_long,
                         Network = g.Key.network,
-                        Value = g.Average(x => (double)x.latency.Value)
+                        Value = g.Average(x => (double)x.latency.GetValueOrDefault())
                     }),
 
                 Metric.PacketLoss => baseQuery
@@ -4288,7 +4285,7 @@ public async Task<IActionResult> GetSessions(
                     {
                         OperatorName = g.Key.m_alpha_long,
                         Network = g.Key.network,
-                        Value = g.Average(x => (double)x.packet_loss.Value)
+                        Value = g.Average(x => (double)x.packet_loss.GetValueOrDefault())
                     }),
 
                 _ => throw new ArgumentOutOfRangeException(nameof(metric))
@@ -4324,7 +4321,7 @@ public async Task<IActionResult> GetSessions(
                     {
                         OperatorName = g.Key.m_alpha_long,
                         Network = g.Key.network,
-                        Value = g.Average(v => double.Parse(v.value))
+                        Value = g.Average(v => double.TryParse(v.value, out var value) ? value : 0)
                     })
                     .OrderByDescending(x => x.Value)
                     .ToList();
@@ -4349,8 +4346,8 @@ public async Task<IActionResult> GetSessions(
         /// Used for DL/UL throughput. DB part still uses ExecuteHeavyQueryAsync.
         /// </summary>
         private async Task<List<OpNetValueDto>> AverageStringPerOperatorNetworkAsync(
-            string operatorName,
-            string networkType,
+            string? operatorName,
+            string? networkType,
             DateTime? from,
             DateTime? to,
             Func<tbl_network_log, string> selector)
@@ -4527,8 +4524,8 @@ public async Task<IActionResult> TotalsV2(
         public async Task<IActionResult> GetNetworkDurations(
        [FromQuery] DateTime? fromDate,
        [FromQuery] DateTime? toDate,
-       [FromQuery] string provider = null,   // e.g. "a", "v", "j", "air", "vod", "jio"
-       [FromQuery] string network = null,    // optional
+       [FromQuery] string? provider = null,   // e.g. "a", "v", "j", "air", "vod", "jio"
+       [FromQuery] string? network = null,    // optional
        [FromQuery] int? company_id = null,   // <--- ADDED PARAMETER
        [FromQuery] int? month = null,
        [FromQuery] int? year = null)
@@ -4628,8 +4625,8 @@ public async Task<IActionResult> TotalsV2(
                 await using var reader = await cmd.ExecuteReaderAsync();
                 while (await reader.ReadAsync())
                 {
-                    string providerVal = reader.IsDBNull(0) ? null : reader.GetString(0);
-                    string networkVal = reader.IsDBNull(1) ? null : reader.GetString(1);
+                    string? providerVal = reader.IsDBNull(0) ? null : reader.GetString(0);
+                    string? networkVal = reader.IsDBNull(1) ? null : reader.GetString(1);
                     long durationSeconds = reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2));
 
                     result.Add(new
@@ -4709,7 +4706,7 @@ public async Task<IActionResult> TotalsV2(
             double rsrpThreshold;
             double? rsrqThreshold = null;
 
-            var raw = threshold.coveragehole_json.Trim();
+            var raw = (threshold.coveragehole_json ?? string.Empty).Trim();
 
             // Case: "-110"
             if (double.TryParse(raw, NumberStyles.Any, CultureInfo.InvariantCulture, out var onlyRsrp))
@@ -4875,8 +4872,8 @@ public async Task<IActionResult> TotalsV2(
 public async Task<IActionResult> MonthlySamplesV2(
     [FromQuery] DateTime? from,
     [FromQuery] DateTime? to,
-    [FromQuery] string operatorName = null,
-    [FromQuery] string networkType = null,
+    [FromQuery] string? operatorName = null,
+    [FromQuery] string? networkType = null,
     [FromQuery] int? company_id = null)
 {
     // 1. Resolve Company ID from the st.auth cookie claims securely
@@ -5112,8 +5109,8 @@ public async Task<IActionResult> MonthlySamplesV2(
         [HttpGet("GetSessionTechMinutesFilter")]
         public async Task<IActionResult> GetSessionTechMinutesFilter(
             [FromQuery] long session_id,
-            [FromQuery] string provider = null,   // jio / airtel / vi / vodafone
-            [FromQuery] string tech = null        // 4g / 5g
+            [FromQuery] string? provider = null,   // jio / airtel / vi / vodafone
+            [FromQuery] string? tech = null        // 4g / 5g
         )
         {
             var totalStopwatch = System.Diagnostics.Stopwatch.StartNew();
@@ -5123,11 +5120,11 @@ public async Task<IActionResult> MonthlySamplesV2(
 
             try
             {
-                string normalizedProvider = string.IsNullOrWhiteSpace(provider)
+                string? normalizedProvider = string.IsNullOrWhiteSpace(provider)
                     ? null
                     : provider.Trim().ToLowerInvariant();
 
-                string normalizedTech = string.IsNullOrWhiteSpace(tech)
+                string? normalizedTech = string.IsNullOrWhiteSpace(tech)
                     ? null
                     : tech.Trim().ToLowerInvariant();
 
@@ -5171,7 +5168,7 @@ public async Task<IActionResult> MonthlySamplesV2(
 
                         Console.WriteLine($" Cache MISS: {cacheKey}");
                     }
-                    catch (Exception redisEx)
+                    catch (Exception)
                     {
                         Console.WriteLine("Redis read error: operation failed (see server logs)");
                     }
@@ -5239,8 +5236,8 @@ GROUP BY provider, tech;
                     await using var reader = await cmd.ExecuteReaderAsync();
                     while (await reader.ReadAsync())
                     {
-                        string prov = reader.IsDBNull(0) ? null : reader.GetString(0);
-                        string t = reader.IsDBNull(1) ? null : reader.GetString(1);
+                        string? prov = reader.IsDBNull(0) ? null : reader.GetString(0);
+                        string? t = reader.IsDBNull(1) ? null : reader.GetString(1);
                         long sec = reader.IsDBNull(2) ? 0 : reader.GetInt64(2);
 
                         data.Add(new SessionTechMinuteItem
@@ -5284,7 +5281,7 @@ GROUP BY provider, tech;
                         Console.WriteLine($" Cached: {cacheKey} (TTL: 300s)");
                         Console.WriteLine($"    Cache write: {cacheWriteStopwatch.ElapsedMilliseconds}ms");
                     }
-                    catch (Exception redisEx)
+                    catch (Exception)
                     {
                         Console.WriteLine("Failed to cache: operation failed (see server logs)");
                     }
@@ -5332,8 +5329,8 @@ GROUP BY provider, tech;
 
         public class SessionTechMinuteItem
         {
-            public string Provider { get; set; }
-            public string Technology { get; set; }
+            public string? Provider { get; set; }
+            public string? Technology { get; set; }
             public long Seconds { get; set; }
             public double Minutes { get; set; }
             public double Hours { get; set; }
@@ -5348,8 +5345,8 @@ GROUP BY provider, tech;
 
         [HttpGet("OperatorSamplesV2")]
         public async Task<IActionResult> OperatorSamplesV2(
-            string operatorName,
-            string networkType,
+            string? operatorName,
+            string? networkType,
             DateTime? from,
             DateTime? to,
             [FromQuery] int? company_id = null,
@@ -5618,8 +5615,8 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
         }
         [HttpGet("OperatorAvgThroughput10SecV2")]
         public async Task<IActionResult> OperatorAvgThroughput10SecV2(
-            string operatorName,
-            string networkType,
+            string? operatorName,
+            string? networkType,
             DateTime? from,
             DateTime? to,
             [FromQuery] int? company_id = null) // <--- ADDED PARAMETER
@@ -5811,8 +5808,8 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
 
         public class ThroughputDto
         {
-            public string operatorName { get; set; }
-            public string network { get; set; }
+            public string? operatorName { get; set; }
+            public string? network { get; set; }
             public double avg_dl_tpt { get; set; }
             public double avg_ul_tpt { get; set; }
         }
@@ -5974,8 +5971,8 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
         //  SHARED HELPER FOR ALL AVG KPI ENDPOINTS (SMART SECURITY & ISOLATION)
         // ===================================================================================
         private async Task<IActionResult> GetAverageMetricGeneric(
-            string operatorName,
-            string networkType,
+            string? operatorName,
+            string? networkType,
             DateTime? from,
             DateTime? to,
             int? company_id,
@@ -6127,39 +6124,39 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
             }
         }
         [HttpGet("AvgRsrpV2")]
-        public Task<IActionResult> AvgRsrpV2(string operatorName, string networkType, DateTime? from, DateTime? to, [FromQuery] int? company_id = null)
+        public Task<IActionResult> AvgRsrpV2(string operatorName, string? networkType, DateTime? from, DateTime? to, [FromQuery] int? company_id = null)
             => GetAverageMetricGeneric(operatorName, networkType, from, to, company_id, "n.rsrp", "Rsrp");
 
         [HttpGet("AvgRsrqV2")]
-        public Task<IActionResult> AvgRsrqV2(string operatorName, string networkType, DateTime? from, DateTime? to, [FromQuery] int? company_id = null)
+        public Task<IActionResult> AvgRsrqV2(string operatorName, string? networkType, DateTime? from, DateTime? to, [FromQuery] int? company_id = null)
             => GetAverageMetricGeneric(operatorName, networkType, from, to, company_id, "n.rsrq", "Rsrq");
 
         [HttpGet("AvgSinrV2")]
-        public Task<IActionResult> AvgSinrV2(string operatorName, string networkType, DateTime? from, DateTime? to, [FromQuery] int? company_id = null)
+        public Task<IActionResult> AvgSinrV2(string operatorName, string? networkType, DateTime? from, DateTime? to, [FromQuery] int? company_id = null)
             => GetAverageMetricGeneric(operatorName, networkType, from, to, company_id, "n.sinr", "Sinr");
 
         [HttpGet("AvgMosV2")]
-        public Task<IActionResult> AvgMosV2(string operatorName, string networkType, DateTime? from, DateTime? to, [FromQuery] int? company_id = null)
+        public Task<IActionResult> AvgMosV2(string operatorName, string? networkType, DateTime? from, DateTime? to, [FromQuery] int? company_id = null)
             => GetAverageMetricGeneric(operatorName, networkType, from, to, company_id, "n.mos", "Mos");
 
         [HttpGet("AvgJitterV2")]
-        public Task<IActionResult> AvgJitterV2(string operatorName, string networkType, DateTime? from, DateTime? to, [FromQuery] int? company_id = null)
+        public Task<IActionResult> AvgJitterV2(string operatorName, string? networkType, DateTime? from, DateTime? to, [FromQuery] int? company_id = null)
             => GetAverageMetricGeneric(operatorName, networkType, from, to, company_id, "n.jitter", "Jitter");
 
         [HttpGet("AvgLatencyV2")]
-        public Task<IActionResult> AvgLatencyV2(string operatorName, string networkType, DateTime? from, DateTime? to, [FromQuery] int? company_id = null)
+        public Task<IActionResult> AvgLatencyV2(string operatorName, string? networkType, DateTime? from, DateTime? to, [FromQuery] int? company_id = null)
             => GetAverageMetricGeneric(operatorName, networkType, from, to, company_id, "n.latency", "Latency");
 
         [HttpGet("AvgPacketLossV2")]
-        public Task<IActionResult> AvgPacketLossV2(string operatorName, string networkType, DateTime? from, DateTime? to, [FromQuery] int? company_id = null)
+        public Task<IActionResult> AvgPacketLossV2(string operatorName, string? networkType, DateTime? from, DateTime? to, [FromQuery] int? company_id = null)
             => GetAverageMetricGeneric(operatorName, networkType, from, to, company_id, "n.packet_loss", "PacketLoss");
 
         [HttpGet("AvgDlTptV2")]
-        public Task<IActionResult> AvgDlTptV2(string operatorName, string networkType, DateTime? from, DateTime? to, [FromQuery] int? company_id = null)
+        public Task<IActionResult> AvgDlTptV2(string operatorName, string? networkType, DateTime? from, DateTime? to, [FromQuery] int? company_id = null)
             => GetAverageMetricGeneric(operatorName, networkType, from, to, company_id, "CAST(n.dl_tpt AS DECIMAL(18,4))", "DlTpt");
 
         [HttpGet("AvgUlTptV2")]
-        public Task<IActionResult> AvgUlTptV2(string operatorName, string networkType, DateTime? from, DateTime? to, [FromQuery] int? company_id = null)
+        public Task<IActionResult> AvgUlTptV2(string operatorName, string? networkType, DateTime? from, DateTime? to, [FromQuery] int? company_id = null)
             => GetAverageMetricGeneric(operatorName, networkType, from, to, company_id, "CAST(n.ul_tpt AS DECIMAL(18,4))", "UlTpt");
         [HttpGet("BandDistributionV2")]
         public async Task<IActionResult> BandDistributionV2(
@@ -6335,7 +6332,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
         }
         public class HandsetDistResult
         {
-            public string name { get; set; }
+            public string? name { get; set; }
             public int value { get; set; }
             public double? avg_rsrp { get; set; }
             public double? avg_rsrq { get; set; }
@@ -6479,8 +6476,8 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
         }
         public class IndoorOutdoorAvgDto
         {
-            public string OperatorName { get; set; }
-            public string LocationType { get; set; } // Indoor / Outdoor
+            public string? OperatorName { get; set; }
+            public string? LocationType { get; set; } // Indoor / Outdoor
 
             public double AvgRsrp { get; set; }
             public double AvgRsrq { get; set; }
@@ -6669,7 +6666,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
     return Unauthorized(new { Status = 0, Message = "Unauthorized. Invalid Company." });
 }
 
-            string column = metric?.ToLower() switch
+            string? column = metric?.ToLower() switch
             {
                 "rsrp" => "l.rsrp",
                 "rsrq" => "l.rsrq",
@@ -6679,7 +6676,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
                 "ul_tpt" => "CAST(l.ul_tpt AS DECIMAL(18,4))",
                 _ => null
             };
-            string bucketExpr = metric?.ToLower() switch
+            string? bucketExpr = metric?.ToLower() switch
             {
                 "rsrp" => "ROUND(l.rsrp, 1)",
                 "rsrq" => "ROUND(l.rsrq, 1)",
@@ -6690,7 +6687,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
                 _ => null
             };
 
-            if (column == null || bucketExpr == null) return BadRequest("Invalid metric");
+            if (metric == null || column == null || bucketExpr == null) return BadRequest("Invalid metric");
 
             var effectiveTo = to ?? DateTime.UtcNow;
             var effectiveFrom = from ?? effectiveTo.AddDays(-14);
@@ -6704,7 +6701,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
             // =====================================================
             // 3. OPERATOR FILTER (Updated with alias 'l.')
             // =====================================================
-            string operatorWhere = op?.ToLower() switch
+            string? operatorWhere = op?.ToLower() switch
             {
                 "a" => "l.m_alpha_long LIKE '%AIRTEL%'",
                 "j" => "l.m_alpha_long LIKE '%JIO%'",
@@ -6721,7 +6718,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
             double? minRange = null;
             double? maxRange = null;
 
-            switch (metric.ToLower())
+            switch (metric.ToLowerInvariant())
             {
                 case "rsrp": minRange = -140; maxRange = 0; break;
                 case "rsrq": minRange = -26; maxRange = 0; break;
@@ -7157,7 +7154,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
                                  && l.timestamp.HasValue
                                  && (!dateFilter.From.HasValue || l.timestamp.Value >= dateFilter.From.Value)
                                  && (!dateFilter.ToExclusive.HasValue || l.timestamp.Value < dateFilter.ToExclusive.Value))
-                        .Select(l => l.m_alpha_long)
+                        .Select(l => l.m_alpha_long ?? string.Empty)
                         .Distinct()
                         .OrderBy(x => x)
                         .ToListAsync();
@@ -7256,7 +7253,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
                                  && l.timestamp.HasValue
                                  && (!dateFilter.From.HasValue || l.timestamp.Value >= dateFilter.From.Value)
                                  && (!dateFilter.ToExclusive.HasValue || l.timestamp.Value < dateFilter.ToExclusive.Value))
-                        .Select(l => l.network)
+                        .Select(l => l.network ?? string.Empty)
                         .Distinct()
                         .OrderBy(x => x)
                         .ToListAsync();
