@@ -9,7 +9,7 @@ public partial class MapViewController
 {
     private static readonly Dictionary<string, string[]> SavedSourceLayerNames = new(StringComparer.OrdinalIgnoreCase)
     {
-        ["buildings"] = new[] { "overture_auto" },
+        ["buildings"] = new[] { "overture_building", "osm_building" },
         ["roads"] = new[] { "overture_road" },
         ["highways"] = new[] { "overture_highway" },
         ["railways"] = new[] { "overture_railway" },
