@@ -31,6 +31,24 @@ namespace SignalTracker.Helper
             return string.Join(",", placeholders);
         }
 
+        public static string BuildInClause(DbCommand command, IReadOnlyList<string> values, string parameterPrefix)
+        {
+            if (values.Count == 0)
+            {
+                return string.Empty;
+            }
+
+            var placeholders = new string[values.Count];
+            for (var i = 0; i < values.Count; i++)
+            {
+                var parameterName = $"@{parameterPrefix}{i}";
+                placeholders[i] = parameterName;
+                AddParam(command, parameterName, values[i]);
+            }
+
+            return string.Join(",", placeholders);
+        }
+
         public static object? ConvertDbValue(object? rawVal)
         {
             if (rawVal == null || rawVal == DBNull.Value)

@@ -692,6 +692,18 @@ namespace SignalTracker.Services
                     OR UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''), COALESCE(primary_cell_info_1, ''), COALESCE(all_neigbor_cell_info, ''))) LIKE '%NCI%'
                     OR UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''), COALESCE(primary_cell_info_1, ''), COALESCE(all_neigbor_cell_info, ''))) REGEXP '(^|[^A-Z0-9])NR([^A-Z0-9]|$)'
                     OR UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''), COALESCE(primary_cell_info_1, ''), COALESCE(all_neigbor_cell_info, ''))) REGEXP '(^|[^A-Z0-9])N[0-9]{1,3}([^A-Z0-9]|$)'";
+            // tbl_network_log (the serving/primary table) can itself contain rows whose own
+            // `network` string is self-tagged e.g. "4G (Neighbour)" while `primary` = 'Yes' --
+            // confirmed against real data (project 358: 52 such rows, all primary='Yes'). These
+            // are genuine neighbour-cell readings the device happened to log into the serving
+            // table, not primary-cell samples, and `primary`/primary_cell_info_1 alone cannot
+            // distinguish them, so they must be excluded by inspecting `network` itself. Applied
+            // to servingSql only -- neighbourSql's own rows are supposed to represent neighbour
+            // readings and are already correctly excluded from primary-only report populations
+            // downstream via the `primary` column.
+            const string excludeSelfTaggedNeighbourPredicate = @"
+                    AND UPPER(COALESCE(network, '')) NOT LIKE '%NEIGHBOUR%'
+                    AND UPPER(COALESCE(network, '')) NOT LIKE '%NEIGHBOR%'";
 
             var servingSql = @"
                 SELECT
@@ -708,7 +720,9 @@ namespace SignalTracker.Services
                   {4}
                   {5}
                   {6}
-                  {7} ";
+                  {7}
+                  {8}
+                  {9} ";
             var neighbourSql = @"
                 SELECT
                     id, session_id, timestamp, lat, lon, battery, Speed, level, apps, num_cells,
@@ -724,7 +738,8 @@ namespace SignalTracker.Services
                   {4}
                   {5}
                   {6}
-                  {7} ";
+                  {7}
+                  {8} ";
 
             var contextToUse = CreateDbContextForRegion(request.Region, request.CountryCode);
             var ownsContext = contextToUse != _db;
@@ -744,6 +759,17 @@ namespace SignalTracker.Services
 
                 await using var command = conn.CreateCommand();
                 var inClause = PythonBridgeDbTool.BuildInClause(command, sessionIds, "sid");
+                var technologies = (request.Technologies ?? new List<string>())
+                    .Where(t => !string.IsNullOrWhiteSpace(t))
+                    .Select(t => t.Trim())
+                    .Distinct()
+                    .ToList();
+                var technologyInClause = technologies.Count > 0
+                    ? PythonBridgeDbTool.BuildInClause(command, technologies, "tech")
+                    : string.Empty;
+                var technologyClause = technologies.Count > 0
+                    ? $"AND network IN ({technologyInClause})"
+                    : string.Empty;
                 var operatorClause = hasOperatorFilter
                     ? "AND LOWER(COALESCE(m_alpha_long, m_alpha_short)) = LOWER(@operator)"
                     : string.Empty;
@@ -782,8 +808,8 @@ namespace SignalTracker.Services
                             ) = 1
                         )"
                     : string.Empty;
-                var servingQuery = string.Format(servingSql, inClause, validBandPredicate, fiveGPredicate, $"AND ({primaryCellInfoPredicate})", operatorClause, primaryClause, dateClause, polygonClause);
-                var neighbourQuery = string.Format(neighbourSql, inClause, validBandPredicate, fiveGPredicate, $"AND ({primaryCellInfoPredicate})", operatorClause, primaryClause, dateClause, polygonClause);
+                var servingQuery = string.Format(servingSql, inClause, validBandPredicate, fiveGPredicate, $"AND ({primaryCellInfoPredicate})", operatorClause, primaryClause, dateClause, polygonClause, excludeSelfTaggedNeighbourPredicate, technologyClause);
+                var neighbourQuery = string.Format(neighbourSql, inClause, validBandPredicate, fiveGPredicate, $"AND ({primaryCellInfoPredicate})", operatorClause, primaryClause, dateClause, polygonClause, technologyClause);
 
                 command.CommandText = request.IncludeNeighbour
                     ? $"{servingQuery} UNION ALL {neighbourQuery} LIMIT @lim OFFSET @off;"
