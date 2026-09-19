@@ -709,7 +709,7 @@ namespace SignalTracker.Services
                 SELECT
                     id, session_id, timestamp, lat, lon, battery, Speed, level, apps, num_cells,
                     network, m_alpha_long, m_alpha_short, pci, rssi, rsrp, rsrq, sinr, mos, jitter,
-                    latency, tac, packet_loss, dl_tpt, ul_tpt, band, image_path, indoor_outdoor,
+                    latency, tac, packet_loss, dl_tpt, ul_tpt, band, bw, image_path, indoor_outdoor,
                     nodeb_id, cell_id, earfcn, `primary`,
                     primary_cell_info_1 AS __primary_cell_info_1,
                     all_neigbor_cell_info AS __all_neigbor_cell_info
@@ -727,7 +727,7 @@ namespace SignalTracker.Services
                 SELECT
                     id, session_id, timestamp, lat, lon, battery, Speed, level, apps, num_cells,
                     network, m_alpha_long, m_alpha_short, pci, rssi, rsrp, rsrq, sinr, mos, jitter,
-                    latency, tac, packet_loss, dl_tpt, ul_tpt, band, image_path, indoor_outdoor,
+                    latency, tac, packet_loss, dl_tpt, ul_tpt, band, bw, image_path, indoor_outdoor,
                     nodeb_id, cell_id, earfcn, `primary`,
                     primary_cell_info_1 AS __primary_cell_info_1,
                     all_neigbor_cell_info AS __all_neigbor_cell_info
