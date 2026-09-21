@@ -3040,7 +3040,16 @@ public class AvailablePolygonsResponse
             public string? Cause { get; init; }
             public string? Source { get; init; }
             public string? Severity { get; init; }
-            public TimeSpan? EventTime => ParseDiagnosticTime(TimestampText);
+            private bool timeParsed;
+            private TimeSpan? eventTime;
+            public TimeSpan? EventTime
+            {
+                get
+                {
+                    if (!timeParsed) { eventTime = ParseDiagnosticTime(TimestampText); timeParsed = true; }
+                    return eventTime;
+                }
+            }
             public string Text => string.Join(" ", new[] { Category, EventName, Detail, Cause, Source, Severity }.Where(x => !string.IsNullOrWhiteSpace(x)));
         }
 
@@ -3064,7 +3073,16 @@ public class AvailablePolygonsResponse
             public string? Source { get; init; }
             public string? Severity { get; init; }
             public string? RawText { get; init; }
-            public TimeSpan? EventTime => ParseDiagnosticTime(TimestampText);
+            private bool timeParsed;
+            private TimeSpan? eventTime;
+            public TimeSpan? EventTime
+            {
+                get
+                {
+                    if (!timeParsed) { eventTime = ParseDiagnosticTime(TimestampText); timeParsed = true; }
+                    return eventTime;
+                }
+            }
             public string Text => string.Join(" ", new[] { Category, Message, Detail, Cause, RawText, Source, Severity }.Where(x => !string.IsNullOrWhiteSpace(x)));
         }
 
@@ -3477,6 +3495,7 @@ public class AvailablePolygonsResponse
         {
             var calls = new List<DiagnosticCallRow>();
             var activeBySession = new Dictionary<int, DiagnosticCallBuilder>();
+            var technologyIndex = new DiagnosticL3TimeIndex(l3Rows);
             var orderedEvents = events
                 .Where(IsDiagnosticCallRelated)
                 .Where(row => !IsStaleDiagnosticEvent(row))
@@ -3530,7 +3549,7 @@ public class AvailablePolygonsResponse
                         SessionId = ev.SessionId,
                         StartTime = eventTime,
                         StartText = ev.TimestampText,
-                        Technology = ResolveDiagnosticTechnology(text, l3Rows, ev.SessionId, eventTime)
+                        Technology = ResolveDiagnosticTechnology(text, technologyIndex, ev.SessionId, eventTime)
                     };
                     activeBySession[sessionKey] = active;
                 }
@@ -3544,7 +3563,7 @@ public class AvailablePolygonsResponse
                     active.StatusDetail = "Completed";
                     if (active.Technology == "Unknown")
                     {
-                        active.Technology = ResolveDiagnosticTechnology(text, l3Rows, ev.SessionId, eventTime);
+                        active.Technology = ResolveDiagnosticTechnology(text, technologyIndex, ev.SessionId, eventTime);
                     }
                     activeBySession[sessionKey] = active;
                 }
@@ -3564,7 +3583,7 @@ public class AvailablePolygonsResponse
                 FinalizeDiagnosticCall(active, events, l3Rows);
                 if (active.Technology == "Unknown")
                 {
-                    active.Technology = ResolveDiagnosticTechnology(text, l3Rows, ev.SessionId, eventTime);
+                    active.Technology = ResolveDiagnosticTechnology(text, technologyIndex, ev.SessionId, eventTime);
                 }
 
                 calls.Add(ToDiagnosticCallRow(active, calls.Count + 1));
@@ -3658,6 +3677,9 @@ public class AvailablePolygonsResponse
         {
             var rows = new List<DiagnosticTimelineRow>();
 
+            var technologyIndex = new DiagnosticL3TimeIndex(l3Rows);
+            var callsBySession = calls.ToLookup(call => call.SessionId);
+
             rows.AddRange(events.Select(x =>
             {
                 var text = x.Text;
@@ -3688,7 +3710,7 @@ public class AvailablePolygonsResponse
                     Direction = x.Direction,
                     Channel = x.Channel,
                     Severity = NormalizeDiagnosticSeverity(x.Severity, text),
-                    Technology = ResolveDiagnosticTechnology(text, l3Rows, x.SessionId, time),
+                    Technology = ResolveDiagnosticTechnology(text, technologyIndex, x.SessionId, time),
                     Interface = ResolveDiagnosticInterface(text),
                     Protocol = ResolveDiagnosticProtocol(text),
                     Procedure = ResolveDiagnosticProcedure(text),
@@ -3731,7 +3753,7 @@ public class AvailablePolygonsResponse
                     Direction = x.Direction,
                     Channel = x.Channel,
                     Severity = NormalizeDiagnosticSeverity(x.Severity, text),
-                    Technology = ResolveDiagnosticTechnology(text, l3Rows, x.SessionId, time),
+                    Technology = ResolveDiagnosticTechnology(text, technologyIndex, x.SessionId, time),
                     Interface = ResolveDiagnosticInterface(text),
                     Protocol = ResolveDiagnosticProtocol(text),
                     Procedure = ResolveDiagnosticProcedure(text),
@@ -3749,7 +3771,7 @@ public class AvailablePolygonsResponse
 
             foreach (var row in rows)
             {
-                row.CallId = FindDiagnosticCallId(row, calls);
+                row.CallId = FindDiagnosticCallId(row, callsBySession[row.SessionId]);
             }
 
             return rows;
@@ -4150,7 +4172,7 @@ public class AvailablePolygonsResponse
             return "IMS Unregistered";
         }
 
-        private static string? FindDiagnosticCallId(DiagnosticTimelineRow row, IReadOnlyList<DiagnosticCallRow> calls)
+        private static string? FindDiagnosticCallId(DiagnosticTimelineRow row, IEnumerable<DiagnosticCallRow> calls)
         {
             if (!row.TimeOfDaySeconds.HasValue)
                 return null;
@@ -5237,7 +5259,7 @@ public class AvailablePolygonsResponse
 
         private static string ResolveDiagnosticTechnology(
             string text,
-            IReadOnlyList<DiagnosticL3Row> l3Rows,
+            DiagnosticL3TimeIndex index,
             int? sessionId,
             TimeSpan? eventTime)
         {
@@ -5253,14 +5275,7 @@ public class AvailablePolygonsResponse
             if (HasAny(upper, "GSM", "2G"))
                 return "2G";
 
-            var nearby = l3Rows
-                .Where(x => x.SessionId == sessionId)
-                .Select(x => new { Row = x, Distance = eventTime.HasValue && x.EventTime.HasValue ? Math.Abs(SecondsBetween(eventTime.Value, x.EventTime.Value)) : double.MaxValue })
-                .Where(x => x.Distance <= 30 || !eventTime.HasValue)
-                .OrderBy(x => x.Distance)
-                .FirstOrDefault();
-
-            var l3Text = nearby?.Row.Text.ToUpperInvariant() ?? string.Empty;
+            var l3Text = index.Find(sessionId, eventTime)?.Text.ToUpperInvariant() ?? string.Empty;
             if (HasAny(l3Text, "NR-RRC", " 5G", "NR "))
                 return "5G";
             if (HasAny(l3Text, "LTE", "LTE-RRC", "E-UTRA"))

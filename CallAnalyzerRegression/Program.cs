@@ -4,6 +4,12 @@ using CsvHelper;
 using CsvHelper.Configuration;
 using SignalTracker.Controllers;
 
+if (args.FirstOrDefault() == "--diagnostic-time-index")
+{
+    DiagnosticTimeIndexRegression.Run();
+    return;
+}
+
 if (args.FirstOrDefault() == "--site-csv")
 {
     await SiteCsvValidationRegression.RunAsync(args.ElementAtOrDefault(1) ?? "Template-Files/Site_Template.csv");
