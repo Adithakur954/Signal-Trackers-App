@@ -290,6 +290,12 @@ LIMIT @limit OFFSET @offset;";
             if (i > 0) where.Append(" OR ");
             where.Append($"s.source_name = @source{i} OR s.name = @source{i} OR s.name LIKE @sourcePrefix{i}");
         }
+        // Older building imports use overture_auto_<projectId> without a source tag.
+        // Include only that exact legacy name; other unclassified polygons stay excluded.
+        if (layerKey is "all" or "buildings")
+        {
+            where.Append(" OR ((s.source_name IS NULL OR s.source_name = '') AND s.name = CONCAT('overture_auto_', @projectId))");
+        }
         where.Append(')');
 
         await using (var countCommand = connection.CreateCommand())
