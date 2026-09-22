@@ -1,4 +1,5 @@
-﻿using MySqlConnector;
+using MySqlConnector;
+using SignalTracker.Security;
 
 namespace SignalTracker.Services
 {
@@ -49,12 +50,21 @@ namespace SignalTracker.Services
             // IMPORTANT: use exact equality (==) not StartsWith, because
             // "/admin/getusers" would otherwise match the prefix "/admin/getuser"
             // and get incorrectly pinned to Main DB.
-            if (Array.Exists(MainDbOnlyAdminPaths, p => string.Equals(path, p, StringComparison.OrdinalIgnoreCase)))
+            if (ResourceAccess.IsSuperAdmin(context.User)
+                && Array.Exists(MainDbOnlyAdminPaths, p => string.Equals(path, p, StringComparison.OrdinalIgnoreCase)))
             {
                 return GetConfiguredConnectionString("MySqlConnection");
             }
 
-            // Explicit override for diagnostics/manual API testing
+            // Ordinary browser users are bound to their signed region, never a caller override.
+            if (context.User.Identity?.IsAuthenticated == true && !ResourceAccess.IsSuperAdmin(context.User))
+            {
+                var trustedCountry = RegionAccess.Normalize(context.User.FindFirst("country_code")?.Value);
+                if (trustedCountry == null) throw new UnauthorizedAccessException("A trusted region is required.");
+                return GetConfiguredConnectionString(trustedCountry == "TW" ? "MySqlConnection2" : "MySqlConnection");
+            }
+
+            // Privileged and API-key machine flows may explicitly select a region.
             string? country = null;
             if (context.Request.Query.TryGetValue("country_code", out var queryCountry))
             {

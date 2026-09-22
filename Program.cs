@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.OpenApi.Models;
@@ -22,7 +22,7 @@ internal class Program
                 ?? context.User?.FindFirst("user_id")?.Value;
 
             if (!string.IsNullOrWhiteSpace(userId))
-                return $"user:{userId}";
+                return $"user:{RegionAccess.Normalize(context.User?.FindFirst("country_code")?.Value) ?? "unknown"}:{userId}";
         }
 
         return $"ip:{context.Connection.RemoteIpAddress?.ToString() ?? "unknown"}";
@@ -339,7 +339,7 @@ internal class Program
                 _ => new FixedWindowRateLimiterOptions
                 {
                     PermitLimit = 12,
-                    Window = TimeSpan.FromMinutes(5),
+                    Window = TimeSpan.FromMinutes(1),
                     QueueLimit = 0
                 }));
 
@@ -477,14 +477,19 @@ internal class Program
         // BUILD APP
         // ----------------------------------------------------
         var app = builder.Build();
-        EnsureSitePredictionColorColumnExists(app);
-        EnsureUploadHistoryOriginalFileNameColumnExists(app);
-        EnsureDashboardCacheCompanyCodeColumnExists(app);
-        DropRemovedSitePredictionColumns(app);
+        if (app.Environment.IsDevelopment() && builder.Configuration.GetValue<bool>("DatabaseMaintenance:RunStartupSchemaChanges"))
+        {
+            EnsureSitePredictionColorColumnExists(app);
+            EnsureUploadHistoryOriginalFileNameColumnExists(app);
+            EnsureDashboardCacheCompanyCodeColumnExists(app);
+            DropRemovedSitePredictionColumns(app);
+        }
 
         // ----------------------------------------------------
         // MIDDLEWARE PIPELINE
         // ----------------------------------------------------
+        // Resolve the trusted external scheme before HSTS and cookie handling.
+        app.UseForwardedHeaders();
         app.UseSignalTrackerSecurityHeaders();
 
         if (app.Environment.IsDevelopment())
@@ -502,7 +507,6 @@ internal class Program
             app.UseHsts();
         }
 
-        app.UseForwardedHeaders();
         if (!app.Environment.IsDevelopment() || httpsRedirectionPort.HasValue)
         {
             app.UseHttpsRedirection();
@@ -524,7 +528,6 @@ internal class Program
         });
 
         app.UseRouting();
-        app.UseRateLimiter();
         app.UseCors(SecurityServiceExtensions.CorsPolicyName);
         app.UseWebSockets();
         app.UseCookiePolicy();
@@ -538,6 +541,9 @@ internal class Program
         });
 
         app.UseAuthentication();
+        app.UseMiddleware<RegionAccessMiddleware>();
+        // User-partitioned limits require the authenticated claims principal.
+        app.UseRateLimiter();
         app.UseMiddleware<CsrfProtectionMiddleware>();
         app.UseAuthorization();
         app.UsePartitionedCookieSupport();

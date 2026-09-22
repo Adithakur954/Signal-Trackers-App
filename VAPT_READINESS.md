@@ -1,6 +1,8 @@
 # VAPT Readiness Notes
 
-This project keeps production secrets outside source-controlled JSON files.
+Production secrets must be kept outside source-controlled files. The 2026-09-21 review found tracked credential material. Identified current-file values are now removed and local development secrets preserved; server-side rotation and history cleanup remain open.
+
+See [the current evidence-based baseline](docs/security/BASELINE.md), [endpoint inventory](docs/security/endpoint-inventory.csv), and [findings tracker](docs/security/findings.csv). Run `./scripts/vapt-baseline.ps1` for repeatable local checks. These checks do not certify VAPT readiness.
 
 Required production values should be supplied through environment variables or a secret manager:
 

@@ -128,27 +128,22 @@ public L3EventController(
             await EnsureL3EventSchemaAsync(cancellationToken);
 
             // Insights are loaded automatically when the screen opens. If the
-            // session already has L3 data but its insight rows are missing,
-            // import the insight TXT files from the same remote ZIP used by sync.
+            // session has no insight rows yet, import the insight TXT files from
+            // the same remote ZIP used by sync even when L3/Event rows are empty.
             if (sessionId is > 0 && uploadId is null or <= 0)
             {
                 var existingInsights = await CountUploadInsightsAsync(sessionId.Value, cancellationToken);
                 if (existingInsights == 0)
                 {
-                    var l3Rows = await CountDiagnosticRowsAsync(
-                        "tbl_l3_log", null, sessionId.Value, null, cancellationToken);
-                    if (l3Rows > 0)
+                    try
                     {
-                        try
-                        {
-                            await ImportSessionInsightsFromRemoteZipAsync(sessionId.Value, cancellationToken);
-                        }
-                        catch (Exception ex)
-                        {
-                            // Insight availability must not make the existing
-                            // L3/Event read endpoint fail.
-                            Console.Error.WriteLine($"Automatic insight import failed for session {sessionId}: {SafeException.Get(ex)}");
-                        }
+                        await ImportSessionInsightsFromRemoteZipAsync(sessionId.Value, cancellationToken);
+                    }
+                    catch (Exception ex)
+                    {
+                        // Insight availability must not make the existing
+                        // L3/Event read endpoint fail.
+                        Console.Error.WriteLine($"Automatic insight import failed for session {sessionId}: {SafeException.Get(ex)}");
                     }
                 }
             }
@@ -340,14 +335,9 @@ public L3EventController(
                 ? linkedLogId
                 : sessionId;
 
-            var remoteTemplate = _configuration["L3EventImport:RemoteLogZipUrlTemplate"];
-            if (string.IsNullOrWhiteSpace(remoteTemplate))
-                return Problem("L3EventImport:RemoteLogZipUrlTemplate is not configured.");
-
-            var remoteUrl = remoteTemplate.Replace(
-                "{logId}",
-                logId.ToString(CultureInfo.InvariantCulture),
-                StringComparison.OrdinalIgnoreCase);
+            var remoteUrl = RemoteLogZipUrlResolver.BuildUrl(_configuration, HttpContext, logId);
+            if (string.IsNullOrWhiteSpace(remoteUrl))
+                return Problem("L3EventImport remote log ZIP URL template is not configured.");
             return await ImportZipFromUrl(remoteUrl, projectId, sessionId, null, remarks, cancellationToken, requireL3: true);
         }
 
@@ -1350,11 +1340,9 @@ public L3EventController(
                 && parsedLogId > 0
                 ? parsedLogId
                 : sessionId;
-            var template = _configuration["L3EventImport:RemoteLogZipUrlTemplate"];
-            if (string.IsNullOrWhiteSpace(template))
+            var remoteUrl = RemoteLogZipUrlResolver.BuildUrl(_configuration, HttpContext, logId);
+            if (string.IsNullOrWhiteSpace(remoteUrl))
                 return 0;
-
-            var remoteUrl = template.Replace("{logId}", logId.ToString(CultureInfo.InvariantCulture), StringComparison.OrdinalIgnoreCase);
             var tempRoot = Path.Combine(Path.GetTempPath(), "signaltracker_l3_event_insights", Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(tempRoot);
             var zipPath = Path.Combine(tempRoot, "remote.zip");
@@ -1414,8 +1402,7 @@ public L3EventController(
 
             foreach (var entry in archive.Entries.Where(entry => entry.Length > 0 && !string.IsNullOrEmpty(entry.Name)))
             {
-                if (Path.GetExtension(entry.Name).Equals(".txt", StringComparison.OrdinalIgnoreCase)
-                    && Path.GetFileNameWithoutExtension(entry.Name).Contains("insight", StringComparison.OrdinalIgnoreCase))
+                if (IsInsightTextEntry(entry.Name))
                 {
                     var filePath = Path.Combine(tempRoot, $"{Guid.NewGuid():N}.txt");
                     using var input = entry.Open();
@@ -1640,8 +1627,7 @@ public L3EventController(
                 .Where(entry => Path.GetFileNameWithoutExtension(entry.Name).Contains("Event", StringComparison.OrdinalIgnoreCase))
                 .ToList();
             var insightEntries = supportedEntries
-                .Where(entry => Path.GetFileName(entry.Name).StartsWith("insights", StringComparison.OrdinalIgnoreCase))
-                .Where(entry => Path.GetExtension(entry.Name).Equals(".txt", StringComparison.OrdinalIgnoreCase))
+                .Where(entry => IsInsightTextEntry(entry.Name))
                 .ToList();
 
             if (requireL3 && l3Entries.Count == 0)
@@ -2972,6 +2958,12 @@ public L3EventController(
             ".csv",
             ".txt"
         };
+
+        private static bool IsInsightTextEntry(string entryName)
+        {
+            return Path.GetExtension(entryName).Equals(".txt", StringComparison.OrdinalIgnoreCase)
+                && Path.GetFileNameWithoutExtension(entryName).Contains("insight", StringComparison.OrdinalIgnoreCase);
+        }
 
         private sealed record ProjectInfo(int Id, int? CompanyId, string? RefSessionId);
         private sealed record PreparedDiagnosticFile(string FilePath, string FileName, long Length);

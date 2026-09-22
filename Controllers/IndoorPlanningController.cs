@@ -1,11 +1,14 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using SignalTracker.Models;
+using SignalTracker.Security;
 
 namespace SignalTracker.Controllers
 {
     [ApiController]
     [Route("api/[controller]")]
+    [Authorize]
     public class IndoorPlanningController : ControllerBase
     {
         private readonly ApplicationDbContext _db;
@@ -15,10 +18,13 @@ namespace SignalTracker.Controllers
             _db = db;
         }
 
+        private IQueryable<tbl_indoor_planning_floor> AccessiblePlans() =>
+            ResourceAccess.IndoorPlans(_db.tbl_indoor_planning_floor, _db.tbl_user, User);
+
         [HttpGet("projects")]
         public async Task<IActionResult> GetProjects()
         {
-            var projects = await _db.tbl_indoor_planning_floor
+            var projects = await AccessiblePlans()
                 .OrderByDescending(x => x.updated_at)
                 .Select(x => new IndoorPlanningProjectDto
                 {
@@ -36,7 +42,7 @@ namespace SignalTracker.Controllers
         [HttpGet("projects/{id:int}")]
         public async Task<IActionResult> GetProject(int id)
         {
-            var project = await _db.tbl_indoor_planning_floor
+            var project = await AccessiblePlans()
                 .Where(x => x.id == id)
                 .Select(x => new IndoorPlanningProjectDto
                 {
@@ -55,6 +61,7 @@ namespace SignalTracker.Controllers
         [HttpPost("projects")]
         public async Task<IActionResult> CreateProject([FromBody] CreateIndoorPlanningProjectRequest request)
         {
+            if (ResourceAccess.UserId(User) == 0) return Forbid();
             var name = string.IsNullOrWhiteSpace(request?.Name)
                 ? $"Omni Site Signal {DateTime.Now:dd MMM yyyy}"
                 : request.Name.Trim();
@@ -62,6 +69,8 @@ namespace SignalTracker.Controllers
             var now = DateTime.UtcNow;
             var project = new tbl_indoor_planning_floor
             {
+                created_by_user_id = ResourceAccess.UserId(User),
+                created_by_user_name = User.Identity?.Name,
                 project_name = name,
                 floor_name = string.IsNullOrWhiteSpace(request?.FloorName) ? "Level 1" : request.FloorName.Trim(),
                 plan_json = string.IsNullOrWhiteSpace(request?.PlanJson) ? DefaultPlanJson : request.PlanJson,
@@ -86,7 +95,7 @@ namespace SignalTracker.Controllers
         [HttpPut("projects/{id:int}/floor")]
         public async Task<IActionResult> SaveFloor(int id, [FromBody] SaveIndoorPlanningFloorRequest request)
         {
-            var project = await _db.tbl_indoor_planning_floor.FirstOrDefaultAsync(x => x.id == id);
+            var project = await AccessiblePlans().FirstOrDefaultAsync(x => x.id == id);
             if (project == null) return NotFound(new { message = "Omni Site Signal project not found." });
 
             if (!string.IsNullOrWhiteSpace(request?.Name)) project.project_name = request.Name.Trim();

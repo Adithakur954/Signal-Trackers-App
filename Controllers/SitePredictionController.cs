@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using SignalTracker.DTO.SitePrediction;
 using SignalTracker.Helper;
 using SignalTracker.Services;
+using SignalTracker.Security;
 
 namespace SignalTracker.Controllers
 {
@@ -34,6 +35,10 @@ namespace SignalTracker.Controllers
                     Data = rows
                 });
             }
+            catch (ResourceAccessDeniedException)
+            {
+                return NotFound(new { Status = 0, Message = "Project not found." });
+            }
             catch (Exception ex)
             {
                 return StatusCode(500, new
@@ -59,6 +64,10 @@ namespace SignalTracker.Controllers
             {
                 var result = await _sitePredictionService.DeleteScenarioAsync(request);
                 return Ok(result);
+            }
+            catch (ResourceAccessDeniedException)
+            {
+                return NotFound(new { Status = 0, Message = "Project not found." });
             }
             catch (Exception ex)
             {
@@ -91,6 +100,10 @@ namespace SignalTracker.Controllers
             {
                 var result = await _sitePredictionService.DeleteAsync(request);
                 return Ok(result);
+            }
+            catch (ResourceAccessDeniedException)
+            {
+                return NotFound(new { Status = 0, Message = "Project not found." });
             }
             catch (Exception ex)
             {

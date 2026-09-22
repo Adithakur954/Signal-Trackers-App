@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using SignalTracker.Helper;
@@ -581,6 +581,7 @@ public async Task<IActionResult> GetGrantLicenseHistory([FromQuery] int? company
 // GRANT LICENSE TO COMPANY
 // ======================================================
 [HttpPost("grantLicense")]
+[Authorize(Policy = SecurityPolicies.SuperAdmin)]
 public async Task<IActionResult> GrantLicense([FromBody] GrantLicenseRequest request)
 {
     try
@@ -789,6 +790,7 @@ public async Task<IActionResult> GetUsedLicenses(
 // Super Admin can pass company_id. Company Admin is locked to own company.
 // ======================================================
 [HttpPost("createUser")]
+[Authorize(Policy = SecurityPolicies.CompanyAdmin)]
 public async Task<IActionResult> CreateCompanyUser([FromBody] CreateCompanyUserRequest request)
 {
     try
@@ -804,6 +806,10 @@ public async Task<IActionResult> CreateCompanyUser([FromBody] CreateCompanyUserR
 
         if (string.IsNullOrWhiteSpace(request.password))
             return BadRequest(new { Status = 0, Message = "Password is required" });
+
+        var requestedRole = request.m_user_type_id ?? 1;
+        if (requestedRole is < 1 or > 3 || (!_userScope.IsSuperAdmin(User) && requestedRole != 1))
+            return StatusCode(403, new { Status = 0, Message = "Only Super Admin can assign administrator roles." });
 
         var email = request.email.Trim().ToLowerInvariant();
         var targetCompanyId = _userScope.GetTargetCompanyId(User, request.company_id);
@@ -842,7 +848,7 @@ public async Task<IActionResult> CreateCompanyUser([FromBody] CreateCompanyUserR
             isd_code = !string.IsNullOrWhiteSpace(request.isd_code) ? request.isd_code.Trim() : company.isd_code,
             date_created = DateTime.UtcNow,
             isactive = request.isactive ?? 1,
-            m_user_type_id = request.m_user_type_id ?? 3,
+            m_user_type_id = requestedRole,
             token = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N"),
             uid = Guid.NewGuid().ToString()
         };
@@ -926,6 +932,7 @@ public async Task<IActionResult> CreateCompanyUser([FromBody] CreateCompanyUserR
 // ======================================================
 // Removed /{licenseId} from the route and added [FromQuery]
 [HttpPost("revokeLicense")]
+[Authorize(Policy = SecurityPolicies.SuperAdmin)]
 public async Task<IActionResult> RevokeLicense([FromQuery] int licenseId)
 {
     try
@@ -1002,6 +1009,7 @@ public async Task<IActionResult> RevokeLicense([FromQuery] int licenseId)
 // UPDATE USER (NAME/EMAIL/MOBILE/PASSWORD/STATUS)
 // ======================================================
 [HttpPut("updateUser")]
+[Authorize(Policy = SecurityPolicies.CompanyAdmin)]
 public async Task<IActionResult> UpdateUser([FromQuery] int userId, [FromBody] UpdateCompanyUserRequest request)
 {
     try
@@ -1014,6 +1022,9 @@ public async Task<IActionResult> UpdateUser([FromQuery] int userId, [FromBody] U
         var user = await _db.tbl_user.FirstOrDefaultAsync(u => u.id == userId && u.isactive != 2);
         if (user == null)
             return NotFound(new { Status = 0, Message = "User not found" });
+
+        if (!_userScope.IsSuperAdmin(User) && user.m_user_type_id != 1)
+            return StatusCode(403, new { Status = 0, Message = "Only Super Admin can manage administrator accounts." });
 
         if (targetCompanyId > 0 && user.company_id != targetCompanyId)
             return StatusCode(403, new { Status = 0, Message = "You are not authorized to update this user" });
@@ -1096,6 +1107,7 @@ public async Task<IActionResult> UpdateUser([FromQuery] int userId, [FromBody] U
 // REVOKE USER (DEACTIVATE + REVOKE ALL ISSUED LICENSES)
 // ======================================================
 [HttpPost("revokeUser")]
+[Authorize(Policy = SecurityPolicies.CompanyAdmin)]
 public async Task<IActionResult> RevokeUser([FromQuery] int userId)
 {
     try
@@ -1105,6 +1117,9 @@ public async Task<IActionResult> RevokeUser([FromQuery] int userId)
         var user = await _db.tbl_user.FirstOrDefaultAsync(u => u.id == userId && u.isactive != 2);
         if (user == null)
             return NotFound(new { Status = 0, Message = "User not found" });
+
+        if (!_userScope.IsSuperAdmin(User) && user.m_user_type_id != 1)
+            return StatusCode(403, new { Status = 0, Message = "Only Super Admin can manage administrator accounts." });
 
         if (targetCompanyId > 0 && user.company_id != targetCompanyId)
             return StatusCode(403, new { Status = 0, Message = "You are not authorized to revoke this user" });
@@ -1140,6 +1155,7 @@ public async Task<IActionResult> RevokeUser([FromQuery] int userId)
 // DELETE USER (SOFT DELETE + REVOKE ALL ISSUED LICENSES)
 // ======================================================
 [HttpDelete("deleteUser")]
+[Authorize(Policy = SecurityPolicies.CompanyAdmin)]
 public async Task<IActionResult> DeleteUser([FromQuery] int userId)
 {
     try
@@ -1149,6 +1165,9 @@ public async Task<IActionResult> DeleteUser([FromQuery] int userId)
         var user = await _db.tbl_user.FirstOrDefaultAsync(u => u.id == userId);
         if (user == null)
             return NotFound(new { Status = 0, Message = "User not found" });
+
+        if (!_userScope.IsSuperAdmin(User) && user.m_user_type_id != 1)
+            return StatusCode(403, new { Status = 0, Message = "Only Super Admin can manage administrator accounts." });
 
         if (targetCompanyId > 0 && user.company_id != targetCompanyId)
             return StatusCode(403, new { Status = 0, Message = "You are not authorized to delete this user" });
@@ -1184,6 +1203,7 @@ public async Task<IActionResult> DeleteUser([FromQuery] int userId)
 // UPDATE ISSUED LICENSE (VALID_TILL / STATUS)
 // ======================================================
 [HttpPut("updateIssuedLicense")]
+[Authorize(Policy = SecurityPolicies.SuperAdmin)]
 public async Task<IActionResult> UpdateIssuedLicense([FromQuery] int licenseId, [FromBody] UpdateIssuedLicenseRequest request)
 {
     try

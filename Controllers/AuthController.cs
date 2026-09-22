@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -22,8 +22,9 @@ namespace SignalTracker.Controllers
     public class AuthController : ControllerBase
     {
         private const string LegacyGlobalLoginLockKey = "auth:global-login-lock";
-        private const string UserLoginLockKeyPrefix = "auth:login-lock:user:";
-        private const int UserLoginLockTtlSeconds = 315360000;
+        private int UserLoginLockTtlSeconds => SessionSecurity.IdleSeconds(_configuration);
+        private bool RequireRedisLoginLock => !HttpContext.RequestServices.GetRequiredService<IWebHostEnvironment>().IsDevelopment()
+            || _configuration.GetValue<bool>("Security:RequireRedisLoginLock");
 
         private readonly ApplicationDbContext _db;
         private readonly ILogger<AuthController> _logger;
@@ -332,7 +333,7 @@ namespace SignalTracker.Controllers
 
             var activeLoginInfo = BuildActiveLoginInfo(user, model.IP);
             var lockValue = BuildLoginLockValue(activeLoginInfo);
-            var userLockKey = BuildUserLoginLockKey(user.id);
+            var userLockKey = SessionSecurity.LockKey(user.id, loginSource);
             var loginLockAcquired = false;
             if (_redis.IsConnected)
             {
@@ -343,7 +344,7 @@ namespace SignalTracker.Controllers
                     var forcedLockAcquired = await _redis.SetStringAsync(userLockKey, lockValue, UserLoginLockTtlSeconds);
                     if (!forcedLockAcquired)
                     {
-                        if (_configuration.GetValue<bool>("Security:RequireRedisLoginLock"))
+                        if (RequireRedisLoginLock)
                         {
                             return StatusCode(503, new { message = "Login service is temporarily unavailable. Please try again." });
                         }
@@ -371,7 +372,7 @@ namespace SignalTracker.Controllers
                     }
                     if (lockResult == RedisSetWhenNotExistsResult.Unavailable)
                     {
-                        if (_configuration.GetValue<bool>("Security:RequireRedisLoginLock"))
+                        if (RequireRedisLoginLock)
                         {
                             return StatusCode(503, new { message = "Login service is temporarily unavailable. Please try again." });
                         }
@@ -384,12 +385,12 @@ namespace SignalTracker.Controllers
                     }
                 }
             }
-            else if (_configuration.GetValue<bool>("Security:RequireRedisLoginLock"))
+            else if (RequireRedisLoginLock)
             {
                 return StatusCode(503, new { message = "Login service is temporarily unavailable. Please try again." });
             }
 
-            var resolvedCountryCode = (string.IsNullOrWhiteSpace(user.country_code) ? loginSource : user.country_code).Trim().ToUpperInvariant();
+            var resolvedCountryCode = RegionAccess.Normalize(loginSource)!;
             var loginCompleted = false;
             await UpgradePasswordHashIfNeededAsync(user, loginSource, model.Password);
 
@@ -408,6 +409,7 @@ namespace SignalTracker.Controllers
                     new Claim("UserTypeId", user.m_user_type_id.ToString()),
                     new Claim("CompanyId", user.company_id?.ToString() ?? "0"),
                     new Claim("company_id", user.company_id?.ToString() ?? "0"),
+                    new Claim("CredentialVersion", SessionSecurity.CredentialVersion(user.password)),
                     new Claim("LoginLockValue", lockValue)
                 };
 
@@ -475,7 +477,7 @@ namespace SignalTracker.Controllers
 
                     if (int.TryParse(userIdValue, out var parsedUserId) && parsedUserId > 0)
                     {
-                        await _redis.DeleteAsync(BuildUserLoginLockKey(parsedUserId));
+                        await _redis.DeleteAsync(SessionSecurity.LockKey(parsedUserId, User?.FindFirst("country_code")?.Value));
                     }
 
                     // Backward compatibility: clear old single global lock key.
@@ -494,8 +496,6 @@ namespace SignalTracker.Controllers
             }
         }
 
-        private static string BuildUserLoginLockKey(int userId)
-            => $"{UserLoginLockKeyPrefix}{userId}";
 
         [AllowAnonymous]
         [HttpGet("status")]

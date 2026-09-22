@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http;
 
 namespace SignalTracker.Security;
 
@@ -23,10 +23,9 @@ public static class RequestSecurity
 
     public static bool RequestUsesHttps(HttpContext context)
     {
-        if (context.Request.IsHttps) return true;
-
-        var forwardedProto = context.Request.Headers["X-Forwarded-Proto"].ToString();
-        return string.Equals(forwardedProto, "https", StringComparison.OrdinalIgnoreCase);
+        // ForwardedHeadersMiddleware updates the scheme only for trusted proxies.
+        // Reading the raw header here would bypass that trust boundary.
+        return context.Request.IsHttps;
     }
 
     public static void ApplyPerRequestCookieSettings(HttpContext context, CookieOptions options)
@@ -41,7 +40,8 @@ public static class RequestSecurity
         }
 
         options.SameSite = SameSiteMode.Lax;
-        options.Secure = usesHttps;
+        // Never downgrade a Secure cookie required by production configuration.
+        options.Secure = options.Secure || usesHttps;
     }
 }
 

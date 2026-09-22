@@ -13,15 +13,18 @@ public sealed class InsightService
     private readonly ApplicationDbContext _db;
     private readonly IConfiguration _configuration;
     private readonly IHttpClientFactory _httpClientFactory;
+    private readonly IHttpContextAccessor _httpContextAccessor;
 
     public InsightService(
         ApplicationDbContext db,
         IConfiguration configuration,
-        IHttpClientFactory httpClientFactory)
+        IHttpClientFactory httpClientFactory,
+        IHttpContextAccessor httpContextAccessor)
     {
         _db = db;
         _configuration = configuration;
         _httpClientFactory = httpClientFactory;
+        _httpContextAccessor = httpContextAccessor;
     }
 
     public async Task<int> CountBySessionAsync(int sessionId, CancellationToken cancellationToken)
@@ -59,11 +62,9 @@ public sealed class InsightService
             && parsedLogId > 0
             ? parsedLogId
             : sessionId;
-        var template = _configuration["L3EventImport:RemoteLogZipUrlTemplate"];
-        if (string.IsNullOrWhiteSpace(template))
+        var remoteUrl = RemoteLogZipUrlResolver.BuildUrl(_configuration, _httpContextAccessor.HttpContext, logId);
+        if (string.IsNullOrWhiteSpace(remoteUrl))
             return 0;
-
-        var remoteUrl = template.Replace("{logId}", logId.ToString(CultureInfo.InvariantCulture), StringComparison.OrdinalIgnoreCase);
         var tempRoot = Path.Combine(Path.GetTempPath(), "signaltracker_l3_event_insights", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempRoot);
         var zipPath = Path.Combine(tempRoot, "remote.zip");

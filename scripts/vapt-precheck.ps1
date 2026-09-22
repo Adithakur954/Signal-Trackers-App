@@ -9,15 +9,10 @@ Set-Location $root
 Write-Host "Running VAPT precheck..."
 
 $secretPatterns = @(
-    "Password\s*=",
-    "password\s*=",
-    "apikey\s*=",
-    "SMS_API_KEY`"\s*:\s*`"[^`"]+",
-    "Redis`"\s*:\s*`"[^`"]+",
-    "Stracer12345",
-    "Taiwan123",
-    "Amit@",
-    "34645a"
+    'Password\s*=',
+    'apikey\s*=',
+    'SMS_API_KEY"\s*:\s*"[^"]+',
+    'Redis"\s*:\s*"[^"]+'
 )
 
 $configFiles = @(
@@ -54,6 +49,6 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-Remove-Item -Recurse -Force "bin\_vapt_precheck_build"
+# Build output remains in the ignored bin directory for review.
 
 Write-Host "VAPT precheck passed." -ForegroundColor Green

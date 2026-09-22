@@ -6,6 +6,7 @@ using Microsoft.EntityFrameworkCore.Storage;
 using SignalTracker.Helper;
 using SignalTracker.Models;
 using SignalTracker.Services;
+using SignalTracker.Security;
 
 using CsvHelper;
 using CsvHelper.Configuration;
@@ -601,12 +602,29 @@ public IActionResult UploadSitePrediction(
     if (file == null || file.Length == 0)
         return BadRequest(new { success = false, message = "File is required." });
 
+    if (projectId <= 0 || !ResourceAccess.Projects(db.tbl_project, User).Any(project => project.id == projectId))
+        return NotFound(new { success = false, message = "Project not found." });
+    if (excelId > 0 && !ResourceAccess.IsSuperAdmin(User))
+    {
+        var userId = ResourceAccess.UserId(User);
+        var companyId = ResourceAccess.CompanyId(User);
+        var uploadAllowed = db.tbl_upload_history.Any(upload => upload.id == excelId
+            && (upload.uploaded_by == userId || (companyId > 0
+                && db.tbl_user.Any(owner => owner.id == upload.uploaded_by && owner.company_id == companyId))));
+        if (!uploadAllowed) return NotFound(new { success = false, message = "Upload not found." });
+    }
+    var extension = Path.GetExtension(file.FileName);
+    if (!string.Equals(extension, ".csv", StringComparison.OrdinalIgnoreCase)
+        && !string.Equals(extension, ".zip", StringComparison.OrdinalIgnoreCase))
+        return BadRequest(new { success = false, message = "Only CSV or ZIP files are allowed." });
+
+    string? savedPath = null;
     try
     {
         var incomingRoot = Path.Combine(Directory.GetCurrentDirectory(), "UploadedExcels", "Incoming");
         Directory.CreateDirectory(incomingRoot);
 
-        var savedPath = Path.Combine(incomingRoot, $"{Guid.NewGuid()}{Path.GetExtension(file.FileName)}");
+        savedPath = Path.Combine(incomingRoot, $"{Guid.NewGuid()}{extension}");
         using (var fs = new FileStream(savedPath, FileMode.Create))
             file.CopyTo(fs);
 
@@ -648,6 +666,16 @@ public IActionResult UploadSitePrediction(
     {
         return StatusCode(500, new { success = false, message = "An internal server error occurred." });
     }
+    finally
+    {
+        // This endpoint processes synchronously; its private staging copy is never a retained upload.
+        if (savedPath != null)
+        {
+            try { System.IO.File.Delete(savedPath); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+    }
 }
 
         /// <summary>
@@ -660,7 +688,9 @@ public IActionResult UploadSitePrediction(
             if (take <= 0) take = 50;
             if (skip < 0) skip = 0;
 
-            var q = db.site_prediction.AsQueryable();
+            take = Math.Min(take, 1000);
+            var accessibleProjects = ResourceAccess.Projects(db.tbl_project, User).Select(project => project.id);
+            var q = db.site_prediction.Where(row => accessibleProjects.Contains(row.tbl_project_id));
             if (projectId > 0) q = q.Where(r => r.tbl_project_id == projectId);
 
             var total = q.Count();

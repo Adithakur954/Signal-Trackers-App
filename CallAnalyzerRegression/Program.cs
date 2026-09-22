@@ -4,6 +4,12 @@ using CsvHelper;
 using CsvHelper.Configuration;
 using SignalTracker.Controllers;
 
+if (args.FirstOrDefault() == "--security-baseline")
+{
+    await SecurityBaselineRegression.RunAsync(args.ElementAtOrDefault(1) ?? "docs/security/endpoint-inventory.csv");
+    return;
+}
+
 if (args.FirstOrDefault() == "--diagnostic-time-index")
 {
     DiagnosticTimeIndexRegression.Run();

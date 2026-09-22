@@ -1,4 +1,6 @@
-﻿using System.Diagnostics;
+using Microsoft.AspNetCore.DataProtection;
+using System.Text.Encodings.Web;
+using System.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
 using SignalTracker.Models;
 using Microsoft.EntityFrameworkCore;
@@ -19,8 +21,9 @@ namespace SignalTracker.Controllers
     public class HomeController : Controller
     {
         private const string LegacyGlobalLoginLockKey = "auth:global-login-lock";
-        private const string UserLoginLockKeyPrefix = "auth:login-lock:user:";
-        private const int UserLoginLockTtlSeconds = 315360000;
+        private int UserLoginLockTtlSeconds => SessionSecurity.IdleSeconds(_configuration);
+        private bool RequireRedisLoginLock => !HttpContext.RequestServices.GetRequiredService<IWebHostEnvironment>().IsDevelopment()
+            || _configuration.GetValue<bool>("Security:RequireRedisLoginLock");
 
         private readonly ApplicationDbContext _db;
         private readonly CommonFunction? _cf = null;
@@ -256,7 +259,7 @@ namespace SignalTracker.Controllers
                 }
 
                 var lockValue = $"{user!.id}:{user.email}:{DateTimeOffset.UtcNow:O}";
-                userLockKey = BuildUserLoginLockKey(user.id);
+                userLockKey = SessionSecurity.LockKey(user.id, loginSource);
 
                 if (_redis.IsConnected)
                 {
@@ -267,7 +270,7 @@ namespace SignalTracker.Controllers
                         lockAcquired = await _redis.SetStringAsync(userLockKey, lockValue, UserLoginLockTtlSeconds);
                         if (!lockAcquired)
                         {
-                            if (_configuration.GetValue<bool>("Security:RequireRedisLoginLock"))
+                            if (RequireRedisLoginLock)
                             {
                                 return Json(new { success = false, message = "Login service is temporarily unavailable. Please try again." });
                             }
@@ -292,7 +295,7 @@ namespace SignalTracker.Controllers
                         }
                         if (lockResult == RedisSetWhenNotExistsResult.Unavailable)
                         {
-                            if (_configuration.GetValue<bool>("Security:RequireRedisLoginLock"))
+                            if (RequireRedisLoginLock)
                             {
                                 return Json(new { success = false, message = "Login service is temporarily unavailable. Please try again." });
                             }
@@ -305,12 +308,12 @@ namespace SignalTracker.Controllers
                         }
                     }
                 }
-                else if (_configuration.GetValue<bool>("Security:RequireRedisLoginLock"))
+                else if (RequireRedisLoginLock)
                 {
                     return Json(new { success = false, message = "Login service is temporarily unavailable. Please try again." });
                 }
 
-                var resolvedCountryCode = (string.IsNullOrWhiteSpace(user.country_code) ? loginSource : user.country_code).Trim().ToUpperInvariant();
+                var resolvedCountryCode = RegionAccess.Normalize(loginSource)!;
                 await UpgradePasswordHashIfNeededAsync(user, loginSource, obj.Password);
 
                 var enabledFeatures = await GetEnabledFeaturesSafeAsync(user.id);
@@ -324,6 +327,7 @@ namespace SignalTracker.Controllers
                     new Claim("CompanyId", user.company_id?.ToString() ?? "0"),
                     new Claim("company_id", user.company_id?.ToString() ?? "0"),
                     new Claim("country_code", resolvedCountryCode),
+                    new Claim("CredentialVersion", SessionSecurity.CredentialVersion(user.password)),
                     new Claim("LoginLockValue", lockValue)
                 };
 
@@ -421,8 +425,7 @@ namespace SignalTracker.Controllers
                 }
 
                 var uid = Guid.NewGuid().ToString();
-                var unixNow = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-                var token = $"{uid}.{unixNow}";
+                var token = PasswordResetTokens.Issue(HttpContext.RequestServices.GetRequiredService<IDataProtectionProvider>(), uid);
 
                 var trackedUser = _db.tbl_user.First(a => a.id == user.id);
                 trackedUser.uid = uid;
@@ -433,12 +436,15 @@ namespace SignalTracker.Controllers
                 string[] send_to = new[] { user.email };
                 string[] bcc_to = Array.Empty<string>();
 
-                var baseUrl = $"{Request.Scheme}://{Request.Host}";
-                if (baseUrl.Contains("localhost", StringComparison.OrdinalIgnoreCase))
-                    send_to = new[] { "baghel3349@gmail.com" };
-
-                var resetUrl = $"{baseUrl}/Home/ResetPassword?link={token}";
-                string body = $"Dear {user.name},<br /><br />Please click the link below to reset your password:<br /><a href='{resetUrl}' title='Click here to reset password'>Reset Password</a>";
+                var baseUrl = _configuration["Security:PasswordResetBaseUrl"];
+                if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var resetBase)
+                    || resetBase.Scheme != Uri.UriSchemeHttps || !string.IsNullOrEmpty(resetBase.UserInfo))
+                {
+                    message.Message = "Password recovery is temporarily unavailable.";
+                    return Json(message);
+                }
+                var resetUrl = $"{resetBase.AbsoluteUri.TrimEnd('/')}/Home/ResetPassword?link={Uri.EscapeDataString(token)}";
+                string body = $"Dear {HtmlEncoder.Default.Encode(user.name ?? string.Empty)},<br /><br />Please click the link below to reset your password:<br /><a href='{HtmlEncoder.Default.Encode(resetUrl)}' title='Click here to reset password'>Reset Password</a>";
 
                 string subject = "Forecast - Forgot password";
                 bool sent = mail.send_mail(body, send_to, bcc_to, subject, null, "");
@@ -476,7 +482,9 @@ namespace SignalTracker.Controllers
             var ret = new ReturnMessage();
             try
             {
-                var captchaOk = HttpContext.Session.GetString("CaptchaImageText") == model.Captcha;
+                var captchaOk = !string.IsNullOrWhiteSpace(model.Captcha)
+                    && !string.IsNullOrWhiteSpace(HttpContext.Session.GetString("CaptchaImageText"))
+                    && HttpContext.Session.GetString("CaptchaImageText") == model.Captcha;
                 if (!captchaOk)
                 {
                     ret.Status = 0;
@@ -484,28 +492,23 @@ namespace SignalTracker.Controllers
                     return Json(ret);
                 }
 
-                var parts = model.Token.Split('.', 2);
-                var uid = parts[0];
-                var tsStr = parts.Length > 1 ? parts[1] : "0";
-
-                if (!long.TryParse(tsStr, out var sentAt) || (DateTimeOffset.UtcNow.ToUnixTimeSeconds() - sentAt) > 15 * 60)
+                if (!PasswordResetTokens.TryRead(HttpContext.RequestServices.GetRequiredService<IDataProtectionProvider>(), model.Token, out var uid))
                 {
                     ret.Status = 0;
                     ret.Message = "Invalid or expired reset link.";
                     return Json(ret);
                 }
-
-                var user = _db.tbl_user.FirstOrDefault(a => a.uid == uid);
-                if (user == null)
+                var passwordHash = PasswordSecurity.HashPassword(model.NewPassword);
+                // Consume the recovery identifier atomically; concurrent replays cannot both succeed.
+                var updated = _db.tbl_user.Where(user => user.uid == uid && user.isactive == 1)
+                    .ExecuteUpdate(setters => setters.SetProperty(user => user.password, passwordHash)
+                        .SetProperty(user => user.uid, (string?)null));
+                if (updated != 1)
                 {
                     ret.Status = 0;
-                    ret.Message = "Invalid user.";
+                    ret.Message = "Invalid or expired reset link.";
                     return Json(ret);
                 }
-
-                user.password = PasswordSecurity.HashPassword(model.NewPassword);
-                user.uid = null;
-                _db.SaveChanges();
 
                 ret.Status = 1;
                 ret.Message = "Password has been reset successfully.";
@@ -547,7 +550,7 @@ namespace SignalTracker.Controllers
 
                     if (int.TryParse(userIdValue, out var parsedUserId) && parsedUserId > 0)
                     {
-                        await _redis.DeleteAsync(BuildUserLoginLockKey(parsedUserId));
+                        await _redis.DeleteAsync(SessionSecurity.LockKey(parsedUserId, User?.FindFirst("country_code")?.Value));
                     }
 
                     // Backward compatibility: clear old single global lock key.
@@ -563,8 +566,6 @@ namespace SignalTracker.Controllers
             return Ok(new { success = true, message = "Logged out successfully." });
         }
 
-        private static string BuildUserLoginLockKey(int userId)
-            => $"{UserLoginLockKeyPrefix}{userId}";
 
         private static object? ParseLoginLockValue(string? value)
         {

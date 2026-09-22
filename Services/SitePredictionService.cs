@@ -3,6 +3,7 @@ using System.Data.Common;
 using Microsoft.EntityFrameworkCore;
 using SignalTracker.DTO.SitePrediction;
 using SignalTracker.Models;
+using SignalTracker.Security;
 
 namespace SignalTracker.Services
 {
@@ -26,14 +27,27 @@ namespace SignalTracker.Services
         private readonly ApplicationDbContext _db;
         private readonly RedisService _redis;
 
-        public SitePredictionService(ApplicationDbContext db, RedisService redis)
+        private readonly IHttpContextAccessor _httpContextAccessor;
+
+        public SitePredictionService(ApplicationDbContext db, RedisService redis, IHttpContextAccessor httpContextAccessor)
         {
             _db = db;
             _redis = redis;
+            _httpContextAccessor = httpContextAccessor;
+        }
+
+        private async Task RequireProjectAccessAsync(long projectId)
+        {
+            var context = _httpContextAccessor.HttpContext;
+            if (context == null || projectId <= 0 || projectId > int.MaxValue
+                || !await ResourceAccess.Projects(_db.tbl_project, context.User)
+                    .AnyAsync(project => project.id == projectId, context.RequestAborted))
+                throw new ResourceAccessDeniedException();
         }
 
         public async Task<IReadOnlyList<SitePredictionScenarioDto>> GetScenariosAsync(long projectId)
         {
+            await RequireProjectAccessAsync(projectId);
             var conn = _db.Database.GetDbConnection();
             if (conn.State != ConnectionState.Open)
                 await conn.OpenAsync();
@@ -75,6 +89,7 @@ namespace SignalTracker.Services
 
         public async Task<SitePredictionDeleteResult> DeleteScenarioAsync(DeleteSitePredictionScenarioRequest request)
         {
+            await RequireProjectAccessAsync(request.ProjectId);
             var conn = _db.Database.GetDbConnection();
             if (conn.State != ConnectionState.Open)
                 await conn.OpenAsync();
@@ -111,6 +126,7 @@ namespace SignalTracker.Services
 
         public async Task<SitePredictionDeleteResult> DeleteAsync(DeleteSitePredictionRequest request)
         {
+            await RequireProjectAccessAsync(request.ProjectId);
             var siteValue = (request.Site ?? string.Empty).Trim();
             var sectorValue = (request.Sector ?? string.Empty).Trim();
             var cellIdValue = (request.CellId ?? string.Empty).Trim();

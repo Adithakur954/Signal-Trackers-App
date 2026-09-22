@@ -12,7 +12,7 @@ public static class SecurityServiceExtensions
 {
     public const string CorsPolicyName = "AllowReactApp";
     private const string UserLoginLockKeyPrefix = "auth:login-lock:user:";
-    private const int DefaultPersistentSessionDays = 3650;
+    private const int DefaultPersistentSessionDays = 1;
 
     public static void AddSignalTrackerCors(this IServiceCollection services, IConfiguration configuration, IWebHostEnvironment environment)
     {
@@ -52,8 +52,8 @@ public static class SecurityServiceExtensions
         var persistentSessionDays = Math.Clamp(
             configuration.GetValue("Security:PersistentSessionDays", DefaultPersistentSessionDays),
             1,
-            DefaultPersistentSessionDays);
-        var persistentSessionTtlSeconds = (int)TimeSpan.FromDays(persistentSessionDays).TotalSeconds;
+            30);
+        var idleSeconds = SessionSecurity.IdleSeconds(configuration);
         var persistentSessionLifetime = TimeSpan.FromDays(persistentSessionDays);
         var isDevelopment = environment.IsDevelopment();
         var cookieSameSite = isDevelopment ? SameSiteMode.Lax : SameSiteMode.None;
@@ -61,7 +61,7 @@ public static class SecurityServiceExtensions
 
         services.AddSession(options =>
         {
-            options.IdleTimeout = persistentSessionLifetime;
+            options.IdleTimeout = TimeSpan.FromSeconds(idleSeconds);
             options.Cookie.Name = "st.session";
             options.Cookie.HttpOnly = true;
             options.Cookie.IsEssential = true;
@@ -77,7 +77,7 @@ public static class SecurityServiceExtensions
                 options.Cookie.SameSite = cookieSameSite;
                 options.Cookie.SecurePolicy = cookieSecurePolicy;
                 options.Cookie.IsEssential = true;
-                options.ExpireTimeSpan = persistentSessionLifetime;
+                options.ExpireTimeSpan = TimeSpan.FromSeconds(idleSeconds);
                 options.SlidingExpiration = true;
 
                 options.Events.OnRedirectToLogin = ctx =>
@@ -94,46 +94,17 @@ public static class SecurityServiceExtensions
 
                 options.Events.OnSigningIn = ctx =>
                 {
+                    ctx.Properties.Items[SessionSecurity.StartedProperty] = DateTimeOffset.UtcNow.ToString("O");
                     RequestSecurity.ApplyPerRequestCookieSettings(ctx.HttpContext, ctx.CookieOptions);
                     return Task.CompletedTask;
                 };
 
-                options.Events.OnValidatePrincipal = async ctx =>
-                {
-                    var userId = ctx.Principal?.FindFirst("UserId")?.Value;
-                    var cookieLockValue = ctx.Principal?.FindFirst("LoginLockValue")?.Value;
-
-                    if (string.IsNullOrWhiteSpace(userId) || string.IsNullOrWhiteSpace(cookieLockValue))
-                    {
-                        return;
-                    }
-
-                    var redis = ctx.HttpContext.RequestServices.GetService<RedisService>();
-                    if (redis?.IsConnected != true)
-                    {
-                        return;
-                    }
-
-                    var currentLockValue = await redis.GetStringAsync($"{UserLoginLockKeyPrefix}{userId}");
-                    if (string.IsNullOrWhiteSpace(currentLockValue))
-                    {
-                        return;
-                    }
-
-                    if (!string.Equals(currentLockValue, cookieLockValue, StringComparison.Ordinal))
-                    {
-                        ctx.RejectPrincipal();
-                        await ctx.HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
-                        ctx.HttpContext.Session.Clear();
-                        ctx.HttpContext.Response.Headers["X-Session-Invalidated"] = "same-user-login";
-                        return;
-                    }
-
-                    await redis.ExtendTtlAsync($"{UserLoginLockKeyPrefix}{userId}", persistentSessionTtlSeconds);
-                };
+                options.Events.OnValidatePrincipal = ctx => SessionSecurity.ValidateAsync(ctx,
+                    !isDevelopment || configuration.GetValue<bool>("Security:RequireRedisLoginLock"),
+                    persistentSessionLifetime, idleSeconds);
             });
 
-        services.AddAuthorization();
+        services.AddAuthorization(SecurityPolicies.Configure);
 
         services.Configure<CookiePolicyOptions>(options =>
         {

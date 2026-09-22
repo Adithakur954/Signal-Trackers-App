@@ -96,7 +96,7 @@ public partial class MapViewController
         // Older login cookies may not contain country_code, and project IDs can
         // exist in both databases. For this endpoint, an empty clutter dataset
         // in the provider-selected database is also a reason to try TaiwanDB.
-        var shouldTryTaiwan = !string.Equals(connection.Database, "TaiwanDB", StringComparison.OrdinalIgnoreCase);
+        var shouldTryTaiwan = isSuperAdmin && !string.Equals(connection.Database, "TaiwanDB", StringComparison.OrdinalIgnoreCase);
         if (shouldTryTaiwan && company != null && company != DBNull.Value)
         {
             await using var clutterCheck = connection.CreateCommand();
@@ -109,7 +109,7 @@ WHERE project_id = @projectId AND is_active = 1 AND geometry_wkt IS NOT NULL;";
             shouldTryTaiwan = Convert.ToInt64(clutterCount, System.Globalization.CultureInfo.InvariantCulture) == 0;
         }
 
-        if ((company == null || company == DBNull.Value || shouldTryTaiwan)
+        if (isSuperAdmin && (company == null || company == DBNull.Value || shouldTryTaiwan)
             && !string.Equals(connection.Database, "TaiwanDB", StringComparison.OrdinalIgnoreCase))
         {
             await connection.DisposeAsync();
@@ -244,7 +244,7 @@ LIMIT @limit OFFSET @offset;";
             company = await access.ExecuteScalarAsync(cancellationToken);
         }
 
-        var shouldTryTaiwan = !string.Equals(connection.Database, "TaiwanDB", StringComparison.OrdinalIgnoreCase);
+        var shouldTryTaiwan = isSuperAdmin && !string.Equals(connection.Database, "TaiwanDB", StringComparison.OrdinalIgnoreCase);
         if (shouldTryTaiwan && company != null && company != DBNull.Value)
         {
             await using var sourceCheck = connection.CreateCommand();
@@ -254,7 +254,7 @@ LIMIT @limit OFFSET @offset;";
             shouldTryTaiwan = Convert.ToInt64(sourceCount, System.Globalization.CultureInfo.InvariantCulture) == 0;
         }
 
-        if ((company == null || company == DBNull.Value || shouldTryTaiwan)
+        if (isSuperAdmin && (company == null || company == DBNull.Value || shouldTryTaiwan)
             && !string.Equals(connection.Database, "TaiwanDB", StringComparison.OrdinalIgnoreCase))
         {
             await connection.DisposeAsync();

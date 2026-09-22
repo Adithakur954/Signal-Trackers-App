@@ -138,6 +138,18 @@ internal static class SiteCsvValidationRegression
                 "A ZIP with any invalid site CSV must fail before database access, regardless of entry order.");
             Check(error.Contains("invalid.csv") && error.Contains("site, cell_id"), "ZIP failure must name the file and missing columns.");
         }
+        var oversizedHeader = new string('x', SiteCsvSchema.MaxHeaderCharacters + 100);
+        using (var boundedReader = new StringReader(oversizedHeader + "\n"))
+        {
+            var boundedHeader = SiteCsvSchema.ReadBoundedHeader(boundedReader);
+            Check(boundedHeader!.Length == SiteCsvSchema.MaxHeaderCharacters + 1, "Header read must stop at the bound.");
+            Check(SiteCsvSchema.ValidateHeader(boundedHeader, out _) != null, "Oversized header must be rejected.");
+        }
+        var tooManyEntries = Path.Combine(output, "too-many-entries.zip");
+        using (var archive = ZipFile.Open(tooManyEntries, ZipArchiveMode.Create))
+            for (var i = 0; i <= SiteCsvSchema.MaxArchiveEntries; i++) archive.CreateEntry($"{i}.csv");
+        Check(SiteCsvSchema.ValidateUpload(tooManyEntries, true)?.Contains("too many entries") == true,
+            "Excessive archive entry count must be rejected before opening CSV entries.");
         Console.WriteLine("Site CSV regressions passed: 14 required headers enforced, 7 optional headers accepted individually and together, mapping, HTTP 400 responses, and ZIP validation.");
     }
 }

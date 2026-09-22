@@ -72,6 +72,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
 
 
         [HttpGet("redis/keys")]
+        [Authorize(Policy = SecurityPolicies.SuperAdmin)]
         public async Task<IActionResult> GetRedisKeys(
                     [FromQuery] string pattern = "*",
                     [FromQuery] int limit = 500)
@@ -87,6 +88,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
 
         // ---------------- REDIS KEY DETAILS ----------------
         [HttpGet("redis/key-info")]
+        [Authorize(Policy = SecurityPolicies.SuperAdmin)]
         public async Task<IActionResult> GetKeyInfo([FromQuery] string key)
         {
             var exists = await _redis.GetStringAsync(key) != null;
@@ -102,6 +104,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
 
         // ---------------- EXTEND TTL ----------------
         [HttpPost("redis/extend-ttl")]
+        [Authorize(Policy = SecurityPolicies.SuperAdmin)]
         public async Task<IActionResult> ExtendTtl(
             [FromQuery] string key,
             [FromQuery] int seconds = 300)
@@ -118,6 +121,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
 
         // ---------------- DELETE KEY ----------------
         [HttpDelete("redis/delete")]
+        [Authorize(Policy = SecurityPolicies.SuperAdmin)]
         public async Task<IActionResult> DeleteKey([FromQuery] string key)
         {
             var deleted = await _redis.DeleteAsync(key);
@@ -131,6 +135,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
 
         // ---------------- FLUSH ALL ----------------
         [HttpPost("redis/flush")]
+        [Authorize(Policy = SecurityPolicies.SuperAdmin)]
         public async Task<IActionResult> FlushRedis()
         {
             var success = await _redis.FlushAllAsync();
@@ -786,8 +791,8 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
                         .Select(u => new tbl_user
                         {
                             id = u.id,
-                            uid = u.uid,
-                            token = u.token,
+                            uid = null,
+                            token = null,
                             name = u.name,
                             password = !string.IsNullOrEmpty(u.password) ? new string('*', 15) : null,
                             email = u.email,
@@ -842,6 +847,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
         }
 
         [HttpPost("SaveUserDetails")]
+        [Authorize(Policy = SecurityPolicies.SuperAdmin)]
         public async Task<JsonResult> SaveUserDetails([FromForm] IFormCollection values, tbl_user users, string token1, string ip)
         {
             var message = new ReturnAPIResponse();
@@ -863,6 +869,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
                         {
                             users.date_created = DateTime.Now;
                             users.isactive = 1;
+                            users.password = PasswordSecurity.HashPassword(users.password ?? throw new ArgumentException("Password is required."));
                             db.tbl_user.Add(users);
                             await db.SaveChangesAsync();
                             await new ThresholdDefaultsService(db).EnsureForUserAsync(users.id);
@@ -921,8 +928,8 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
                         .Select(u => new tbl_user
                         {
                             id = u.id,
-                            uid = u.uid,
-                            token = u.token,
+                            uid = null,
+                            token = null,
                             name = u.name,
                             password = "",
                             email = u.email,
@@ -953,6 +960,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
         }
 
         [HttpPost("DeleteUser")]
+        [Authorize(Policy = SecurityPolicies.SuperAdmin)]
         public async Task<IActionResult> DeleteUser([FromBody] DeleteUserRequest request)
         {
             var message = new ReturnAPIResponse();
@@ -1008,6 +1016,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
         }
 
         [HttpPost("ActivateUser")]
+        [Authorize(Policy = SecurityPolicies.SuperAdmin)]
         public async Task<IActionResult> ActivateUser([FromBody] DeleteUserRequest request)
         {
             var message = new ReturnAPIResponse();
@@ -1061,6 +1070,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
         }
 
         [HttpPost("InactivateUser")]
+        [Authorize(Policy = SecurityPolicies.SuperAdmin)]
         public async Task<IActionResult> InactivateUser([FromBody] DeleteUserRequest request)
         {
             var message = new ReturnAPIResponse();
@@ -1114,6 +1124,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
         }
 
         [HttpPost("DeleteUserPermanent")]
+        [Authorize(Policy = SecurityPolicies.SuperAdmin)]
         public async Task<IActionResult> DeleteUserPermanent([FromBody] DeleteUserRequest request)
         {
             var message = new ReturnAPIResponse();
@@ -1172,6 +1183,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
 
 
         [HttpPost("UserResetPassword")]
+        [Authorize(Policy = SecurityPolicies.SuperAdmin)]
         public async Task<JsonResult> UserResetPassword(int userid, string newpwd, string captcha)
         {
             // Assuming ReturnMessage is a simple class for API responses

@@ -1,0 +1,183 @@
+--- a/Middleware/CsrfProtectionMiddleware.cs
++++ b/Middleware/CsrfProtectionMiddleware.cs
+@@ -1,85 +1,44 @@
++using Microsoft.AspNetCore.Antiforgery;
+ using SignalTracker.Security;
+ 
+ namespace SignalTracker.Middleware;
+ 
+ public sealed class CsrfProtectionMiddleware
+ {
+-    private const string CookieName = "st.csrf";
+-    private const string HeaderName = "X-CSRF-TOKEN";
+-
+     private readonly RequestDelegate _next;
+     private readonly IConfiguration _configuration;
+     private readonly IWebHostEnvironment _environment;
+-
+-    public CsrfProtectionMiddleware(RequestDelegate next, IConfiguration configuration, IWebHostEnvironment environment)
++    private readonly IAntiforgery _antiforgery;
++    public CsrfProtectionMiddleware(RequestDelegate next, IConfiguration configuration,
++        IWebHostEnvironment environment, IAntiforgery antiforgery)
+     {
+         _next = next;
+         _configuration = configuration;
+         _environment = environment;
++        _antiforgery = antiforgery;
+     }
+-
+     public async Task InvokeAsync(HttpContext context)
+     {
+-        EnsureCsrfCookie(context);
+-
+-        if (ShouldValidate(context) && !HasValidToken(context))
++        if (ShouldValidate(context))
+         {
+-            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+-            await context.Response.WriteAsJsonAsync(new
++            try { await _antiforgery.ValidateRequestAsync(context); }
++            catch (AntiforgeryValidationException)
+             {
+-                Status = 0,
+-                Message = "Missing or invalid CSRF token."
+-            });
+-            return;
++                context.Response.StatusCode = StatusCodes.Status400BadRequest;
++                await context.Response.WriteAsJsonAsync(new { Status = 0, Message = "Missing or invalid CSRF token." });
++                return;
++            }
+         }
+-
+         await _next(context);
+     }
+-
+     private bool ShouldValidate(HttpContext context)
+     {
+-        if (!_configuration.GetValue<bool>("Security:RequireCsrfHeader")) return false;
+-        if (!HttpMethods.IsPost(context.Request.Method)
+-            && !HttpMethods.IsPut(context.Request.Method)
+-            && !HttpMethods.IsPatch(context.Request.Method)
+-            && !HttpMethods.IsDelete(context.Request.Method))
+-        {
+-            return false;
+-        }
+-
++        if (!_configuration.GetValue("Security:RequireCsrfHeader", !_environment.IsDevelopment())) return false;
++        if (!HttpMethods.IsPost(context.Request.Method) && !HttpMethods.IsPut(context.Request.Method)
++            && !HttpMethods.IsPatch(context.Request.Method) && !HttpMethods.IsDelete(context.Request.Method)) return false;
+         if (context.GetEndpoint()?.Metadata.GetMetadata<PublicApiKeyAttribute>() != null) return false;
+-        return context.User?.Identity?.IsAuthenticated == true;
+-    }
+-
+-    private static bool HasValidToken(HttpContext context)
+-    {
+-        var cookieToken = context.Request.Cookies[CookieName];
+-        var headerToken = context.Request.Headers[HeaderName].FirstOrDefault();
+-
+-        return !string.IsNullOrWhiteSpace(cookieToken)
+-            && !string.IsNullOrWhiteSpace(headerToken)
+-            && string.Equals(cookieToken, headerToken, StringComparison.Ordinal);
+-    }
+-
+-    private void EnsureCsrfCookie(HttpContext context)
+-    {
+-        if (context.Request.Cookies.ContainsKey(CookieName)) return;
+-
+-        var token = Convert.ToBase64String(Guid.NewGuid().ToByteArray())
+-            .Replace("+", string.Empty, StringComparison.Ordinal)
+-            .Replace("/", string.Empty, StringComparison.Ordinal)
+-            .Replace("=", string.Empty, StringComparison.Ordinal);
+-
+-        var usesHttps = RequestSecurity.RequestUsesHttps(context);
+-        context.Response.Cookies.Append(CookieName, token, new CookieOptions
+-        {
+-            HttpOnly = false,
+-            IsEssential = true,
+-            Secure = usesHttps,
+-            SameSite = _environment.IsDevelopment() ? SameSiteMode.Lax : SameSiteMode.None,
+-            Path = "/"
+-        });
++        return context.User.Identity?.IsAuthenticated == true
++            || context.Request.Path.Equals("/api/auth/login", StringComparison.OrdinalIgnoreCase)
++            || context.Request.Path.Equals("/Home/UserLogin", StringComparison.OrdinalIgnoreCase);
+     }
+ }
+-
+-
+--- a/Configuration/SecurityServiceExtensions.cs
++++ b/Configuration/SecurityServiceExtensions.cs
+@@ -37,6 +37,19 @@
+         });
+     }
+ 
++    public static void AddSignalTrackerAntiforgery(this IServiceCollection services, IWebHostEnvironment environment)
++    {
++        services.AddAntiforgery(options =>
++        {
++            options.HeaderName = "X-CSRF-TOKEN";
++            options.Cookie.Name = "st.csrf.v2";
++            options.Cookie.HttpOnly = true;
++            options.Cookie.IsEssential = true;
++            options.Cookie.SameSite = environment.IsDevelopment() ? SameSiteMode.Lax : SameSiteMode.None;
++            options.Cookie.SecurePolicy = environment.IsDevelopment() ? CookieSecurePolicy.None : CookieSecurePolicy.Always;
++        });
++    }
++
+     public static void AddSignalTrackerDataProtection(this IServiceCollection services, WebApplicationBuilder builder)
+     {
+         var keysPath = HostingConfiguration.ResolveDataProtectionKeysPath(builder);
+--- a/Program.cs
++++ b/Program.cs
+@@ -368,6 +368,7 @@
+         builder.Services.AddSignalTrackerCors(builder.Configuration, builder.Environment);
+         builder.Services.AddSignalTrackerDataProtection(builder);
+         builder.Services.AddSignalTrackerCookieAuth(builder.Configuration, builder.Environment);
++        builder.Services.AddSignalTrackerAntiforgery(builder.Environment);
+         var httpsRedirectionPort = builder.Services.AddSignalTrackerForwardingAndHttps(builder.Configuration);
+ 
+         // ----------------------------------------------------
+--- a/Controllers/AuthController.cs
++++ b/Controllers/AuthController.cs
+@@ -255,6 +255,15 @@
+             return $"{browser} on {platform}";
+         }
+ 
++        [AllowAnonymous]
++        [HttpGet("csrf")]
++        public IActionResult GetCsrfToken([FromServices] Microsoft.AspNetCore.Antiforgery.IAntiforgery antiforgery)
++        {
++            var tokens = antiforgery.GetAndStoreTokens(HttpContext);
++            Response.Headers.CacheControl = "no-store";
++            return Ok(new { requestToken = tokens.RequestToken, headerName = tokens.HeaderName });
++        }
++
+         [HttpPost("login")]
+         [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("Auth")]
+         public async Task<IActionResult> Login([FromBody] LoginRequest model)
+@@ -409,6 +418,7 @@
+                     new Claim("UserTypeId", user.m_user_type_id.ToString()),
+                     new Claim("CompanyId", user.company_id?.ToString() ?? "0"),
+                     new Claim("company_id", user.company_id?.ToString() ?? "0"),
++                    new Claim(ClaimTypes.NameIdentifier, $"{resolvedCountryCode}:{user.id}"),
+                     new Claim("CredentialVersion", SessionSecurity.CredentialVersion(user.password)),
+                     new Claim("LoginLockValue", lockValue)
+                 };
+--- a/Controllers/HomeController.cs
++++ b/Controllers/HomeController.cs
+@@ -327,6 +327,7 @@
+                     new Claim("CompanyId", user.company_id?.ToString() ?? "0"),
+                     new Claim("company_id", user.company_id?.ToString() ?? "0"),
+                     new Claim("country_code", resolvedCountryCode),
++                    new Claim(ClaimTypes.NameIdentifier, $"{resolvedCountryCode}:{user.id}"),
+                     new Claim("CredentialVersion", SessionSecurity.CredentialVersion(user.password)),
+                     new Claim("LoginLockValue", lockValue)
+                 };
+@@ -523,7 +524,7 @@
+             return Json(ret);
+         }
+ 
+-        [HttpGet("Logout")]
++        [HttpPost("Logout")]
+         public async Task<IActionResult> Logout(string IP)
+         {
+             try

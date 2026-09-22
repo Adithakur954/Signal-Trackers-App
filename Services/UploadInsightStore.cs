@@ -72,7 +72,17 @@ public static class UploadInsightStore
         string source,
         IEnumerable<(string Path, string FileName)> files)
     {
-        var records = files.SelectMany(file => ParseFile(file.Path).Select(record => (file.FileName, record))).ToList();
+        var records = files.SelectMany(file =>
+        {
+            var parsedRecords = ParseFile(file.Path);
+            if (parsedRecords.Count > 0)
+                return parsedRecords.Select(record => (file.FileName, record));
+
+            var fallbackRecord = CreateRawInsightRecord(file.Path, file.FileName);
+            return fallbackRecord == null
+                ? Enumerable.Empty<(string FileName, UploadInsightRecord record)>()
+                : [(file.FileName, fallbackRecord)];
+        }).ToList();
         if (records.Count == 0)
             return 0;
 
@@ -173,6 +183,39 @@ public static class UploadInsightStore
 
         Flush();
         return records;
+    }
+
+    private static UploadInsightRecord? CreateRawInsightRecord(string path, string fileName)
+    {
+        if (!File.Exists(path))
+            return null;
+
+        var rawText = File.ReadAllText(path).Trim();
+        if (string.IsNullOrWhiteSpace(rawText))
+            return null;
+
+        var title = Path.GetFileNameWithoutExtension(fileName);
+        if (string.IsNullOrWhiteSpace(title))
+            title = "Insight";
+
+        var description = rawText.Length > 4000 ? rawText[..4000] : rawText;
+        var details = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["severity"] = "INFO",
+            ["title"] = title,
+            ["parser"] = "raw",
+            ["description"] = description
+        };
+
+        return new UploadInsightRecord(
+            "INFO",
+            title,
+            null,
+            null,
+            null,
+            description,
+            JsonSerializer.Serialize(details),
+            rawText);
     }
 
     private static void Add(IDbCommand command, string name, object? value)

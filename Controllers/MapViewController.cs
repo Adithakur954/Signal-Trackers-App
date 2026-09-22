@@ -12266,6 +12266,7 @@ public JsonResult GetPredictionLog(
         }
 
        [HttpPost, Route("UploadSitePredictionCsv")]
+[Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("Upload")]
 [RequestSizeLimit(200_000_000)]
 public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePredictionRequest req)
 {
@@ -12274,10 +12275,14 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
 
     var inserted = 0;
     using var reader = new StreamReader(req.File.OpenReadStream());
-    var headerLine = await reader.ReadLineAsync();
+    var headerLine = SiteCsvSchema.ReadBoundedHeader(reader);
     var headerError = SiteCsvSchema.ValidateHeader(headerLine, out var headers);
     if (headerError != null)
         return BadRequest(new { Status = 0, Message = headerError });
+
+    if (!await ResourceAccess.Projects(db.tbl_project, User)
+        .AnyAsync(project => project.id == req.ProjectId, HttpContext.RequestAborted))
+        return NotFound(new { Status = 0, Message = "Project not found." });
 
     int Col(string name) =>
         Array.FindIndex(headers, h =>
