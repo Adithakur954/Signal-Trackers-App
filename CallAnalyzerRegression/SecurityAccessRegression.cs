@@ -42,11 +42,19 @@ internal static class SecurityAccessRegression
         Check(ResourceAccess.IndoorPlans(plans, users, User(company: 0)).Select(row => row.id).SequenceEqual(new[] { 1 }), "Companyless indoor access must remain creator-only.");
         Check(ResourceAccess.IndoorPlans(plans, users, User(role: 3)).Count() == 4, "Super-admin must retain orphan-plan access for assignment.");
 
+        Check(typeof(tbl_session).GetProperty(nameof(tbl_session.capture_frequency))?.PropertyType == typeof(float?),
+            "tbl_session.capture_frequency must match the MySQL FLOAT column and must not be read as Int32.");
         var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
         {
             ["ConnectionStrings:MySqlConnection"] = "Server=localhost;Database=IN_TEST;User ID=test;",
-            ["ConnectionStrings:MySqlConnection2"] = "Server=localhost;Database=TW_TEST;User ID=test;"
+            ["ConnectionStrings:MySqlConnection2"] = "Server=localhost;Database=TW_TEST;User ID=test;",
+            ["L3EventImport:RemoteLogZipUrlTemplate"] = "https://apistracer.vinfocom.co.in/uploaded_zippedlogs/log_{logId}.zip",
+            ["L3EventImport:TaiwanRemoteLogZipUrlTemplate"] = "https://apistracer.vinfocom.co.in/uploaded_zippedlogs/log_{logId}_tw.zip"
         }).Build();
+        Check(RemoteLogZipUrlResolver.BuildUrl(configuration, new DefaultHttpContext { User = User(region: "IN") }, 123) ==
+            "https://apistracer.vinfocom.co.in/uploaded_zippedlogs/log_123.zip", "Indian users must resolve the Indian remote log ZIP template.");
+        Check(RemoteLogZipUrlResolver.BuildUrl(configuration, new DefaultHttpContext { User = User(region: "TW") }, 123) ==
+            "https://apistracer.vinfocom.co.in/uploaded_zippedlogs/log_123_tw.zip", "Taiwan users must resolve the Taiwan remote log ZIP template.");
         foreach (var region in new[] { "IN", "TW" })
         {
             var context = new DefaultHttpContext { User = User(region: region) };

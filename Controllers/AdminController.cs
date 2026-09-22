@@ -3446,9 +3446,7 @@ public async Task<IActionResult> GetSessions(
                         end_lat = (double?)s.end_lat,
                         end_lon = (double?)s.end_lon,
 
-                        // --- FIX: Safe Cast for Int Conversion ---
-                        // Pehle Double? mein cast karein, fir Int? mein.
-                        capture_frequency = (int?)(double?)s.capture_frequency,
+                        capture_frequency = (double?)s.capture_frequency,
 
                         distance_km = s.distance,
                         start_address = s.start_address,

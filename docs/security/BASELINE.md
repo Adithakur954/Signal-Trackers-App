@@ -1,6 +1,6 @@
 # Signal Tracker security hardening and VAPT handover
 
-Review date: 2026-09-21. Starting commit: `c33141f`. Changes are local and uncommitted; the running app has not been restarted or deployed. This report records the implemented work and remaining gates. **A complete VAPT assessment has not been performed.**
+Review date: 2026-09-22. Starting commit: `c33141f`. Changes are local and uncommitted; the running app has not been restarted or deployed. This report records the implemented work and remaining gates. **A complete VAPT assessment has not been performed.**
 
 ## Deliverables
 
@@ -45,6 +45,8 @@ Health/mobile routes use PublicApiKey, PythonBridge uses its own action filter, 
 9. CSV headers are read with a 65,536-character bound. Site ZIP validation caps entries at 1000 and declared total extracted size at 500 MiB. ProcessCSV's private synchronous staging copy is removed after processing; other upload/row/query paths still need workload review.
 10. Preserved missing local development secrets in the existing .NET User Secrets file and cleared five tracked DB/Redis/SMS/bridge configuration values. Sanitized tracked login/cookie artifacts and removed literal credential examples from the old precheck. History and actual server credentials are unchanged and require coordinated rotation/review.
 11. Automatic startup schema helpers now require Development plus explicit opt-in. Other service-level schema helpers still require migration review before claiming runtime least privilege.
+12. Remote log ZIP selection now has regression coverage for signed IN/TW users: IN resolves to `log_{logId}.zip`; TW resolves to `log_{logId}_tw.zip` through `L3EventImport:TaiwanRemoteLogZipUrlTemplate`.
+13. `tbl_session.capture_frequency` now maps to `float?` to match the MySQL FLOAT column and prevent EF from reading it as `Int32`. The inspected session projection now returns it as a numeric value without forcing an integer cast.
 
 ## Verification completed
 
@@ -52,13 +54,13 @@ The isolated build and latest regression suite pass. See ignored logs under `art
 
 - 96 route/identity authorization cases: anonymous, ordinary user, company admin and super-admin on the changed guarded routes.
 - Two-company, creator, orphan-record and companyless resource predicates; provider SQL translation checked without opening a connection.
-- IN/TW query/header tampering, legacy-admin routing and regional login-key isolation.
+- IN/TW query/header tampering, legacy-admin routing, regional login-key isolation and remote log ZIP template resolution.
 - Credential changes, account deactivation, role changes and absolute session expiry.
 - Valid, tampered, expired and legacy unsigned password-reset tokens; company-admin super-admin-creation attempt rejected before database access.
 - Cookie Secure behavior and actual trusted/untrusted forwarded-header middleware.
 - Diagnostic time index: 1,061 comparisons, including midnight wraparound, missing times, session isolation and duplicate timestamps.
 - Site CSV required/optional headers, mapping, invalid-header responses and ZIP validation, plus oversized-header and archive-entry-count bounds.
-- Allowed/disallowed download URL shapes; full upstream streaming and resource lookup require staging.
+- Allowed/disallowed download URL shapes and `capture_frequency` FLOAT mapping; full upstream streaming and resource lookup require staging.
 - NuGet vulnerability audit of direct/transitive packages: configured NuGet source reported none. This does not audit OS/runtime/container patches, vendored JS or unpublished vulnerabilities.
 
 Run from the repository root:

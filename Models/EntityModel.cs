@@ -220,7 +220,7 @@ public class TechnologyData
         public float? end_lat { get; set; }
         public float? end_lon { get; set; }
         public float? distance { get; set; }
-        public int? capture_frequency { get; set; }
+        public float? capture_frequency { get; set; }
         public string? type { get; set; }
         public string? notes { get; set; }
         public string? start_address { get; set; }
@@ -246,7 +246,7 @@ public class TechnologyData
         public float? end_lat { get; set; }
         public float? end_lon { get; set; }
         public float? distance { get; set; }
-        public int? capture_frequency { get; set; }
+        public float? capture_frequency { get; set; }
         public string? type { get; set; }
         public string? notes { get; set; }
         public string? start_address { get; set; }
@@ -1394,5 +1394,4 @@ public class LogFilterModel
 
     
 }
-
 
