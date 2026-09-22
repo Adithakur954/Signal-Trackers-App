@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Globalization;
 using System.IO.Compression;
 using System.Data.Common;
@@ -96,6 +96,15 @@ namespace SignalTracker.Controllers
         {
             _db = db;
             _httpClientFactory = httpClientFactory;
+        }
+
+
+        private static IActionResult InvalidZipUpload(string fileName)
+        {
+            return new BadRequestObjectResult(new
+            {
+                Message = $"'{fileName}' is not a valid ZIP log file. Please upload the original exported .zip file, not an extracted folder, CSV, XLSX, or partial download."
+            });
         }
 
         private static async Task<string> SaveUploadToTempFileAsync(IFormFile upload, CancellationToken ct)
@@ -235,13 +244,26 @@ namespace SignalTracker.Controllers
                 for (int zipIdx = 0; zipIdx < uploads.Count; zipIdx++)
                 {
                     var upload = uploads[zipIdx];
+                    if (upload.Length <= 0)
+                    {
+                        return InvalidZipUpload(upload.FileName);
+                    }
                     var tempPath = await SaveUploadToTempFileAsync(upload, HttpContext.RequestAborted);
                     allTempPaths.Add(tempPath);
 
                     await using var zipStream = new FileStream(
                         tempPath, FileMode.Open, FileAccess.Read,
                         FileShare.Read, bufferSize: 128 * 1024, useAsync: true);
-                    using var archive = new ZipArchive(zipStream, ZipArchiveMode.Read, leaveOpen: true);
+                    ZipArchive archiveHandle;
+                    try
+                    {
+                        archiveHandle = new ZipArchive(zipStream, ZipArchiveMode.Read, leaveOpen: true);
+                    }
+                    catch (InvalidDataException)
+                    {
+                        return InvalidZipUpload(upload.FileName);
+                    }
+                    using var archive = archiveHandle;
 
                     // Extract map images (preserve file-specific and session-specific keys)
                     var mapImages = ExtractMapImagesFromZip(archive, out var detectedSessionId);
@@ -385,13 +407,26 @@ namespace SignalTracker.Controllers
                 for (int zipIdx = 0; zipIdx < uploads.Count; zipIdx++)
                 {
                     var upload = uploads[zipIdx];
+                    if (upload.Length <= 0)
+                    {
+                        return InvalidZipUpload(upload.FileName);
+                    }
                     var tempPath = await SaveUploadToTempFileAsync(upload, HttpContext.RequestAborted);
                     allTempPaths.Add(tempPath);
 
                     await using var zipStream = new FileStream(
                         tempPath, FileMode.Open, FileAccess.Read,
                         FileShare.Read, bufferSize: 128 * 1024, useAsync: true);
-                    using var archive = new ZipArchive(zipStream, ZipArchiveMode.Read, leaveOpen: true);
+                    ZipArchive archiveHandle;
+                    try
+                    {
+                        archiveHandle = new ZipArchive(zipStream, ZipArchiveMode.Read, leaveOpen: true);
+                    }
+                    catch (InvalidDataException)
+                    {
+                        return InvalidZipUpload(upload.FileName);
+                    }
+                    using var archive = archiveHandle;
 
                     ExtractMapImagesFromZip(archive, out var detectedSessionId);
                     var sid = (int)(request.SessionIdOverride ?? detectedSessionId ?? 0);
