@@ -6831,6 +6831,7 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyEF(
             nodeb_id = log.nodeb_id ?? "",
             cell_id = log.cell_id ?? "",
             direction = log.direction ?? "",
+            ta = log.ta,
             channel = log.channel ?? "",
             primary_cell_info_1 = log.primary_cell_info_1 ?? "",
             connection_type = log.primary_cell_info_1 != null &&
@@ -8050,7 +8051,8 @@ public class NetworkLogCacheRow
     public string download_direction { get; set; } = "";
     public string download_result_status { get; set; } = "";
     public string download_size_source { get; set; } = "";
-}
+            public string? ta { get; internal set; }
+        }
 
 // Delete project and unlink the polygon 
 [HttpDelete, Route("DeleteProject")]

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
@@ -1077,6 +1077,8 @@ public string? level { get; set; }
         public string? volte_call { get; set; }
         public string? lte_bler_json { get; set; }
         public string? mos_json { get; set; }
+        public string? report_acceptance_json { get; set; }
+
 
         public int? is_default { get; set; }
 
@@ -1394,4 +1396,5 @@ public class LogFilterModel
 
     
 }
+
 

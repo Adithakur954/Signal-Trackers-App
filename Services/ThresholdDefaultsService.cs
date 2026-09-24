@@ -18,11 +18,14 @@ public sealed class ThresholdDefaultsService
         if (userId <= 0)
             throw new ArgumentOutOfRangeException(nameof(userId));
 
-        var alreadyExists = await _db.thresholds
-            .AsNoTracking()
-            .AnyAsync(x => x.user_id == userId && x.is_default == 0, cancellationToken);
-        if (alreadyExists)
+        var existing = await _db.thresholds
+            .FirstOrDefaultAsync(x => x.user_id == userId && x.is_default == 0, cancellationToken);
+        if (existing != null)
+        {
+            if (ApplyAcceptanceDefaults(existing))
+                await _db.SaveChangesAsync(cancellationToken);
             return;
+        }
 
         var template = await _db.thresholds
             .AsNoTracking()
@@ -36,9 +39,31 @@ public sealed class ThresholdDefaultsService
         await _db.SaveChangesAsync(cancellationToken);
     }
 
+    private const string ReportAcceptanceJson = @"{""rsrp_rxlev"":[{""grade"":""Good"",""condition"":""RSRP / RxLev > -95 dBm for more than 90% of samples""},{""grade"":""Fair"",""condition"":""Average RSRP / RxLev -95 to -105 dBm""},{""grade"":""Poor"",""condition"":""Average RSRP / RxLev < -105 dBm, or coverage (% > -95 dBm) < 75%""}],""rsrq"":[{""grade"":""Good"",""condition"":""RSRQ > -10 dB for more than 90% of samples""},{""grade"":""Fair"",""condition"":""Average RSRQ -10 to -15 dB""},{""grade"":""Poor"",""condition"":""Average RSRQ < -15 dB, or coverage (% > -10 dB) < 75%""}],""sinr"":[{""grade"":""Good"",""condition"":""SINR > 20 dB for more than 90% of samples""},{""grade"":""Fair"",""condition"":""Average SINR 10 to 20 dB""},{""grade"":""Poor"",""condition"":""Average SINR < 10 dB, or coverage (% > 10 dB) < 75%""}],""mos"":[{""grade"":""Good"",""condition"":""MOS >= 4.0 for more than 90% of samples""},{""grade"":""Fair"",""condition"":""Average MOS 3.5 to 4.0""},{""grade"":""Poor"",""condition"":""Average MOS < 3.5, or MOS >= 4.0 for less than 75% of samples""}],""dl_throughput"":[{""grade"":""Good"",""condition"":""Average DL throughput >= 10 Mbps""},{""grade"":""Fair"",""condition"":""Average DL throughput 5 to 10 Mbps""},{""grade"":""Poor"",""condition"":""Average DL throughput < 5 Mbps""}],""ul_throughput"":[{""grade"":""Good"",""condition"":""Average UL throughput >= 3 Mbps""},{""grade"":""Fair"",""condition"":""Average UL throughput 1 to 3 Mbps""},{""grade"":""Poor"",""condition"":""Average UL throughput < 1 Mbps""}],""latency"":[{""grade"":""Good"",""condition"":""Average latency < 50 ms""},{""grade"":""Fair"",""condition"":""Average latency 50 to 100 ms""},{""grade"":""Poor"",""condition"":""Average latency > 100 ms""}],""jitter"":[{""grade"":""Good"",""condition"":""Average jitter < 20 ms""},{""grade"":""Fair"",""condition"":""Average jitter 20 to 50 ms""},{""grade"":""Poor"",""condition"":""Average jitter > 50 ms""}],""packet_loss"":[{""grade"":""Good"",""condition"":""Packet loss < 1%""},{""grade"":""Fair"",""condition"":""Packet loss 1% to 3%""},{""grade"":""Poor"",""condition"":""Packet loss > 3%""}],""cssr"":[{""grade"":""Good"",""condition"":""CSSR >= 98%""},{""grade"":""Fair"",""condition"":""CSSR 95% to 98%""},{""grade"":""Poor"",""condition"":""CSSR < 95%""}],""call_drop"":[{""grade"":""Good"",""condition"":""Call drop rate <= 2%""},{""grade"":""Fair"",""condition"":""Call drop rate 2% to 3%""},{""grade"":""Poor"",""condition"":""Call drop rate > 3%""}],""handover_success"":[{""grade"":""Good"",""condition"":""Handover success rate >= 98%""},{""grade"":""Fair"",""condition"":""Handover success rate 95% to 98%""},{""grade"":""Poor"",""condition"":""Handover success rate < 95%""}],""web_delay"":[{""grade"":""Good"",""condition"":""Average web delay < 3 seconds""},{""grade"":""Fair"",""condition"":""Average web delay 3 to 5 seconds""},{""grade"":""Poor"",""condition"":""Average web delay > 5 seconds""}],""video_buffer"":[{""grade"":""Good"",""condition"":""Video initial buffering < 2 seconds""},{""grade"":""Fair"",""condition"":""Video initial buffering 2 to 5 seconds""},{""grade"":""Poor"",""condition"":""Video initial buffering > 5 seconds""}]}";
+
+    public static bool ApplyAcceptanceDefaults(Thresholds? thresholds)
+    {
+        if (thresholds == null)
+            return false;
+
+        if (!string.IsNullOrWhiteSpace(thresholds.report_acceptance_json))
+            return false;
+
+        thresholds.report_acceptance_json = ReportAcceptanceJson;
+        return true;
+    }
+
+    public static void CopyAcceptanceValues(Thresholds target, Thresholds source)
+    {
+        if (!string.IsNullOrWhiteSpace(source.report_acceptance_json))
+            target.report_acceptance_json = source.report_acceptance_json;
+
+        ApplyAcceptanceDefaults(target);
+    }
+
     private static Thresholds CloneTemplate(Thresholds template, int userId)
     {
-        return new Thresholds
+        var thresholds = new Thresholds
         {
             user_id = userId,
             is_default = 0,
@@ -73,13 +98,16 @@ public sealed class ThresholdDefaultsService
             mac_rb_json = template.mac_rb_json,
             mac_grants_json = template.mac_grants_json,
             mac_tx_power_json = template.mac_tx_power_json,
-            mac_modulation_pct_json = template.mac_modulation_pct_json
+            mac_modulation_pct_json = template.mac_modulation_pct_json,
+            report_acceptance_json = template.report_acceptance_json
         };
+        ApplyAcceptanceDefaults(thresholds);
+        return thresholds;
     }
 
     private static Thresholds CreateDefaults(int userId)
     {
-        return new Thresholds
+        var thresholds = new Thresholds
         {
             user_id = userId,
             is_default = 0,
@@ -136,6 +164,8 @@ public sealed class ThresholdDefaultsService
             dominance = Ranges((0, 0.9, "#00ff00", "default"), (0.9, 1.8, "#00ff2a", "default"), (1.8, 2.7, "#00ff55", "default"), (2.7, 3.6, "#ffd500", "default")),
             coverage_violation = Ranges((-15, -10, "#00ff00", "default"), (-10, -5, "#ffd500", "default"), (-5, -2, "#ff2600", "default"), (-2, -1, "#4766c2", "default"))
         };
+        ApplyAcceptanceDefaults(thresholds);
+        return thresholds;
     }
 
     private static string Ranges(params (double Min, double Max, string Color, string Range)[] values)
@@ -149,3 +179,4 @@ public sealed class ThresholdDefaultsService
         }));
     }
 }
+

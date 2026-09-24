@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Data;
 using System.Globalization;
 using Microsoft.AspNetCore.Http;
@@ -63,6 +63,7 @@ private void EnsureMacDetailThresholdColumns()
     EnsureColumn("thresholds", "mac_tx_power_json", "LONGTEXT NULL");
     EnsureColumn("thresholds", "mac_modulation_pct_json", "LONGTEXT NULL");
     EnsureColumn("thresholds", "c_i_json", "LONGTEXT NULL");
+    EnsureColumn("thresholds", "report_acceptance_json", "LONGTEXT NULL");
     EnsureDefaultCiThreshold();
 }
 
@@ -155,6 +156,7 @@ public IActionResult GetThresholdSettings()
         if (userSetting != null)
         {
             response.Status = 1;
+            ThresholdDefaultsService.ApplyAcceptanceDefaults(userSetting);
             response.Data = userSetting;
             response.Message = "User threshold fetched.";
             return Ok(response);
@@ -169,6 +171,7 @@ public IActionResult GetThresholdSettings()
         if (defaultSetting != null)
         {
             response.Status = 1;
+            ThresholdDefaultsService.ApplyAcceptanceDefaults(defaultSetting);
             response.Data = defaultSetting;
             response.Message = "Default threshold fetched.";
             return Ok(response);
@@ -182,6 +185,7 @@ public IActionResult GetThresholdSettings()
         if (fallback != null)
         {
             response.Status = 1;
+            ThresholdDefaultsService.ApplyAcceptanceDefaults(fallback);
             response.Data = fallback;
             response.Message = "Fallback threshold returned.";
             return Ok(response);
@@ -269,6 +273,7 @@ public IActionResult SaveThreshold([FromBody] Thresholds? model)
                 existing.mac_grants_json = model.mac_grants_json;
                 existing.mac_tx_power_json = model.mac_tx_power_json;
                 existing.mac_modulation_pct_json = model.mac_modulation_pct_json;
+                ThresholdDefaultsService.CopyAcceptanceValues(existing, model);
             db.thresholds.Update(existing);
         }
         else
@@ -280,6 +285,7 @@ public IActionResult SaveThreshold([FromBody] Thresholds? model)
             model.c_i_json = string.IsNullOrWhiteSpace(model.c_i_json)
                 ? DefaultCiJson
                 : model.c_i_json;
+            ThresholdDefaultsService.ApplyAcceptanceDefaults(model);
 
             db.thresholds.Add(model);
         }
@@ -304,6 +310,7 @@ public IActionResult SaveThreshold([FromBody] Thresholds? model)
     return Ok(response);
 }
    }}
+
 
 
 
