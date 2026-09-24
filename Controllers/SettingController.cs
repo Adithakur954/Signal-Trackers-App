@@ -144,8 +144,8 @@ public IActionResult GetThresholdSettings()
     {
         cf.SessionCheck();
         int uid = cf.UserId;
-        _thresholdDefaults.EnsureForUserAsync(uid).GetAwaiter().GetResult();
         EnsureMacDetailThresholdColumns();
+        _thresholdDefaults.EnsureForUserAsync(uid).GetAwaiter().GetResult();
 
         // 1ï¸âƒ£ User-specific threshold (highest priority)
         var userSetting = db.thresholds
@@ -213,8 +213,8 @@ public IActionResult SaveThreshold([FromBody] Thresholds? model)
     {
         cf.SessionCheck();
         int uid = cf.UserId;
-        _thresholdDefaults.EnsureForUserAsync(uid).GetAwaiter().GetResult();
         EnsureMacDetailThresholdColumns();
+        _thresholdDefaults.EnsureForUserAsync(uid).GetAwaiter().GetResult();
 
         Thresholds? existing = null;
 

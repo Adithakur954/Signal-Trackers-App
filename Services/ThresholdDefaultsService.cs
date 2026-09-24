@@ -18,6 +18,8 @@ public sealed class ThresholdDefaultsService
         if (userId <= 0)
             throw new ArgumentOutOfRangeException(nameof(userId));
 
+        await EnsureReportAcceptanceColumnAsync(cancellationToken);
+
         var existing = await _db.thresholds
             .FirstOrDefaultAsync(x => x.user_id == userId && x.is_default == 0, cancellationToken);
         if (existing != null)
@@ -39,6 +41,35 @@ public sealed class ThresholdDefaultsService
         await _db.SaveChangesAsync(cancellationToken);
     }
 
+    private async Task EnsureReportAcceptanceColumnAsync(CancellationToken cancellationToken)
+    {
+        var conn = _db.Database.GetDbConnection();
+        var shouldClose = conn.State != System.Data.ConnectionState.Open;
+        if (shouldClose)
+            await conn.OpenAsync(cancellationToken);
+
+        try
+        {
+            await using var check = conn.CreateCommand();
+            check.CommandText = @"SELECT COUNT(*)
+FROM INFORMATION_SCHEMA.COLUMNS
+WHERE TABLE_SCHEMA = DATABASE()
+  AND TABLE_NAME = 'thresholds'
+  AND COLUMN_NAME = 'report_acceptance_json';";
+            var exists = Convert.ToInt32(await check.ExecuteScalarAsync(cancellationToken)) > 0;
+            if (exists)
+                return;
+
+            await using var alter = conn.CreateCommand();
+            alter.CommandText = "ALTER TABLE `thresholds` ADD COLUMN `report_acceptance_json` LONGTEXT NULL;";
+            await alter.ExecuteNonQueryAsync(cancellationToken);
+        }
+        finally
+        {
+            if (shouldClose)
+                await conn.CloseAsync();
+        }
+    }
     private const string ReportAcceptanceJson = @"{""rsrp_rxlev"":[{""grade"":""Good"",""condition"":""RSRP / RxLev > -95 dBm for more than 90% of samples""},{""grade"":""Fair"",""condition"":""Average RSRP / RxLev -95 to -105 dBm""},{""grade"":""Poor"",""condition"":""Average RSRP / RxLev < -105 dBm, or coverage (% > -95 dBm) < 75%""}],""rsrq"":[{""grade"":""Good"",""condition"":""RSRQ > -10 dB for more than 90% of samples""},{""grade"":""Fair"",""condition"":""Average RSRQ -10 to -15 dB""},{""grade"":""Poor"",""condition"":""Average RSRQ < -15 dB, or coverage (% > -10 dB) < 75%""}],""sinr"":[{""grade"":""Good"",""condition"":""SINR > 20 dB for more than 90% of samples""},{""grade"":""Fair"",""condition"":""Average SINR 10 to 20 dB""},{""grade"":""Poor"",""condition"":""Average SINR < 10 dB, or coverage (% > 10 dB) < 75%""}],""mos"":[{""grade"":""Good"",""condition"":""MOS >= 4.0 for more than 90% of samples""},{""grade"":""Fair"",""condition"":""Average MOS 3.5 to 4.0""},{""grade"":""Poor"",""condition"":""Average MOS < 3.5, or MOS >= 4.0 for less than 75% of samples""}],""dl_throughput"":[{""grade"":""Good"",""condition"":""Average DL throughput >= 10 Mbps""},{""grade"":""Fair"",""condition"":""Average DL throughput 5 to 10 Mbps""},{""grade"":""Poor"",""condition"":""Average DL throughput < 5 Mbps""}],""ul_throughput"":[{""grade"":""Good"",""condition"":""Average UL throughput >= 3 Mbps""},{""grade"":""Fair"",""condition"":""Average UL throughput 1 to 3 Mbps""},{""grade"":""Poor"",""condition"":""Average UL throughput < 1 Mbps""}],""latency"":[{""grade"":""Good"",""condition"":""Average latency < 50 ms""},{""grade"":""Fair"",""condition"":""Average latency 50 to 100 ms""},{""grade"":""Poor"",""condition"":""Average latency > 100 ms""}],""jitter"":[{""grade"":""Good"",""condition"":""Average jitter < 20 ms""},{""grade"":""Fair"",""condition"":""Average jitter 20 to 50 ms""},{""grade"":""Poor"",""condition"":""Average jitter > 50 ms""}],""packet_loss"":[{""grade"":""Good"",""condition"":""Packet loss < 1%""},{""grade"":""Fair"",""condition"":""Packet loss 1% to 3%""},{""grade"":""Poor"",""condition"":""Packet loss > 3%""}],""cssr"":[{""grade"":""Good"",""condition"":""CSSR >= 98%""},{""grade"":""Fair"",""condition"":""CSSR 95% to 98%""},{""grade"":""Poor"",""condition"":""CSSR < 95%""}],""call_drop"":[{""grade"":""Good"",""condition"":""Call drop rate <= 2%""},{""grade"":""Fair"",""condition"":""Call drop rate 2% to 3%""},{""grade"":""Poor"",""condition"":""Call drop rate > 3%""}],""handover_success"":[{""grade"":""Good"",""condition"":""Handover success rate >= 98%""},{""grade"":""Fair"",""condition"":""Handover success rate 95% to 98%""},{""grade"":""Poor"",""condition"":""Handover success rate < 95%""}],""web_delay"":[{""grade"":""Good"",""condition"":""Average web delay < 3 seconds""},{""grade"":""Fair"",""condition"":""Average web delay 3 to 5 seconds""},{""grade"":""Poor"",""condition"":""Average web delay > 5 seconds""}],""video_buffer"":[{""grade"":""Good"",""condition"":""Video initial buffering < 2 seconds""},{""grade"":""Fair"",""condition"":""Video initial buffering 2 to 5 seconds""},{""grade"":""Poor"",""condition"":""Video initial buffering > 5 seconds""}]}";
 
     public static bool ApplyAcceptanceDefaults(Thresholds? thresholds)
