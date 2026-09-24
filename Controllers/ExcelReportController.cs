@@ -72,7 +72,7 @@ namespace SignalTracker.Controllers
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
-            if (headerUpper == "EARFCN" && list.Count > 1)
+            if (headerUpper == "EARFCN")
             {
                 list = list.Where(v => v != "0" && v != "-1").ToList();
             }
@@ -796,6 +796,33 @@ namespace SignalTracker.Controllers
                     return null;
                 }
 
+                string? defaultValidSheetName = null;
+                string? defaultValidBand = null;
+                for (int i = 1; i < lines.Count; i++)
+                {
+                    var c = ParseCsvLine(lines[i]);
+                    if (c.Count < 2 || c[0].Trim().StartsWith("#")) continue;
+                    var eVal = GetCleanVal(c, earfcnIdx);
+                    if (!string.IsNullOrWhiteSpace(eVal) && eVal != "-1" && eVal != "0")
+                    {
+                        var bVal = ResolveBandFromEarfcn(eVal);
+                        if (string.IsNullOrWhiteSpace(bVal) && bandIdx >= 0)
+                        {
+                            var rawB = GetCleanVal(c, bandIdx);
+                            if (!string.IsNullOrWhiteSpace(rawB)) bVal = ToBandSheetName(rawB, null);
+                        }
+                        if (!string.IsNullOrWhiteSpace(bVal))
+                        {
+                            defaultValidBand = bVal;
+                            defaultValidSheetName = earfcnWise ? $"{eVal} ({bVal})" : bVal;
+                            break;
+                        }
+                    }
+                }
+
+                string? lastValidSheetName = defaultValidSheetName;
+                string? lastValidBand = defaultValidBand;
+
                 for (int i = 1; i < lines.Count; i++)
                 {
                     var cols = ParseCsvLine(lines[i]);
@@ -816,49 +843,56 @@ namespace SignalTracker.Controllers
                     }
 
                     string sheetName;
-                    if (earfcnWise)
+                    bool isNoCovEarfcn = string.IsNullOrWhiteSpace(earfcnVal) || earfcnVal == "-1" || earfcnVal == "0";
+                    if (!isNoCovEarfcn)
                     {
-                        sheetName = !string.IsNullOrWhiteSpace(earfcnVal)
-                            ? (bandVal != null ? $"{earfcnVal} ({bandVal})" : earfcnVal)
-                            : (bandVal ?? "Unknown Band");
+                        if (earfcnWise)
+                        {
+                            sheetName = !string.IsNullOrWhiteSpace(earfcnVal)
+                                ? (bandVal != null ? $"{earfcnVal} ({bandVal})" : earfcnVal)
+                                : (bandVal ?? "Unknown Band");
+                        }
+                        else
+                        {
+                            sheetName = !string.IsNullOrWhiteSpace(bandVal)
+                                ? bandVal
+                                : (!string.IsNullOrWhiteSpace(earfcnVal) ? earfcnVal : "Unknown Band");
+                        }
+                        lastValidSheetName = sheetName;
+                        if (!string.IsNullOrWhiteSpace(bandVal)) lastValidBand = bandVal;
                     }
                     else
                     {
-                        sheetName = !string.IsNullOrWhiteSpace(bandVal)
-                            ? bandVal
-                            : (!string.IsNullOrWhiteSpace(earfcnVal) ? earfcnVal : "Unknown Band");
+                        sheetName = lastValidSheetName ?? defaultValidSheetName ?? "Unknown Band";
+                        bandVal = lastValidBand ?? defaultValidBand;
                     }
 
                     var metricColors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-                    var ciColor = GetColorVal(cols, ciIdx);
-                    if (ciColor != null)
+                    void AddColor(int idx, params string[] keys)
                     {
-                        metricColors["CI"] = ciColor;
-                        metricColors["CELL_ID"] = ciColor;
-                        metricColors["Cell ID"] = ciColor;
-                        metricColors["CellID"] = ciColor;
+                        var color = GetColorVal(cols, idx);
+                        if (color != null)
+                        {
+                            foreach (var key in keys)
+                            {
+                                metricColors[key] = color;
+                            }
+                        }
                     }
 
-                    var pciColor = GetColorVal(cols, pciIdx);
-                    if (pciColor != null)
-                    {
-                        metricColors["PCI"] = pciColor;
-                    }
-
-                    var nodebColor = GetColorVal(cols, nodebIdx);
-                    if (nodebColor != null)
-                    {
-                        metricColors["NODEB_ID"] = nodebColor;
-                        metricColors["NodeB ID"] = nodebColor;
-                        metricColors["NodeB_ID"] = nodebColor;
-                    }
-
-                    var earfcnColor = GetColorVal(cols, earfcnIdx);
-                    if (earfcnColor != null)
-                    {
-                        metricColors["EARFCN"] = earfcnColor;
-                    }
+                    AddColor(ciIdx, "CI", "CELL_ID", "Cell ID", "CellID");
+                    AddColor(pciIdx, "PCI");
+                    AddColor(nodebIdx, "NODEB_ID", "NodeB ID", "NodeB_ID", "NodeB");
+                    AddColor(earfcnIdx, "EARFCN");
+                    AddColor(rsrpIdx, "RSRP");
+                    AddColor(rsrqIdx, "RSRQ");
+                    AddColor(sinrIdx, "SINR");
+                    AddColor(dlIdx, "DL_THPT", "DL THPT");
+                    AddColor(ulIdx, "UL_THPT", "UL THPT");
+                    AddColor(blerIdx, "LTE_BLER", "LTE BLER", "BLER");
+                    AddColor(puschIdx, "PUSCH_TX", "PUSCH Tx");
+                    AddColor(volteIdx, "VOLTE_CALL", "VoLTE Call", "VOLTE");
 
                     var row = new WalkTestLogRow
                     {
@@ -1091,9 +1125,25 @@ namespace SignalTracker.Controllers
         {
             if (string.IsNullOrWhiteSpace(imageName)) return null;
 
-            var parts = imageName.Split(new[] { ',', ';', '|' }, StringSplitOptions.RemoveEmptyEntries);
             var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
+            // 1. Support @@Metric(#HEX) format, e.g. indoor_test@@RSRP(#000000)@@RSRQ(#000000)...
+            if (imageName.Contains("@@"))
+            {
+                var matches = Regex.Matches(imageName, @"([A-Za-z0-9_ ]+)\((#[0-9a-fA-F]+)\)");
+                foreach (Match m in matches)
+                {
+                    var metric = m.Groups[1].Value.Trim();
+                    var color = NormalizeColorHex(m.Groups[2].Value.Trim());
+                    if (!string.IsNullOrWhiteSpace(metric) && !string.IsNullOrWhiteSpace(color))
+                    {
+                        dict[metric] = color;
+                    }
+                }
+            }
+
+            // 2. Support key:value or key=value format (comma, semicolon, or pipe separated)
+            var parts = imageName.Split(new[] { ',', ';', '|' }, StringSplitOptions.RemoveEmptyEntries);
             foreach (var part in parts)
             {
                 var kv = part.Trim().Split(new[] { ':', '=' }, 2);
@@ -1108,6 +1158,57 @@ namespace SignalTracker.Controllers
             }
 
             return dict.Count > 0 ? dict : null;
+        }
+
+        private static bool IsBlackHex(string? hex)
+        {
+            if (string.IsNullOrWhiteSpace(hex)) return false;
+            var clean = hex.Trim().TrimStart('#');
+            if (clean.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+                clean = clean[2..];
+            if (clean.Length == 8)
+            {
+                if (clean.StartsWith("FF", StringComparison.OrdinalIgnoreCase) || clean.StartsWith("00", StringComparison.OrdinalIgnoreCase))
+                    clean = clean[2..];
+                else
+                    clean = clean[..6];
+            }
+            return clean.Equals("000000", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsNoCoverageRow(WalkTestLogRow row, string headerUpper)
+        {
+            // 1. Check if specific metric color is black #000000
+            if (row.MetricColors != null)
+            {
+                string? hex = GetHexColorFromRows(new List<WalkTestLogRow> { row }, headerUpper);
+                if (IsBlackHex(hex)) return true;
+            }
+
+            // 2. For EARFCN: value of -1 or 0 (or <= 0 / empty)
+            if (string.Equals(headerUpper, "EARFCN", StringComparison.OrdinalIgnoreCase))
+            {
+                if (string.IsNullOrWhiteSpace(row.Earfcn) || row.Earfcn == "-1" || row.Earfcn == "0")
+                    return true;
+                if (double.TryParse(row.Earfcn, NumberStyles.Float, CultureInfo.InvariantCulture, out var ev) && ev <= 0)
+                    return true;
+            }
+
+            // 3. If EARFCN is -1 or 0, this sample has no cellular coverage
+            if (row.Earfcn == "-1" || row.Earfcn == "0")
+                return true;
+
+            // 4. If any metric color is black #000000
+            if (row.MetricColors != null && row.MetricColors.Values.Any(IsBlackHex))
+                return true;
+
+            // 5. If RSRP or RSRQ sentinel indicates no signal
+            if (row.Rsrp.HasValue && (row.Rsrp.Value >= 100000 || row.Rsrp.Value <= -100000))
+                return true;
+            if (row.Rsrq.HasValue && (row.Rsrq.Value >= 100000 || row.Rsrq.Value <= -100000))
+                return true;
+
+            return false;
         }
 
         private static string? GetHexColorFromRows(List<WalkTestLogRow> rows, string headerUpper)
@@ -1700,6 +1801,7 @@ namespace SignalTracker.Controllers
         private static float? ClampKpiFloat(float? value, float min, float max)
         {
             if (!value.HasValue) return null;
+            if (value.Value >= 100000 || value.Value <= -100000) return null;
             return Math.Min(Math.Max(value.Value, min), max);
         }
 
@@ -3472,13 +3574,16 @@ namespace SignalTracker.Controllers
                 targetRows = rows;
             }
 
+            int total = targetRows.Count > 0 ? targetRows.Count : 1;
+
+            var noCoverageRows = targetRows.Where(r => IsNoCoverageRow(r, headerUpper)).ToList();
+            var coveredRows = targetRows.Where(r => !IsNoCoverageRow(r, headerUpper)).ToList();
+
             if (headerUpper == "RSRP" || headerUpper == "RSRQ" || headerUpper == "SINR" ||
                 headerUpper == "DL_THPT" || headerUpper == "UL_THPT" || headerUpper == "LTE_BLER" ||
                 headerUpper == "BLER" || headerUpper == "MOS" || headerUpper == "PUSCH_TX" || headerUpper == "EARFCN")
             {
-                int total = targetRows.Count > 0 ? targetRows.Count : 1;
-
-                foreach (var x in targetRows)
+                foreach (var x in coveredRows)
                 {
                     double? val = headerUpper switch
                     {
@@ -3539,30 +3644,43 @@ namespace SignalTracker.Controllers
                         match.Count++;
                     }
                 }
-
-                foreach (var item in result)
-                    item.Percentage = (item.Count * 100.0) / total;
             }
             else
             {
-                int total = targetRows.Count > 0 ? targetRows.Count : 1;
                 foreach (var item in result)
                 {
                     if (!string.IsNullOrWhiteSpace(item.Range.ValueMatch))
                     {
-                        item.Count = targetRows.Count(x =>
+                        item.Count = coveredRows.Count(x =>
                             (x.Band ?? "").Contains(item.Range.ValueMatch, StringComparison.OrdinalIgnoreCase) ||
                             (x.Earfcn ?? "").Contains(item.Range.ValueMatch, StringComparison.OrdinalIgnoreCase) ||
                             (x.VolteCall ?? "").Contains(item.Range.ValueMatch, StringComparison.OrdinalIgnoreCase));
                     }
                     else
                     {
-                        item.Count = targetRows.Count;
+                        item.Count = coveredRows.Count;
                     }
-
-                    item.Percentage = (item.Count * 100.0) / total;
                 }
             }
+
+            if (noCoverageRows.Count > 0)
+            {
+                var noCoverageRange = new ThresholdRange
+                {
+                    Display = "No Coverage",
+                    Label = "No Coverage",
+                    ValueMatch = "No Coverage",
+                    ColorHex = "#000000"
+                };
+                result.Add(new LegendStatRow
+                {
+                    Range = noCoverageRange,
+                    Count = noCoverageRows.Count
+                });
+            }
+
+            foreach (var item in result)
+                item.Percentage = (item.Count * 100.0) / total;
 
             return result;
         }
@@ -4178,10 +4296,13 @@ namespace SignalTracker.Controllers
                 }
                 var totalCount = targetRows.Count;
 
+                var noCoverageRows = targetRows.Where(r => IsNoCoverageRow(r, headerUpper)).ToList();
+                var coveredRows = targetRows.Where(r => !IsNoCoverageRow(r, headerUpper)).ToList();
+
                 for (int i = 0; i < uniqueVals.Count; i++)
                 {
                     var val = uniqueVals[i];
-                    var matchingRows = targetRows.Where(r =>
+                    var matchingRows = coveredRows.Where(r =>
                         string.Equals(headerUpper switch
                         {
                             "PCI" => r.Pci,
@@ -4232,6 +4353,16 @@ namespace SignalTracker.Controllers
 
                     var (r, g, b) = ParseHexColor(hexColor);
                     lines.Add((lineLabel, new Rgba32(r, g, b)));
+                }
+
+                if (noCoverageRows.Count > 0)
+                {
+                    int noCovCount = noCoverageRows.Count;
+                    double noCovPct = totalCount > 0 ? (noCovCount * 100.0 / totalCount) : 0;
+                    string noCovLabel = showSampleCount
+                        ? $"No Coverage  ({noCovCount} | {noCovPct:0.00}%)"
+                        : $"No Coverage  ({noCovPct:0.00}%)";
+                    lines.Add((noCovLabel, new Rgba32(0, 0, 0)));
                 }
 
                 if (lines.Count == 0)
