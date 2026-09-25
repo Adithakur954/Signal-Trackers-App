@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -62,7 +62,7 @@ namespace SignalTracker.Controllers
             "networklog:v17:*",
             "networklog:v18:*",
             "networklog:v19:*",
-            "networklog:v23:*",
+            "networklog:v27:*",
             "latlon:dist:*",
             "n78_simple_kpi:*",
             "n78_neighbours:*",
@@ -274,6 +274,10 @@ namespace SignalTracker.Controllers
                 await _redis.DeleteByPatternAsync("networklog:v20:*");
                 await _redis.DeleteByPatternAsync("networklog:v21:*");
                 await _redis.DeleteByPatternAsync("networklog:v22:*");
+                await _redis.DeleteByPatternAsync("networklog:v23:*");
+                await _redis.DeleteByPatternAsync("networklog:v24:*");
+                await _redis.DeleteByPatternAsync("networklog:v25:*");
+                await _redis.DeleteByPatternAsync("networklog:v26:*");
                 ObsoleteNetworkLogCachesInvalidated = true;
             }
             catch
@@ -6718,7 +6722,7 @@ private static object ToNetworkLogResponseObject(
 }
 
 // ---------------------------------------------------------
-// 1ï¸âƒ£ MAIN DATA (Full filtered fetch via EF Core)
+// 1Ã¯Â¸ÂÃ¢Æ’Â£ MAIN DATA (Full filtered fetch via EF Core)
 // ---------------------------------------------------------
 private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyEF(
     List<long> sessionIds, string? provider, MapFilter1 filters)
@@ -7105,7 +7109,7 @@ private async Task<Dictionary<string, object>> GetAppSummaryRaw(
         if (!parameters.ContainsKey(pName)) parameters.Add(pName, $"%{app.ToLower()}%");
     }
 
-    // âš¡ UPDATED QUERY: Uses GROUP_CONCAT to show ALL operators
+    // Ã¢Å¡Â¡ UPDATED QUERY: Uses GROUP_CONCAT to show ALL operators
     string sql = $@"
         SELECT 
             -- 0. App Name
@@ -7183,7 +7187,7 @@ private async Task<Dictionary<string, object>> GetAppSummaryRaw(
     return result;
 }
 //---------------------------------------------------
-// 3ï¸âƒ£ COMBINED STATS (Volume + IO + Sessions in ONE Query)
+// 3Ã¯Â¸ÂÃ¢Æ’Â£ COMBINED STATS (Volume + IO + Sessions in ONE Query)
 // ---------------------------------------------------------
 private async Task<CombinedStatsDto> GetCombinedStatsRaw(
     string connString, List<long> sessionIds, string? provider, MapFilter1 filters)
@@ -7450,7 +7454,7 @@ private string BuildNetworkLogCacheKey(
         : "no_project";
     string versionKey = NormalizeCacheKeyPart(dataVersion);
 
-    return $"networklog:v23:{GetProjectListCacheScope()}:{sortedSessionIds}:{providerKey}:{networkTypeKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
+    return $"networklog:v27:{GetProjectListCacheScope()}:{sortedSessionIds}:{providerKey}:{networkTypeKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
 }
 
 private static string CleanProviderDisplayName(string value)
@@ -7470,6 +7474,7 @@ private static void NormalizeNetworkLogRows(List<NetworkLogCacheRow> rows)
     {
         ApplyNetworkLogDownloadSize(row);
         ApplyNetworkLogExtraJsonFallbacks(row);
+        ApplyNetworkLogBsic(row);
         row.ta = NormalizeTimingAdvance(row.ta, row.tac, row.primary_cell_info_1);
         row.m_alpha_long = CleanProviderDisplayName(ResolvePreferredProviderName(row));
         row.provider = NormalizeNetworkLogProvider(row);
@@ -7516,6 +7521,66 @@ private static void ApplyNetworkLogExtraJsonFallbacks(NetworkLogCacheRow row)
         row.sinr ??= ToFloat(FirstJsonNumber(root, default, "disp_rssnr_db"));
         row.level ??= ToInt(FirstJsonNumber(root, default, "disp_level", "disp_overall_level"));
     }
+}
+
+
+private static void ApplyNetworkLogBsic(NetworkLogCacheRow row)
+{
+    if (!IsGsmNetworkLogRow(row))
+        return;
+
+    var bsic = ExtractBsicDecimal(row.primary_cell_info_1)
+        ?? ExtractBsicFromGeneric2GFields(row);
+    if (string.IsNullOrWhiteSpace(bsic))
+        return;
+
+    row.bsic = bsic;
+}
+
+private static bool IsGsmNetworkLogRow(NetworkLogCacheRow row)
+{
+    var text = string.Join(" ", row.network, row.band, row.primary_cell_info_1);
+    return Regex.IsMatch(text, @"\b(?:2G|GSM|GERAN|CellInfoGsm|CellIdentityGsm)\b", RegexOptions.IgnoreCase);
+}
+
+private static string? ExtractBsicDecimal(string? primaryCellInfo)
+{
+    if (string.IsNullOrWhiteSpace(primaryCellInfo))
+        return null;
+
+    var match = Regex.Match(primaryCellInfo, @"\b(?:mBsic|bsic)\s*[:=]\s*(0x[0-9A-Fa-f]+|\d+)", RegexOptions.IgnoreCase);
+    if (!match.Success)
+        return null;
+
+    return ConvertBsicToDecimal(match.Groups[1].Value.Trim());
+}
+
+private static string? ExtractBsicFromGeneric2GFields(NetworkLogCacheRow row)
+{
+    if (row.rsrq.HasValue && IsWholeNumber(row.rsrq.Value) && row.rsrq.Value is >= 0 and <= 63)
+        return ((int)Math.Round(row.rsrq.Value, MidpointRounding.AwayFromZero)).ToString(CultureInfo.InvariantCulture);
+
+    return null;
+}
+
+private static string? ConvertBsicToDecimal(string raw)
+{
+    try
+    {
+        var value = raw.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
+            ? Convert.ToInt32(raw[2..], 16)
+            : Convert.ToInt32(raw, CultureInfo.InvariantCulture);
+        return value is >= 0 and <= 63 ? value.ToString(CultureInfo.InvariantCulture) : null;
+    }
+    catch
+    {
+        return null;
+    }
+}
+
+private static bool IsWholeNumber(float value)
+{
+    return Math.Abs(value - MathF.Round(value)) < 0.0001f;
 }
 
 private static Dictionary<string, object?> ParseExtraJsonData(string? raw)
@@ -7839,13 +7904,12 @@ private static string? NormalizeTimingAdvance(string? currentTa, string? tac, st
     if (trimmed.Equals("2147483647", StringComparison.OrdinalIgnoreCase))
         return extracted ?? string.Empty;
 
-    if (trimmed.Equals(tac?.Trim(), StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(extracted))
-        return extracted;
+    if (trimmed.Equals(tac?.Trim(), StringComparison.OrdinalIgnoreCase))
+        return extracted ?? string.Empty;
 
     if (long.TryParse(trimmed, NumberStyles.Integer, CultureInfo.InvariantCulture, out var taValue)
-        && taValue > 1282
-        && !string.IsNullOrWhiteSpace(extracted))
-        return extracted;
+        && taValue > 1282)
+        return extracted ?? string.Empty;
 
     return trimmed;
 }
@@ -8235,6 +8299,7 @@ public class NetworkLogCacheRow
     public string m_alpha_long { get; set; } = "";
     public string provider { get; set; } = "";
     public string pci { get; set; } = "";
+    public string bsic { get; set; } = "";
     public float? rssi { get; set; }
     public float? rsrp { get; set; }
     public float? rsrq { get; set; }
@@ -8728,10 +8793,10 @@ public async Task<IActionResult> GetKpiDistribution(
     if (cached != null)
         return Ok(cached);
 
-    // ðŸ”¹ KPI â†’ SQL Expression Map (RSRP FIXED)
+    // Ã°Å¸â€Â¹ KPI Ã¢â€ â€™ SQL Expression Map (RSRP FIXED)
     var kpiMap = new Dictionary<string, (string expr, string column)>
     {
-        { "rsrp", ("ROUND(rsrp)", "rsrp") },      // âœ… FIXED
+        { "rsrp", ("ROUND(rsrp)", "rsrp") },      // Ã¢Å“â€¦ FIXED
         { "rsrq", ("ROUND(rsrq)", "rsrq") },
         { "sinr", ("ROUND(sinr,1)", "sinr") },
         { "mos",  ("ROUND(mos,1)", "mos") },
@@ -8773,7 +8838,7 @@ public async Task<IActionResult> GetKpiDistribution(
             .ToListAsync();
     }
 
-    // ðŸ”¹ SINGLE KPI
+    // Ã°Å¸â€Â¹ SINGLE KPI
     if (!string.IsNullOrWhiteSpace(kpi))
     {
         kpi = kpi.ToLower();
@@ -8794,7 +8859,7 @@ public async Task<IActionResult> GetKpiDistribution(
         return Ok(response);
     }
 
-    // ðŸ”¹ ALL KPIs
+    // Ã°Å¸â€Â¹ ALL KPIs
     var allData = new Dictionary<string, object>();
 
     foreach (var item in kpiMap)
@@ -8830,14 +8895,14 @@ public async Task<IActionResult> GetLatLonDistribution(
         return BadRequest("Invalid sessionIds");
 
     // ========================================
-    // ðŸ”‘ BUILD REDIS CACHE KEY
+    // Ã°Å¸â€â€˜ BUILD REDIS CACHE KEY
     // ========================================
     string cacheKey = $"latlon:dist:{GetProjectListCacheScope()}:{string.Join("-", sessionIdList)}";
 
     var totalStopwatch = System.Diagnostics.Stopwatch.StartNew();
 
     // ========================================
-    // ðŸ” TRY REDIS CACHE
+    // Ã°Å¸â€Â TRY REDIS CACHE
     // ========================================
     if (_redis != null && _redis.IsConnected)
     {
@@ -8860,12 +8925,12 @@ public async Task<IActionResult> GetLatLonDistribution(
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"âš ï¸ Redis read error: {SafeException.Get(ex)}");
+            Console.WriteLine($"Ã¢Å¡Â Ã¯Â¸Â Redis read error: {SafeException.Get(ex)}");
         }
     }
 
     // ========================================
-    // ðŸ—„ï¸ FETCH FROM DATABASE
+    // Ã°Å¸â€”â€žÃ¯Â¸Â FETCH FROM DATABASE
     // ========================================
     var conn = db.Database.GetDbConnection();
     bool shouldClose = false;
@@ -8956,7 +9021,7 @@ ORDER BY log_count DESC;
     };
 
     // ========================================
-    // ðŸ’¾ SAVE TO REDIS
+    // Ã°Å¸â€™Â¾ SAVE TO REDIS
     // ========================================
     if (_redis != null && _redis.IsConnected)
     {
@@ -8966,7 +9031,7 @@ ORDER BY log_count DESC;
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"âš ï¸ Redis write error: {SafeException.Get(ex)}");
+            Console.WriteLine($"Ã¢Å¡Â Ã¯Â¸Â Redis write error: {SafeException.Get(ex)}");
         }
     }
 
@@ -8996,7 +9061,7 @@ ORDER BY log_count DESC;
 //         db.Database.SetCommandTimeout(180);
 
 //         // ===============================
-//         // 1ï¸ Parse Session IDs
+//         // 1Ã¯Â¸Â Parse Session IDs
 //         // ===============================
 //         var sessionIdList = sessionIds
 //             .Split(',', StringSplitOptions.RemoveEmptyEntries)
@@ -9013,7 +9078,7 @@ ORDER BY log_count DESC;
 //         }
 
 //         // ===============================
-//         // 2ï¸ Indoor vs Outdoor Averages (DB LEVEL)
+//         // 2Ã¯Â¸Â Indoor vs Outdoor Averages (DB LEVEL)
 //         // ===============================
 //         var avgData = await db.tbl_network_log
 //             .AsNoTracking()
@@ -9051,7 +9116,7 @@ ORDER BY log_count DESC;
 //             ((outdoor.AvgMOS - indoor.AvgMOS) / outdoor.AvgMOS) * 100;
 
 //         // ===============================
-//         // 3ï¸ Degraded Indoor Locations
+//         // 3Ã¯Â¸Â Degraded Indoor Locations
 //         // ===============================
 //         var degradedIndoorLocations = await db.tbl_network_log
 //             .AsNoTracking()
@@ -9076,7 +9141,7 @@ ORDER BY log_count DESC;
 //             .ToListAsync();
 
 //         // ===============================
-//         // 4ï¸ 5G Indoor Weak Stability
+//         // 4Ã¯Â¸Â 5G Indoor Weak Stability
 //         // ===============================
 //         var indoor5GWeakStability = await db.tbl_network_log
 //             .AsNoTracking()
@@ -9103,12 +9168,12 @@ ORDER BY log_count DESC;
 //             .ToListAsync();
 
 //         // ===============================
-//         // 5ï¸ RESPONSE
+//         // 5Ã¯Â¸Â RESPONSE
 //         // ===============================
 //         return Ok(new
 //         {
 //             Status = 1,
-//             Message = "Indoorâ€“Outdoor Degradation (Session-wise)",
+//             Message = "IndoorÃ¢â‚¬â€œOutdoor Degradation (Session-wise)",
 //             SessionIds = sessionIdList,
 //             Summary = new
 //             {
@@ -9203,7 +9268,7 @@ SELECT
     p.sinr AS sinr,
     p.mos  AS mos,
 
-    -- ðŸ”¥ Throughput (VARCHAR â†’ DOUBLE FIX)
+    -- Ã°Å¸â€Â¥ Throughput (VARCHAR Ã¢â€ â€™ DOUBLE FIX)
     CAST(NULLIF(p.dl_tpt, '') AS DECIMAL(12,4)) AS dl_tpt,
     CAST(NULLIF(p.ul_tpt, '') AS DECIMAL(12,4)) AS ul_tpt,
 
@@ -9430,7 +9495,7 @@ public async Task<IActionResult> GetN78Neighbours([FromQuery] string session_ids
                 });
             }
         }
-        catch { /* Redis unavailable â€” fall through to DB */ }
+        catch { /* Redis unavailable Ã¢â‚¬â€ fall through to DB */ }
     }
 
     // ================= 3. RAW SQL =================
@@ -9596,7 +9661,7 @@ public async Task<IActionResult> GetN78Neighbours([FromQuery] string session_ids
     if (_redis != null && _redis.IsConnected)
     {
         try { await _redis.SetObjectAsync(cacheKey, data, ttlSeconds: 300); }
-        catch { /* best-effort cache â€” don't fail the request */ }
+        catch { /* best-effort cache Ã¢â‚¬â€ don't fail the request */ }
     }
 
     Response.Headers["X-Cache"] = "MISS";
@@ -10604,11 +10669,11 @@ public async Task<IActionResult> GetNeighbourLogsByDateRange(
         if (endDateTime.HasValue)
             baseQuery = baseQuery.Where(x => x.timestamp <= endDateTime.Value);
 
-        // ðŸ”‘ KEYSET PAGINATION
+        // Ã°Å¸â€â€˜ KEYSET PAGINATION
         if (filters.CursorTs.HasValue)
             baseQuery = baseQuery.Where(x => x.timestamp > filters.CursorTs.Value);
 
-        // ðŸ”’ 5G NR BAND FILTER (n78 / n*)
+        // Ã°Å¸â€â€™ 5G NR BAND FILTER (n78 / n*)
         baseQuery = baseQuery.Where(x => x.band != null && EF.Functions.Like(x.band.ToLower(), "n%"));
 
         if (!string.IsNullOrWhiteSpace(filters.Provider))
@@ -11257,7 +11322,7 @@ public async Task<IActionResult> GetTotalUsageTime(
         const int MAX_GAP_SECONDS = 300;
 
         // =====================================
-        // 1ï¸ Date + Time combine
+        // 1Ã¯Â¸Â Date + Time combine
         // =====================================
         var startDateTime = filter.StartDate.Date
             .Add(filter.StartTime ?? TimeSpan.Zero);
@@ -11278,7 +11343,7 @@ public async Task<IActionResult> GetTotalUsageTime(
             return Ok(cached);
 
         // =====================================
-        // 2ï¸ Base query (PRIMARY only)
+        // 2Ã¯Â¸Â Base query (PRIMARY only)
         // =====================================
         var baseQuery = db.tbl_network_log
             .AsNoTracking()
@@ -11326,7 +11391,7 @@ public async Task<IActionResult> GetTotalUsageTime(
         }
 
         // =====================================
-        // 3ï¸ TIME CALCULATION
+        // 3Ã¯Â¸Â TIME CALCULATION
         // =====================================
         double totalSeconds = 0;
         var breakdown = new Dictionary<string, double>();
@@ -11391,7 +11456,7 @@ public async Task<IActionResult> GetTotalUsageTime(
         }
 
         // =====================================
-        // 4ï¸ FORMAT BREAKDOWN RESPONSE
+        // 4Ã¯Â¸Â FORMAT BREAKDOWN RESPONSE
         // =====================================
         var breakdownList = breakdown.Select(kv =>
         {
@@ -11526,7 +11591,7 @@ private async Task<IActionResult> GetIndoorOutdoorSessionAnalyticsCore(IndoorOut
         const int MAX_GAP_SECONDS = 300;
 
         // =============================
-        // 1ï¸ VALIDATION
+        // 1Ã¯Â¸Â VALIDATION
         // =============================
         if (filter == null)
             return BadRequest("SessionIds are required");
@@ -11559,7 +11624,7 @@ private async Task<IActionResult> GetIndoorOutdoorSessionAnalyticsCore(IndoorOut
             return Ok(cached);
 
         // =============================
-        // 2ï¸ BASE QUERY (PRIMARY ONLY)
+        // 2Ã¯Â¸Â BASE QUERY (PRIMARY ONLY)
         // =============================
         var query = db.tbl_network_log
             .AsNoTracking()
@@ -11583,7 +11648,7 @@ private async Task<IActionResult> GetIndoorOutdoorSessionAnalyticsCore(IndoorOut
         }
 
         // =============================
-        // 3ï¸ FETCH PRIMARY DATA
+        // 3Ã¯Â¸Â FETCH PRIMARY DATA
         // =============================
         var logs = await query
             .OrderBy(x => x.session_id)
@@ -11619,7 +11684,7 @@ private async Task<IActionResult> GetIndoorOutdoorSessionAnalyticsCore(IndoorOut
         }
 
         // =============================
-        // 4ï¸ HELPERS
+        // 4Ã¯Â¸Â HELPERS
         // =============================
         float? ParseFloat(string? v)
             => float.TryParse(v, out var f) ? f : null;
@@ -11631,7 +11696,7 @@ private async Task<IActionResult> GetIndoorOutdoorSessionAnalyticsCore(IndoorOut
         }
 
         // =============================
-        // 5ï¸ RESULT STRUCTURE
+        // 5Ã¯Â¸Â RESULT STRUCTURE
         // =============================
         var result = new
         {
@@ -11641,7 +11706,7 @@ private async Task<IActionResult> GetIndoorOutdoorSessionAnalyticsCore(IndoorOut
         };
 
         // =============================
-        // 6ï¸ GROUP BY INDOOR / OUTDOOR
+        // 6Ã¯Â¸Â GROUP BY INDOOR / OUTDOOR
         // =============================
         var ioGroups = logs
             .Where(x => !string.IsNullOrWhiteSpace(x.indoor_outdoor))
@@ -11652,7 +11717,7 @@ private async Task<IActionResult> GetIndoorOutdoorSessionAnalyticsCore(IndoorOut
             var ioList = new List<object>();
 
             // =============================
-            // 7ï¸ GROUP BY OPERATOR + TECHNOLOGY
+            // 7Ã¯Â¸Â GROUP BY OPERATOR + TECHNOLOGY
             // =============================
             var opTechGroups = ioGroup.GroupBy(x =>
             {
@@ -11760,7 +11825,7 @@ private async Task<IActionResult> GetIndoorOutdoorSessionAnalyticsCore(IndoorOut
         }
 
         // =============================
-        // 8ï¸ FINAL RESPONSE
+        // 8Ã¯Â¸Â FINAL RESPONSE
         // =============================
         await SetMapViewCacheAsync(cacheKey, result);
         return Ok(result);
@@ -12531,9 +12596,9 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
     var idxRealTxPower = Col("real_transmit_power_of_resource");
     var idxReferenceSignalPower = Col("reference_signal_power");
 
-    var idxMTilt    = Col("m_tilt");     // âœ… ADDED
-    var idxETilt    = Col("e_tilt");     // âœ… ADDED
-    var idxHeight   = Col("height");     // âœ… ADDED
+    var idxMTilt    = Col("m_tilt");     // Ã¢Å“â€¦ ADDED
+    var idxETilt    = Col("e_tilt");     // Ã¢Å“â€¦ ADDED
+    var idxHeight   = Col("height");     // Ã¢Å“â€¦ ADDED
 
     var conn = db.Database.GetDbConnection();
     if (conn.State != System.Data.ConnectionState.Open)
@@ -16453,7 +16518,7 @@ public async Task<IActionResult> GetNeighboursForPrimary(
                     .ToList();
 
                 if (!latLonGroups.Any())
-                    return null; // no lat/lon match â†’ no collision
+                    return null; // no lat/lon match Ã¢â€ â€™ no collision
 
                 return new
                 {
@@ -17503,7 +17568,7 @@ private async Task<Dictionary<int, Dictionary<int, double>>> GetPciDistributionG
         }
     }
 
-    // 3. ðŸ§® CALCULATE GLOBAL PERCENTAGE (The "Excel" Logic)
+    // 3. Ã°Å¸Â§Â® CALCULATE GLOBAL PERCENTAGE (The "Excel" Logic)
     var result = new Dictionary<int, Dictionary<int, double>>();
 
     // Step A: Calculate Grand Total (Total rows in this session filter)
@@ -18867,6 +18932,10 @@ public class LocationStats
         }
     }
 }
+
+
+
+
 
 
 
