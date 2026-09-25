@@ -216,6 +216,23 @@ public IActionResult SaveThreshold([FromBody] Thresholds? model)
         EnsureMacDetailThresholdColumns();
         _thresholdDefaults.EnsureForUserAsync(uid).GetAwaiter().GetResult();
 
+        // Report Acceptance is per technology (version 2). A version-2 document that is
+        // wrong is rejected with a message; anything else (an old browser tab still sending
+        // the previous flat shape) is ignored so the stored values are kept.
+        if (ReportAcceptanceDefaults.LooksCurrent(model.report_acceptance_json))
+        {
+            if (!ReportAcceptanceDefaults.TryValidate(model.report_acceptance_json, out var acceptanceError))
+            {
+                response.Status = 0;
+                response.Message = "Report Acceptance is invalid: " + acceptanceError;
+                return Ok(response);
+            }
+        }
+        else
+        {
+            model.report_acceptance_json = null;
+        }
+
         Thresholds? existing = null;
 
         // Prefer explicit row id when client sends it (prevents updating stale/older rows).
