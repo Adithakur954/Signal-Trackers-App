@@ -5266,28 +5266,20 @@ public class AvailablePolygonsResponse
             TimeSpan? eventTime)
         {
             var upper = text.ToUpperInvariant();
-            if (HasAny(upper, "LTE IMS", "VOLTE", "IMS"))
-                return "LTE IMS";
-            if (HasAny(upper, "NR", "5G"))
-                return "5G";
-            if (HasAny(upper, "LTE", "4G"))
-                return "LTE";
-            if (HasAny(upper, "WCDMA", "UMTS", "3G"))
-                return "3G";
-            if (HasAny(upper, "GSM", "2G"))
-                return "2G";
+            var directTechnology = ResolveDiagnosticRadioTechnology(upper);
+            if (!IsUnknownDiagnosticCategory(directTechnology))
+                return directTechnology;
 
             var l3Text = index.Find(sessionId, eventTime)?.Text.ToUpperInvariant() ?? string.Empty;
-            if (HasAny(l3Text, "NR-RRC", " 5G", "NR "))
-                return "5G";
-            if (HasAny(l3Text, "LTE", "LTE-RRC", "E-UTRA"))
-                return "LTE";
-            if (HasAny(l3Text, "IMS"))
-                return "LTE IMS";
+            var contextTechnology = ResolveDiagnosticRadioTechnology(l3Text);
+            if (!IsUnknownDiagnosticCategory(contextTechnology))
+                return contextTechnology;
+
+            if (HasAny(upper, "LTE IMS", "VOLTE", "IMS", "SIP"))
+                return "4G LTE";
 
             return "Unknown";
         }
-
         private static string ResolveDiagnosticCallTechnologyFromL3(
             IReadOnlyList<DiagnosticL3Row> windowRows,
             IReadOnlyList<DiagnosticL3Row> allL3Rows,
@@ -5327,19 +5319,50 @@ public class AvailablePolygonsResponse
                 return "Unknown";
 
             var text = string.Join(" ", rows.Select(row => row.Text)).ToUpperInvariant();
-            if (HasAny(text, "NR-RRC", "NR RRC", "NR_", "NR ", " 5G", "5G "))
-                return "5G";
-            if (HasAny(text, "LTE IMS", "VOLTE"))
-                return "LTE IMS";
-            if (HasAny(text, "LTE-RRC", "LTE RRC", "E-UTRA", "EUTRA", "LTE", "4G"))
-                return "LTE";
-            if (HasAny(text, "WCDMA", "UMTS", "3G"))
-                return "3G";
-            if (HasAny(text, "GSM", "GERAN", "2G"))
-                return "2G";
-            if (HasAny(text, "IMS"))
-                return "LTE IMS";
+            var technology = ResolveDiagnosticRadioTechnology(text);
+            if (!IsUnknownDiagnosticCategory(technology))
+                return technology;
+
+            if (HasAny(text, "LTE IMS", "VOLTE", "IMS", "SIP"))
+                return "4G LTE";
+
             return "Unknown";
+        }
+
+        private static string ResolveDiagnosticRadioTechnology(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return "Unknown";
+
+            var upper = text.ToUpperInvariant();
+            if (HasAny(upper, "NR-RRC", "NR RRC", "NR_RRC") || Regex.IsMatch(upper, @"(^|[^A-Z0-9])5G([^A-Z0-9]|$)"))
+                return "5G NSA / NR";
+
+            if (HasAny(upper, "LTE ANCHOR", "LTE-ANCHOR", "LTE_ANCHOR", "ENDC", "EN-DC", "E-UTRA-NR", "EVENTB1-NR", "NR-R15", "MNR", "NSA"))
+                return "4G LTE Anchor NSA";
+
+            if (HasAny(upper, "LTE-RRC", "LTE RRC", "E-UTRA", "EUTRA", "LTE", "4G"))
+                return "4G LTE";
+
+            if (HasAny(upper, "WCDMA", "UMTS", "UTRAN", "HSPA", "3G"))
+                return "3G";
+
+            if (HasExplicit2GDiagnosticTechnology(upper))
+                return "2G";
+
+            return "Unknown";
+        }
+        private static bool HasExplicit2GDiagnosticTechnology(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return false;
+
+            var upper = text.ToUpperInvariant();
+
+            // Do not classify generic words like "2G", "GSM", "RxLev", or "RxQual" as L3 technology.
+            // They can appear in CSV headers, display fields, Android properties, or KPI labels.
+            // Only explicit 2G signalling/RAT protocol terms should create a 2G technology bucket.
+            return Regex.IsMatch(upper, @"(^|[^A-Z0-9])(GERAN|GSM\s+RR|GSM-RR|LAPDM|LAPD-M|SDCCH|GPRS|EDGE)([^A-Z0-9]|$)");
         }
 
         private static bool HasAny(string text, params string[] terms)
