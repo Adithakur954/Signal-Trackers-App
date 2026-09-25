@@ -85,6 +85,7 @@ public L3EventController(
         }
 
         [HttpGet("GetDiagnosticExcelRows")]
+        [HttpGet("GetDiagnosticMapRows")]
         public async Task<IActionResult> GetDiagnosticExcelRows(
             [FromQuery] int? sessionId = null,
             [FromQuery] string? sessionIds = null,
@@ -94,18 +95,6 @@ public L3EventController(
         {
             var denied = await ValidateDiagnosticAccessAsync(sessionId, sessionIds, sessionIdsAlt, uploadId, HttpContext.RequestAborted);
             return denied ?? await CreateMapViewController().GetDiagnosticExcelRows(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
-        }
-
-        [HttpGet("GetDiagnosticMapRows")]
-        public async Task<IActionResult> GetDiagnosticMapRows(
-            [FromQuery] int? sessionId = null,
-            [FromQuery] string? sessionIds = null,
-            [FromQuery(Name = "session_ids")] string? sessionIdsAlt = null,
-            [FromQuery] int? uploadId = null,
-            [FromQuery] int take = 20000)
-        {
-            var denied = await ValidateDiagnosticAccessAsync(sessionId, sessionIds, sessionIdsAlt, uploadId, HttpContext.RequestAborted);
-            return denied ?? await CreateMapViewController().GetDiagnosticMapRows(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
         }
 
         [HttpGet("GetDiagnosticCallSummaryOnly")]

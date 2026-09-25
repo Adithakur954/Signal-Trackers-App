@@ -2478,6 +2478,7 @@ public async Task<IActionResult> DeleteAvailablePolygon(
         }
 
         [HttpGet("GetDiagnosticExcelRows")]
+        [HttpGet("GetDiagnosticMapRows")]
         public async Task<IActionResult> GetDiagnosticExcelRows(
             [FromQuery] int? sessionId = null,
             [FromQuery] string? sessionIds = null,
@@ -2508,46 +2509,6 @@ public async Task<IActionResult> DeleteAvailablePolygon(
             catch (Exception ex)
             {
                 return StatusCode(500, new { status = 0, message = "An error occurred while fetching diagnostic rows.", details = SafeException.Get(ex) });
-            }
-        }
-
-        public async Task<IActionResult> GetDiagnosticMapRows(
-            int? sessionId = null,
-            string? sessionIds = null,
-            string? sessionIdsAlt = null,
-            int? uploadId = null,
-            int take = 20000)
-        {
-            try
-            {
-                var request = ParseDiagnosticQuery(sessionId, sessionIds, sessionIdsAlt, uploadId, take);
-                if (request.Error != null)
-                    return request.Error;
-
-                var conn = await OpenDiagnosticConnectionAsync();
-                var events = await LoadDiagnosticEventRowsAsync(conn, request.SessionIds, request.UploadId, request.Take);
-                var l3Rows = await LoadDiagnosticL3RowsAsync(conn, request.SessionIds, request.UploadId, request.Take);
-                var calls = BuildDiagnosticCallRows(events, l3Rows);
-                var rows = BuildDiagnosticTimelineRows(events, l3Rows, calls);
-                var networkVoiceRows = await LoadDiagnosticVoLteMapRowsAsync(conn, request.SessionIds, request.UploadId, request.Take);
-                rows.AddRange(networkVoiceRows);
-                rows = rows
-                    .OrderBy(row => row.SessionId ?? 0)
-                    .ThenBy(row => DateTime.TryParse(row.Timestamp, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var timestamp) ? timestamp : DateTime.MaxValue)
-                    .ThenBy(row => row.SourceId)
-                    .ToList();
-
-                return Json(new
-                {
-                    status = 1,
-                    count = rows.Count,
-                    rows,
-                    calls = BuildFrontendDiagnosticCalls(calls, rows)
-                });
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, new { status = 0, message = "An error occurred while fetching diagnostic map rows.", details = SafeException.Get(ex) });
             }
         }
 
@@ -3302,108 +3263,6 @@ public class AvailablePolygonsResponse
             return value == null || value == DBNull.Value
                 ? 0
                 : Convert.ToInt32(value, CultureInfo.InvariantCulture);
-        }
-
-        private async Task<List<DiagnosticTimelineRow>> LoadDiagnosticVoLteMapRowsAsync(
-            DbConnection conn,
-            IReadOnlyList<int> requestedSessionIds,
-            int? uploadId,
-            int take)
-        {
-            var rows = new List<DiagnosticTimelineRow>();
-            if (!await DiagnosticTableExistsAsync(conn, "tbl_network_log")
-                || !await DiagnosticColumnExistsAsync(conn, "tbl_network_log", "volte_call")
-                || !await DiagnosticColumnExistsAsync(conn, "tbl_network_log", "lat")
-                || !await DiagnosticColumnExistsAsync(conn, "tbl_network_log", "lon"))
-                return rows;
-
-            var sessionIds = requestedSessionIds.ToList();
-            if (sessionIds.Count == 0 && uploadId.HasValue)
-            {
-                var hasHistory = await DiagnosticTableExistsAsync(conn, "tbl_l3_event_history");
-                await using var resolve = conn.CreateCommand();
-                resolve.CommandText = BuildNetworkDashboardSessionSql(resolve, requestedSessionIds, uploadId, hasHistory);
-                await using var reader = await resolve.ExecuteReaderAsync(HttpContext.RequestAborted);
-                while (await reader.ReadAsync(HttpContext.RequestAborted))
-                    sessionIds.Add(Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture));
-            }
-
-            if (sessionIds.Count == 0)
-                return rows;
-
-            var hasTimestamp = await DiagnosticColumnExistsAsync(conn, "tbl_network_log", "timestamp");
-            var hasId = await DiagnosticColumnExistsAsync(conn, "tbl_network_log", "id");
-            var hasSessionId = await DiagnosticColumnExistsAsync(conn, "tbl_network_log", "session_id");
-            if (!hasSessionId)
-                return rows;
-
-            await using var cmd = conn.CreateCommand();
-            var names = new List<string>();
-            AddParams(cmd, "mapVoiceSession", sessionIds, names);
-            AddParam(cmd, "@mapVoiceTake", take);
-            cmd.CommandTimeout = 180;
-            cmd.CommandText = $@"
-                SELECT {(hasId ? "id" : "0")}, session_id,
-                       {(hasTimestamp ? "timestamp" : "NULL")}, lat, lon,
-                       COALESCE(NULLIF(TRIM(CAST(volte_call AS CHAR)), ''), '<blank>')
-                FROM tbl_network_log
-                WHERE session_id IN ({string.Join(", ", names)})
-                  AND NULLIF(TRIM(CAST(volte_call AS CHAR)), '') IS NOT NULL
-                  AND lat IS NOT NULL AND lon IS NOT NULL
-                ORDER BY {(hasTimestamp ? "timestamp" : hasId ? "id" : "session_id")}
-                LIMIT @mapVoiceTake;";
-
-            await using var rowReader = await cmd.ExecuteReaderAsync(HttpContext.RequestAborted);
-            while (await rowReader.ReadAsync(HttpContext.RequestAborted))
-            {
-                var id = ReadInt64(rowReader, 0) ?? rows.Count + 1;
-                var rowSessionId = ReadInt32(rowReader, 1);
-                DateTime? timestamp = null;
-                if (!rowReader.IsDBNull(2))
-                {
-                    try { timestamp = Convert.ToDateTime(rowReader.GetValue(2), CultureInfo.InvariantCulture); }
-                    catch { /* Keep the status sample even if its optional timestamp is malformed. */ }
-                }
-                var latitude = ReadDouble(rowReader, 3);
-                var longitude = ReadDouble(rowReader, 4);
-                var volteValue = ReadString(rowReader, 5) ?? "";
-                var rawMessage = $"volte_call = {volteValue}";
-                var timestampLabel = timestamp?.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) ?? "";
-
-                rows.Add(new DiagnosticTimelineRow
-                {
-                    Id = $"network-volte-{rowSessionId}-{id}",
-                    SourceType = "event",
-                    Type = "event",
-                    SourceId = id,
-                    SessionId = rowSessionId,
-                    SourceFile = "Network Log",
-                    SourceIndex = id <= int.MaxValue ? (int)id : null,
-                    TimestampLabel = timestampLabel,
-                    Timestamp = timestamp?.ToString("O", CultureInfo.InvariantCulture),
-                    TimeOfDaySeconds = timestamp?.TimeOfDay.TotalSeconds,
-                    Category = "Network Log",
-                    SourceCategory = "Network Log",
-                    Domain = "Voice",
-                    Title = "VoLTE Network Status",
-                    OfficialName = "VoLTE Network Status",
-                    Message = "VoLTE Network Status",
-                    Summary = rawMessage,
-                    RawMessage = rawMessage,
-                    OriginSource = "tbl_network_log.volte_call",
-                    Severity = "info",
-                    Technology = "4G LTE",
-                    Interface = "Network Log",
-                    Protocol = "VoLTE",
-                    Procedure = "VoLTE Network Status",
-                    ServiceIndicators = new List<string> { "VoLTE" },
-                    EventKey = "VOLTE_NETWORK_STATUS",
-                    Latitude = latitude,
-                    Longitude = longitude
-                });
-            }
-
-            return rows;
         }
 
         private static string BuildDiagnosticFilterSql(DbCommand cmd, IReadOnlyList<int> sessionIds, int? uploadId)
