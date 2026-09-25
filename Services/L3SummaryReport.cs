@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml;
@@ -161,29 +161,40 @@ public static class L3SummaryReportBuilder
         report.Kpis.Add(new("ENDC Setup SR", Missing, "No correlated ENDC setup attempt/outcome calculation is available from this report."));
 
         var l3 = messages.Where(m => m.Source.Equals("l3", StringComparison.OrdinalIgnoreCase)).ToArray();
-        foreach (var group in l3.GroupBy(m => m.Technology))
+        foreach (var group in l3.GroupBy(m => string.IsNullOrWhiteSpace(m.Technology) ? "Unknown" : m.Technology))
         {
-            var prefix = group.Key + " ";
+            var technology = string.IsNullOrWhiteSpace(group.Key) ? "Unknown" : group.Key;
             var reports = group.Where(m => Has(m.Message, @"meas(?:urement)?\s*report")).ToArray();
-            foreach (var evt in new[] { "A1", "A2", "A3", "A4", "A5", "A6", "B1", "B2" })
-                report.Mobility.Add(new(prefix + evt + " measurement reports", reports.Count(m =>
-                    Has(m.Detail, @"\b(?:Measurement\s+Event|eventId)\s*[:=]\s*" + evt + @"\b")).ToString(Inv)));
-            report.Mobility.Add(new(prefix + "Total measurement reports", reports.Length.ToString(Inv)));
             var reconfig = group.Count(m => Has(m.Message, @"reconfig(?:uration)?\b") && !Has(m.Message, "complete"));
             var complete = group.Count(m => Has(m.Message, @"reconfig(?:uration)?\s*complete\b"));
-            report.Mobility.Add(new(prefix + "RRC Reconfiguration", reconfig.ToString(Inv)));
-            report.Mobility.Add(new(prefix + "RRC Reconfiguration Complete", complete.ToString(Inv)));
-            // These are message observations, not correlated request/response pairs.
-            // Show a bounded observation ratio only when the counts are mathematically
-            // valid; never expose a misleading value above 100%.
-            var observationRatio = reconfig > 0 && complete <= reconfig
-                ? Ratio(complete, reconfig)
-                : Missing;
-            var ratioNote = reconfig > 0 && complete <= reconfig
-                ? "Bounded message-observation ratio; it is not a correlated procedure success rate."
-                : "Not available: setup count is zero or completion observations exceed setup observations.";
-            report.Mobility.Add(new(prefix + "Observed completion count ratio", observationRatio, ratioNote));
-            report.Mobility.Add(new(prefix + "Paging messages", group.Count(m => Has(m.Message, @"\bpaging\b")).ToString(Inv)));
+            var paging = group.Count(m => Has(m.Message, @"\bpaging\b"));
+            var isUnknown = technology.Equals("Unknown", StringComparison.OrdinalIgnoreCase);
+            if (isUnknown && reports.Length == 0 && reconfig == 0 && complete == 0 && paging == 0)
+                continue;
+
+            var prefix = isUnknown ? "Unclassified " : technology + " ";
+            foreach (var evt in new[] { "A1", "A2", "A3", "A4", "A5", "A6", "B1", "B2" })
+            {
+                var count = reports.Count(m => Has(m.Detail, @"\b(?:Measurement\s+Event|eventId)\s*[:=]\s*" + evt + @"\b"));
+                if (!isUnknown || count > 0)
+                    report.Mobility.Add(new(prefix + evt + " measurement reports", count.ToString(Inv)));
+            }
+            if (!isUnknown || reports.Length > 0)
+                report.Mobility.Add(new(prefix + "Total measurement reports", reports.Length.ToString(Inv)));
+            if (!isUnknown || reconfig > 0 || complete > 0)
+            {
+                report.Mobility.Add(new(prefix + "RRC Reconfiguration", reconfig.ToString(Inv)));
+                report.Mobility.Add(new(prefix + "RRC Reconfiguration Complete", complete.ToString(Inv)));
+                var observationRatio = reconfig > 0 && complete <= reconfig
+                    ? Ratio(complete, reconfig)
+                    : Missing;
+                var ratioNote = reconfig > 0 && complete <= reconfig
+                    ? "Bounded message-observation ratio; it is not a correlated procedure success rate."
+                    : "Not available: setup count is zero or completion observations exceed setup observations.";
+                report.Mobility.Add(new(prefix + "Observed completion count ratio", observationRatio, ratioNote));
+            }
+            if (!isUnknown || paging > 0)
+                report.Mobility.Add(new(prefix + "Paging messages", paging.ToString(Inv)));
         }
         var rach = messages.Where(m => m.Source.Equals("event", StringComparison.OrdinalIgnoreCase)
             && Has(m.Message, @"\bRACH\b") && Has(m.Detail, @"\bhandover\b")).ToArray();
@@ -225,7 +236,7 @@ public static class L3SummaryReportBuilder
     private static double? LatestNumber(string text)
     {
         // Never fall back to the old value when the new value is an unavailable sentinel.
-        var latest = Regex.Split(text, @"->|→").Last();
+        var latest = Regex.Split(text, @"->|â†’").Last();
         var match = Number.Match(latest);
         return match.Success && double.TryParse(match.Value, NumberStyles.Float, Inv, out var value) ? value : null;
     }
@@ -274,7 +285,7 @@ public static class L3SummaryReportBuilder
         {
             var k = report.Kpis.ElementAtOrDefault(i); var m = report.Mobility.ElementAtOrDefault(i); var p = report.Parameters.ElementAtOrDefault(i);
             dashboard.Rows.Add(Data(k?.Parameter, k?.Result, k == null ? "" : $"Source: {k.Source}. {k.Observation}", "", m?.Parameter,
-                m == null ? "" : m.Result + (m.Observation.Length > 0 ? " — " + m.Observation : ""), "", p?.Parameter, p == null ? "" : p.Result + " [Source: " + p.Source + "]"));
+                m == null ? "" : m.Result + (m.Observation.Length > 0 ? " â€” " + m.Observation : ""), "", p?.Parameter, p == null ? "" : p.Result + " [Source: " + p.Source + "]"));
         }
         var messages = Sheet("Sheet Messages", [24, 16, 24, 24, 48, 120]);
         messages.Rows.Add(XlsxRow.Data("Captured or decoded detail. Long details continue on additional rows with repeated message columns."));
