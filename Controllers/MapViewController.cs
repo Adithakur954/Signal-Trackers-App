@@ -62,7 +62,7 @@ namespace SignalTracker.Controllers
             "networklog:v17:*",
             "networklog:v18:*",
             "networklog:v19:*",
-            "networklog:v20:*",
+            "networklog:v23:*",
             "latlon:dist:*",
             "n78_simple_kpi:*",
             "n78_neighbours:*",
@@ -271,6 +271,9 @@ namespace SignalTracker.Controllers
                 await _redis.DeleteByPatternAsync("networklog:v16:*");
                 await _redis.DeleteByPatternAsync("networklog:v17:*");
                 await _redis.DeleteByPatternAsync("networklog:v19:*");
+                await _redis.DeleteByPatternAsync("networklog:v20:*");
+                await _redis.DeleteByPatternAsync("networklog:v21:*");
+                await _redis.DeleteByPatternAsync("networklog:v22:*");
                 ObsoleteNetworkLogCachesInvalidated = true;
             }
             catch
@@ -7588,7 +7591,7 @@ private string BuildNetworkLogCacheKey(
         : "no_project";
     string versionKey = NormalizeCacheKeyPart(dataVersion);
 
-    return $"networklog:v20:{GetProjectListCacheScope()}:{sortedSessionIds}:{providerKey}:{networkTypeKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
+    return $"networklog:v23:{GetProjectListCacheScope()}:{sortedSessionIds}:{providerKey}:{networkTypeKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
 }
 
 private static string CleanProviderDisplayName(string value)
@@ -7607,6 +7610,8 @@ private static void NormalizeNetworkLogRows(List<NetworkLogCacheRow> rows)
     foreach (var row in rows)
     {
         ApplyNetworkLogDownloadSize(row);
+        ApplyNetworkLogExtraJsonFallbacks(row);
+        row.ta = NormalizeTimingAdvance(row.ta, row.tac, row.primary_cell_info_1);
         row.m_alpha_long = CleanProviderDisplayName(ResolvePreferredProviderName(row));
         row.provider = NormalizeNetworkLogProvider(row);
         row.band = NormalizeNetworkLogBand(row.band);
@@ -7634,6 +7639,75 @@ private static void ApplyNetworkLogDownloadSize(NetworkLogCacheRow row)
     row.downloaded_file_size_5g_mb = BytesToMb(metrics.NrBytes);
 }
 
+
+private static void ApplyNetworkLogExtraJsonFallbacks(NetworkLogCacheRow row)
+{
+    row.extra_json_data = ParseExtraJsonData(row.extra_json);
+    if (row.extra_json_data.Count == 0 || !TryParseJsonObject(row.extra_json, out var doc))
+        return;
+
+    using (doc)
+    {
+        var root = doc.RootElement;
+        row.dl_tpt = PreferExistingOrJson(row.dl_tpt, root, "ps_app_dl_mbps", "wire_dl_mbps", "pdcp_dl_mbps", "lte_mac_dl_mbps", "lte_mac_dl_delivered_mbps");
+        row.ul_tpt = PreferExistingOrJson(row.ul_tpt, root, "ps_app_ul_mbps", "wire_ul_mbps", "lte_mac_ul_mbps", "lte_mac_ul_delivered_mbps");
+        row.rsrp ??= ToFloat(FirstJsonNumber(root, default, "disp_rsrp_dbm", "disp_dbm"));
+        row.rsrq ??= ToFloat(FirstJsonNumber(root, default, "disp_rsrq_db"));
+        row.rssi ??= ToFloat(FirstJsonNumber(root, default, "disp_rssi_dbm"));
+        row.sinr ??= ToFloat(FirstJsonNumber(root, default, "disp_rssnr_db"));
+        row.level ??= ToInt(FirstJsonNumber(root, default, "disp_level", "disp_overall_level"));
+    }
+}
+
+private static Dictionary<string, object?> ParseExtraJsonData(string? raw)
+{
+    var values = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+    if (!TryParseJsonObject(raw, out var doc))
+        return values;
+
+    using (doc)
+    {
+        foreach (var property in doc.RootElement.EnumerateObject())
+            values[property.Name] = JsonElementToPlainValue(property.Value);
+    }
+
+    return values;
+}
+
+private static object? JsonElementToPlainValue(JsonElement value)
+{
+    return value.ValueKind switch
+    {
+        JsonValueKind.String => value.GetString(),
+        JsonValueKind.Number => value.TryGetInt64(out var longValue) ? longValue : value.TryGetDouble(out var doubleValue) ? doubleValue : value.ToString(),
+        JsonValueKind.True => true,
+        JsonValueKind.False => false,
+        JsonValueKind.Null => null,
+        JsonValueKind.Object => value.EnumerateObject().ToDictionary(p => p.Name, p => JsonElementToPlainValue(p.Value), StringComparer.OrdinalIgnoreCase),
+        JsonValueKind.Array => value.EnumerateArray().Select(JsonElementToPlainValue).ToList(),
+        _ => value.ToString()
+    };
+}
+
+private static string PreferExistingOrJson(string? current, JsonElement root, params string[] keys)
+{
+    if (double.TryParse(current, NumberStyles.Float, CultureInfo.InvariantCulture, out var existing) && existing > 0)
+        return current ?? "";
+
+    var value = FirstPositiveJsonNumber(root, default, keys);
+    return value.HasValue ? value.Value.ToString("0.###", CultureInfo.InvariantCulture) : current ?? "";
+}
+
+private static float? ToFloat(double? value)
+{
+    return value.HasValue ? (float)value.Value : null;
+}
+
+private static int? ToInt(double? value)
+{
+    return value.HasValue ? (int)Math.Round(value.Value, MidpointRounding.AwayFromZero) : null;
+}
+
 private static DownloadSizeMetrics ExtractDownloadSizeMetrics(NetworkLogCacheRow row)
 {
     if (!TryParseJsonObject(row.extra_json, out var root))
@@ -7644,7 +7718,9 @@ private static DownloadSizeMetrics ExtractDownloadSizeMetrics(NetworkLogCacheRow
         var rootElement = root.RootElement;
         var psElement = TryGetPropertyIgnoreCase(rootElement, "ps", out var psRaw)
             ? ParsePossiblyLooseJsonObject(JsonElementToString(psRaw))
-            : null;
+            : TryGetPropertyIgnoreCase(rootElement, "ps_data", out var psDataRaw)
+                ? ParsePossiblyLooseJsonObject(JsonElementToString(psDataRaw))
+                : null;
 
         try
         {
@@ -7662,21 +7738,42 @@ private static DownloadSizeMetrics ExtractDownloadSizeMetrics(NetworkLogCacheRow
                 rootElement,
                 "down_bytes",
                 "downloaded_bytes",
-                "download_bytes");
+                "download_bytes",
+                "downloaded_file_size_bytes",
+                "downloaded_file_size_4g_bytes");
 
             var fileSizeBytes = FirstJsonNumber(
                 ps.HasValue ? ps.Value : default,
                 rootElement,
                 "file_size_bytes",
-                "filesize_bytes");
+                "filesize_bytes",
+                "downloaded_file_size_bytes");
 
             var durationMs = FirstJsonNumber(
                 ps.HasValue ? ps.Value : default,
                 rootElement,
-                "duration_ms");
+                "duration_ms",
+                "duration");
 
-            var lteMbps = FirstJsonNumber(rootElement, default, "lte_mac_dl_delivered_mbps", "lte_mac_dl_mbps");
-            var nrMbps = FirstJsonNumber(rootElement, default, "nr_mac_dl_delivered_mbps", "nr_mac_dl_mbps");
+            var lteMbps = FirstPositiveJsonNumber(rootElement, default,
+                "lte_mac_dl_delivered_mbps",
+                "lte_mac_dl_mbps",
+                "lte_mac_dl_cc1_mbps",
+                "ps_app_dl_mbps",
+                "wire_dl_mbps",
+                "pdcp_dl_mbps");
+            var nrMbps = FirstPositiveJsonNumber(rootElement, default,
+                "nr_mac_dl_delivered_mbps",
+                "nr_mac_dl_mbps");
+            var flatTotalDlMbps = FirstPositiveJsonNumber(rootElement, default,
+                "ps_app_dl_mbps",
+                "wire_dl_mbps",
+                "pdcp_dl_mbps");
+            var flatUlMbps = FirstPositiveJsonNumber(rootElement, default,
+                "ps_app_ul_mbps",
+                "wire_ul_mbps",
+                "lte_mac_ul_mbps",
+                "lte_mac_ul_delivered_mbps");
 
             long? lteBytes = null;
             long? nrBytes = null;
@@ -7684,7 +7781,7 @@ private static DownloadSizeMetrics ExtractDownloadSizeMetrics(NetworkLogCacheRow
 
             if (durationMs is > 0)
             {
-                lteBytes = MbpsDurationToBytes(lteMbps, durationMs);
+                lteBytes = MbpsDurationToBytes(lteMbps ?? flatTotalDlMbps, durationMs);
                 nrBytes = MbpsDurationToBytes(nrMbps, durationMs);
             }
 
@@ -7700,11 +7797,10 @@ private static DownloadSizeMetrics ExtractDownloadSizeMetrics(NetworkLogCacheRow
             }
             else
             {
-                if (!durationMs.HasValue && (lteMbps is > 0 || nrMbps is > 0))
+                if (!durationMs.HasValue && (lteMbps is > 0 || nrMbps is > 0 || flatTotalDlMbps is > 0))
                 {
-                    lteBytes = MbpsDurationToBytes(lteMbps, 1000);
+                    lteBytes = MbpsDurationToBytes(lteMbps ?? flatTotalDlMbps, 1000);
                     nrBytes = MbpsDurationToBytes(nrMbps, 1000);
-                    source = "extra_json_mac_dl_mbps_1s_estimate";
                 }
 
                 var estimatedTotal = SafeAdd(lteBytes, nrBytes);
@@ -7712,14 +7808,18 @@ private static DownloadSizeMetrics ExtractDownloadSizeMetrics(NetworkLogCacheRow
                 {
                     totalBytes = estimatedTotal.Value;
                     if (string.IsNullOrWhiteSpace(source))
-                        source = "extra_json_mac_dl_mbps_duration_estimate";
+                        source = durationMs.HasValue
+                            ? "extra_json_dl_mbps_duration_estimate"
+                            : (lteMbps is > 0 || nrMbps is > 0)
+                                ? "extra_json_mac_dl_mbps_1s_estimate"
+                                : "extra_json_flat_dl_mbps_1s_estimate";
                 }
             }
 
             return new DownloadSizeMetrics
             {
-                Direction = direction,
-                ResultStatus = resultStatus,
+                Direction = FirstNonBlank(direction, InferTransferDirection(flatTotalDlMbps, flatUlMbps)),
+                ResultStatus = FirstNonBlank(resultStatus, totalBytes.HasValue ? "ESTIMATED" : null),
                 Source = source,
                 TotalBytes = totalBytes,
                 LteBytes = lteBytes,
@@ -7766,6 +7866,15 @@ private static bool TryParseJsonObject(string? raw, out JsonDocument document)
         {
             document = parsed;
             return true;
+        }
+
+        if (parsed.RootElement.ValueKind == JsonValueKind.String)
+        {
+            var inner = parsed.RootElement.GetString();
+            parsed.Dispose();
+            if (!string.IsNullOrWhiteSpace(inner) && !string.Equals(inner, raw, StringComparison.Ordinal))
+                return TryParseJsonObject(inner, out document);
+            return false;
         }
 
         parsed.Dispose();
@@ -7834,6 +7943,68 @@ private static double? GetJsonNumber(JsonElement element, string name)
 
     if (value.ValueKind == JsonValueKind.String)
         return TryParseNullableDouble(value.GetString());
+
+    return null;
+}
+
+
+private static double? FirstPositiveJsonNumber(JsonElement primary, JsonElement secondary, params string[] names)
+{
+    foreach (var name in names)
+    {
+        var value = GetJsonNumber(primary, name) ?? GetJsonNumber(secondary, name);
+        if (value is > 0)
+            return value.Value;
+    }
+
+    return null;
+}
+
+private static string? InferTransferDirection(double? dlMbps, double? ulMbps)
+{
+    var hasDl = dlMbps is > 0;
+    var hasUl = ulMbps is > 0;
+    if (hasDl && hasUl) return "Both";
+    if (hasDl) return "Downlink";
+    if (hasUl) return "Uplink";
+    return null;
+}
+
+private static string? NormalizeTimingAdvance(string? currentTa, string? tac, string? primaryCellInfo)
+{
+    var extracted = ExtractTimingAdvance(primaryCellInfo);
+    if (string.IsNullOrWhiteSpace(currentTa))
+        return extracted;
+
+    var trimmed = currentTa.Trim();
+    if (trimmed.Equals("2147483647", StringComparison.OrdinalIgnoreCase))
+        return extracted ?? string.Empty;
+
+    if (trimmed.Equals(tac?.Trim(), StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(extracted))
+        return extracted;
+
+    if (long.TryParse(trimmed, NumberStyles.Integer, CultureInfo.InvariantCulture, out var taValue)
+        && taValue > 1282
+        && !string.IsNullOrWhiteSpace(extracted))
+        return extracted;
+
+    return trimmed;
+}
+
+private static string? ExtractTimingAdvance(string? primaryCellInfo)
+{
+    if (string.IsNullOrWhiteSpace(primaryCellInfo))
+        return null;
+
+    var matches = Regex.Matches(primaryCellInfo, @"ta\s*=\s*(-?\d+)", RegexOptions.IgnoreCase);
+    foreach (Match match in matches)
+    {
+        var value = match.Groups[1].Value;
+        if (long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)
+            && parsed >= 0
+            && parsed != 2147483647)
+            return value;
+    }
 
     return null;
 }
@@ -8231,6 +8402,7 @@ public class NetworkLogCacheRow
     public string log_type { get; set; } = "network";
     public bool is_wifi { get; set; }
     public string extra_json { get; set; } = "";
+    public Dictionary<string, object?> extra_json_data { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public long? downloaded_file_size_bytes { get; set; }
     public double? downloaded_file_size_mb { get; set; }
     public long? downloaded_file_size_4g_bytes { get; set; }
