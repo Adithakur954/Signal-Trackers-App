@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Data.Common;
 using MySqlConnector;
 using Microsoft.AspNetCore.Mvc;
 using SignalTracker.Helper;
@@ -80,11 +81,12 @@ public partial class MapViewController
             var scope = $"Sessions: {string.Join(",", request.SessionIds)}; Upload: {request.UploadId?.ToString() ?? "all selected"}; " +
                 (filters.ToString().Length == 0 ? "All selected L3/Event messages" : filters.ToString());
             var report = L3SummaryReportBuilder.Build(source, scope, selected.Select(p => p.Message).ToList(), selectedCalls);
+            var detectedServices = await LoadDiagnosticServiceSummaryAsync(conn, request, selected.Select(pair => pair.Row).ToList());
             var fallback = await LoadNetworkDashboardFallbackAsync(conn, request, filters, access);
             if (fallback.Error != null) return fallback.Error;
             NetworkLogDashboardFallback.Apply(report, fallback.Rows);
             HttpContext.RequestAborted.ThrowIfCancellationRequested();
-            if (json) return Json(BuildL3SummaryJson(report, includeRows ? selected.Select(pair => pair.Row).ToList() : Array.Empty<DiagnosticTimelineRow>()));
+            if (json) return Json(BuildL3SummaryJson(report, includeRows ? selected.Select(pair => pair.Row).ToList() : Array.Empty<DiagnosticTimelineRow>(), detectedServices));
             var stem = SanitizeDiagnosticFileStem(source);
             return pdf ? File(BuildCombinedL3SummaryPdf(report, Math.Clamp(reportRows, 1, 100000)), "application/pdf", $"call-summary-{stem}.pdf")
                 : File(L3SummaryReportBuilder.WriteExcel(report), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", $"call-summary-{stem}.xlsx");
@@ -96,7 +98,7 @@ public partial class MapViewController
         }
     }
 
-    private static object BuildL3SummaryJson(L3SummaryReport report, IReadOnlyList<DiagnosticTimelineRow> timeline)
+    private static object BuildL3SummaryJson(L3SummaryReport report, IReadOnlyList<DiagnosticTimelineRow> timeline, DiagnosticServiceSummary detectedServices)
     {
         // Explicit camel-case properties: the application's global JSON naming policy is null.
         static object[] Values(IEnumerable<L3DashboardValue> rows) => rows.Select(row => (object)new
@@ -131,6 +133,7 @@ public partial class MapViewController
                 totalDurationMs = duration,
                 totalConnectedDurationMs = duration,
                 observedEvents = Observed(report.ObservedEvents),
+                detectedServices,
                 sourceFile = report.SourceFile,
                 scope = report.Scope,
                 generatedAt = report.GeneratedAt,
@@ -157,6 +160,125 @@ public partial class MapViewController
                 }).ToArray()
             }
         };
+    }
+
+    private sealed class DiagnosticServiceSummary
+    {
+        public bool HasVolte { get; set; }
+        public bool HasVonr { get; set; }
+        public bool HasTmsi { get; set; }
+        public bool HasRrcSibParameters { get; set; }
+        public long VolteTextRows { get; set; }
+        public long VonrTextRows { get; set; }
+        public long TmsiRows { get; set; }
+        public long RrcSibParameterRows { get; set; }
+        public long NetworkLogRows { get; set; }
+        public long VolteNetworkRows { get; set; }
+        public long VolteCallMinusOneRows { get; set; }
+        public long VolteCallActiveRows { get; set; }
+        public long VolteCallBlankRows { get; set; }
+        public List<DiagnosticServiceEvidence> Evidence { get; set; } = new();
+        public Dictionary<string, long> VolteCallValues { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private sealed class DiagnosticServiceEvidence
+    {
+        public string Service { get; set; } = string.Empty;
+        public string Source { get; set; } = string.Empty;
+        public string? Timestamp { get; set; }
+        public int? SessionId { get; set; }
+        public string Data { get; set; } = string.Empty;
+    }
+
+    private async Task<DiagnosticServiceSummary> LoadDiagnosticServiceSummaryAsync(
+        DbConnection conn,
+        DiagnosticQueryRequest request,
+        IReadOnlyList<DiagnosticTimelineRow> timeline)
+    {
+        var summary = new DiagnosticServiceSummary();
+        foreach (var row in timeline)
+        {
+            if (row.ServiceIndicators.Count == 0)
+                continue;
+
+            if (row.ServiceIndicators.Contains("VoLTE", StringComparer.OrdinalIgnoreCase)) summary.VolteTextRows++;
+            if (row.ServiceIndicators.Contains("VoNR", StringComparer.OrdinalIgnoreCase)) summary.VonrTextRows++;
+            if (row.ServiceIndicators.Contains("TMSI", StringComparer.OrdinalIgnoreCase)) summary.TmsiRows++;
+            if (row.ServiceIndicators.Contains("RRC/SIB Parameters", StringComparer.OrdinalIgnoreCase)) summary.RrcSibParameterRows++;
+
+            foreach (var service in row.ServiceIndicators)
+            {
+                if (summary.Evidence.Count >= 50)
+                    break;
+                summary.Evidence.Add(new DiagnosticServiceEvidence
+                {
+                    Service = service,
+                    Source = row.SourceType,
+                    Timestamp = row.TimestampLabel,
+                    SessionId = row.SessionId,
+                    Data = FirstNonEmpty(row.RawMessage, row.Summary, row.Message)
+                });
+            }
+        }
+
+        await AddNetworkLogServiceCountsAsync(conn, request, summary);
+        summary.HasVolte = summary.VolteTextRows > 0 || summary.VolteNetworkRows > 0;
+        summary.HasVonr = summary.VonrTextRows > 0;
+        summary.HasTmsi = summary.TmsiRows > 0;
+        summary.HasRrcSibParameters = summary.RrcSibParameterRows > 0;
+        return summary;
+    }
+
+    private async Task AddNetworkLogServiceCountsAsync(DbConnection conn, DiagnosticQueryRequest request, DiagnosticServiceSummary summary)
+    {
+        if (!await DiagnosticTableExistsAsync(conn, "tbl_network_log"))
+            return;
+
+        var hasHistory = await DiagnosticTableExistsAsync(conn, "tbl_l3_event_history");
+        var sessionIds = new List<int>();
+        await using (var resolve = conn.CreateCommand())
+        {
+            resolve.CommandText = BuildNetworkDashboardSessionSql(resolve, request.SessionIds, request.UploadId, hasHistory);
+            await using var reader = await resolve.ExecuteReaderAsync(HttpContext.RequestAborted);
+            while (await reader.ReadAsync(HttpContext.RequestAborted))
+                sessionIds.Add(Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture));
+        }
+        if (sessionIds.Count == 0)
+            return;
+
+        var available = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        await using (var schema = conn.CreateCommand())
+        {
+            schema.CommandText = "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='tbl_network_log'";
+            await using var reader = await schema.ExecuteReaderAsync(HttpContext.RequestAborted);
+            while (await reader.ReadAsync(HttpContext.RequestAborted))
+                available.Add(reader.GetString(0));
+        }
+        if (!available.Contains("volte_call"))
+            return;
+
+        await using var cmd = conn.CreateCommand();
+        var names = new List<string>();
+        AddParams(cmd, "serviceSession", sessionIds, names);
+        cmd.CommandText = $@"
+            SELECT COALESCE(NULLIF(TRIM(CAST(volte_call AS CHAR)), ''), '<blank>') AS volte_value, COUNT(*)
+            FROM tbl_network_log
+            WHERE session_id IN ({string.Join(",", names)})
+            GROUP BY COALESCE(NULLIF(TRIM(CAST(volte_call AS CHAR)), ''), '<blank>');";
+
+        await using var valueReader = await cmd.ExecuteReaderAsync(HttpContext.RequestAborted);
+        while (await valueReader.ReadAsync(HttpContext.RequestAborted))
+        {
+            var value = Convert.ToString(valueReader.GetValue(0), CultureInfo.InvariantCulture) ?? "<blank>";
+            var count = Convert.ToInt64(valueReader.GetValue(1), CultureInfo.InvariantCulture);
+            summary.VolteCallValues[value] = count;
+            summary.NetworkLogRows += count;
+            if (value.Equals("<blank>", StringComparison.OrdinalIgnoreCase)) summary.VolteCallBlankRows += count;
+            else summary.VolteNetworkRows += count;
+            if (value.Equals("-1", StringComparison.OrdinalIgnoreCase)) summary.VolteCallMinusOneRows += count;
+            if (value.Equals("1", StringComparison.OrdinalIgnoreCase) || value.Equals("true", StringComparison.OrdinalIgnoreCase) || value.Equals("active", StringComparison.OrdinalIgnoreCase))
+                summary.VolteCallActiveRows += count;
+        }
     }
 
     private static L3ReportMessage ToL3ReportMessage(DiagnosticTimelineRow row)

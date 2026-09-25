@@ -3137,6 +3137,7 @@ public class AvailablePolygonsResponse
             public string? Interface { get; init; }
             public string? Protocol { get; init; }
             public string? Procedure { get; init; }
+            public List<string> ServiceIndicators { get; init; } = new();
             public string? EventKey { get; init; }
             public double? Latitude { get; init; }
             public double? Longitude { get; init; }
@@ -3716,6 +3717,7 @@ public class AvailablePolygonsResponse
                     Interface = ResolveDiagnosticInterface(text),
                     Protocol = ResolveDiagnosticProtocol(text),
                     Procedure = ResolveDiagnosticProcedure(text),
+                    ServiceIndicators = DetectDiagnosticServiceIndicators(text),
                     EventKey = x.EventName,
                     Latitude = x.Latitude,
                     Longitude = x.Longitude
@@ -3759,6 +3761,7 @@ public class AvailablePolygonsResponse
                     Interface = ResolveDiagnosticInterface(text),
                     Protocol = ResolveDiagnosticProtocol(text),
                     Procedure = ResolveDiagnosticProcedure(text),
+                    ServiceIndicators = DetectDiagnosticServiceIndicators(text),
                     EventKey = x.Message,
                     Latitude = x.Latitude,
                     Longitude = x.Longitude
@@ -4282,6 +4285,25 @@ public class AvailablePolygonsResponse
             if (HasAny(text, "MEASUREMENT"))
                 return "Measurement";
             return ResolveDiagnosticProtocol(text);
+        }
+
+
+        private static List<string> DetectDiagnosticServiceIndicators(string text)
+        {
+            var indicators = new List<string>();
+            if (string.IsNullOrWhiteSpace(text))
+                return indicators;
+
+            if (Regex.IsMatch(text, @"\b(?:VOLTE|VOICE\s+OVER\s+LTE|LTE\s+IMS)\b|AIRTEL_IND_VOLTE|volte_call", RegexOptions.IgnoreCase))
+                indicators.Add("VoLTE");
+            if (Regex.IsMatch(text, @"\b(?:VONR|VOICE\s+OVER\s+NR)\b|is_vonr_enabled", RegexOptions.IgnoreCase))
+                indicators.Add("VoNR");
+            if (Regex.IsMatch(text, @"\bTMSI\b", RegexOptions.IgnoreCase))
+                indicators.Add("TMSI");
+            if (Regex.IsMatch(text, @"\b(?:qHyst|sNonIntraSearchP|threshServingLowP|qRxLevMin|qQualMin|sIntraSearchP|tReselNR|scsCommon|ssbOffset|coreset0|ss0)\b", RegexOptions.IgnoreCase))
+                indicators.Add("RRC/SIB Parameters");
+
+            return indicators.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         }
 
         private static string InferDiagnosticDirection(IReadOnlyList<DiagnosticTimelineRow> rows)
