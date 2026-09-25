@@ -27,6 +27,7 @@ public sealed class L3SummaryReport
     public IReadOnlyList<L3ReportCall> Calls { get; init; } = [];
     public IReadOnlyList<L3ReportTechnology> Technologies { get; init; } = [];
     public int NetworkLogRows { get; set; }
+    public List<string> Warnings { get; } = [];
     public bool HasNetworkLogFallback => Kpis.Concat(Mobility).Concat(Parameters).Any(v => v.Source == "Network Log");
     public string DashboardSources => HasNetworkLogFallback ? "L3/Event with Network Log fallback" : "L3/Event";
     public List<L3DashboardValue> Kpis { get; } = [];

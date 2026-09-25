@@ -72,7 +72,17 @@ public partial class MapViewController
             while (await reader.ReadAsync(cancellation))
             {
                 if (++loaded > request.Take)
-                    return (rows, UnprocessableEntity(new { status = 0, code = "NETWORK_FALLBACK_LIMIT", message = $"Network Log fallback exceeds take={request.Take} rows. Select fewer sessions or increase take up to 50000; no partial fallback was generated." }));
+                {
+                    rows.Add(new NetworkDashboardSample
+                    {
+                        SessionId = -1,
+                        Fields = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+                        {
+                            ["__warning"] = $"Network Log fallback was limited to the first {request.Take} rows. L3/Event summary is still generated; choose fewer sessions for full Network Log fallback."
+                        }
+                    });
+                    break;
+                }
                 var values = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
                 for (var i = 0; i < reader.FieldCount; i++) values[reader.GetName(i)] = reader.IsDBNull(i) ? null : Convert.ToString(reader.GetValue(i), CultureInfo.InvariantCulture);
                 var sample = NetworkDashboardSample.FromFields(int.Parse(values["session_id"]!, CultureInfo.InvariantCulture),

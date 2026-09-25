@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -2387,13 +2387,21 @@ public L3EventController(
                 where.Add($"h.session_id IN ({string.Join(", ", names)})");
             }
 
-            // Availability in this list requires actual L3 rows. Event-only uploads
-            // remain stored, but cannot make an upload appear in the L3 list.
-            where.Add(@"EXISTS (
-                SELECT 1
-                FROM tbl_l3_log l3
-                WHERE l3.tbl_upload_id = h.tbl_upload_id
-                LIMIT 1
+            // Show diagnostic uploads when either L3 or Event rows were imported.
+            // Some valid uploads contain an empty/header-only L3 file and real Event rows.
+            where.Add(@"(
+                EXISTS (
+                    SELECT 1
+                    FROM tbl_l3_log l3
+                    WHERE l3.tbl_upload_id = h.tbl_upload_id
+                    LIMIT 1
+                )
+                OR EXISTS (
+                    SELECT 1
+                    FROM tbl_event_log ev
+                    WHERE ev.tbl_upload_id = h.tbl_upload_id
+                    LIMIT 1
+                )
             )");
 
             AddParam(cmd, "@take", take);
@@ -3014,6 +3022,7 @@ public L3EventController(
             short Status);
     }
 }
+
 
 
 

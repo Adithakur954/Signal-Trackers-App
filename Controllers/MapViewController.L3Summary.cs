@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Data.Common;
 using MySqlConnector;
 using Microsoft.AspNetCore.Mvc;
@@ -84,7 +84,14 @@ public partial class MapViewController
             var detectedServices = await LoadDiagnosticServiceSummaryAsync(conn, request, selected.Select(pair => pair.Row).ToList());
             var fallback = await LoadNetworkDashboardFallbackAsync(conn, request, filters, access);
             if (fallback.Error != null) return fallback.Error;
-            NetworkLogDashboardFallback.Apply(report, fallback.Rows);
+            var fallbackWarnings = fallback.Rows
+                .Select(row => row.Get("__warning"))
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Select(value => value!)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            NetworkLogDashboardFallback.Apply(report, fallback.Rows.Where(row => row.SessionId > 0).ToList());
+            report.Warnings.AddRange(fallbackWarnings);
             HttpContext.RequestAborted.ThrowIfCancellationRequested();
             if (json) return Json(BuildL3SummaryJson(report, includeRows ? selected.Select(pair => pair.Row).ToList() : Array.Empty<DiagnosticTimelineRow>(), detectedServices));
             var stem = SanitizeDiagnosticFileStem(source);
@@ -141,6 +148,7 @@ public partial class MapViewController
                 networkLogRows = report.NetworkLogRows,
                 hasNetworkLogFallback = report.HasNetworkLogFallback,
                 dashboardSources = report.DashboardSources,
+                warnings = report.Warnings,
                 totalRows = report.Messages.Count,
                 l3Rows = report.Messages.Count(row => row.Source.Equals("l3", StringComparison.OrdinalIgnoreCase)),
                 eventRows = report.Messages.Count(row => row.Source.Equals("event", StringComparison.OrdinalIgnoreCase)),
@@ -330,3 +338,5 @@ public partial class MapViewController
         return BuildFrontendStylePdf(layout);
     }
 }
+
+
