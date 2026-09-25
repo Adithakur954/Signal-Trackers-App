@@ -62,7 +62,7 @@ namespace SignalTracker.Controllers
             "networklog:v17:*",
             "networklog:v18:*",
             "networklog:v19:*",
-            "networklog:v20:*",
+            "networklog:v22:*",
             "latlon:dist:*",
             "n78_simple_kpi:*",
             "n78_neighbours:*",
@@ -271,6 +271,8 @@ namespace SignalTracker.Controllers
                 await _redis.DeleteByPatternAsync("networklog:v16:*");
                 await _redis.DeleteByPatternAsync("networklog:v17:*");
                 await _redis.DeleteByPatternAsync("networklog:v19:*");
+                await _redis.DeleteByPatternAsync("networklog:v20:*");
+                await _redis.DeleteByPatternAsync("networklog:v21:*");
                 ObsoleteNetworkLogCachesInvalidated = true;
             }
             catch
@@ -7447,7 +7449,7 @@ private string BuildNetworkLogCacheKey(
         : "no_project";
     string versionKey = NormalizeCacheKeyPart(dataVersion);
 
-    return $"networklog:v20:{GetProjectListCacheScope()}:{sortedSessionIds}:{providerKey}:{networkTypeKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
+    return $"networklog:v22:{GetProjectListCacheScope()}:{sortedSessionIds}:{providerKey}:{networkTypeKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
 }
 
 private static string CleanProviderDisplayName(string value)
@@ -7466,6 +7468,7 @@ private static void NormalizeNetworkLogRows(List<NetworkLogCacheRow> rows)
     foreach (var row in rows)
     {
         ApplyNetworkLogDownloadSize(row);
+        row.ta = NormalizeTimingAdvance(row.ta, row.tac, row.primary_cell_info_1);
         row.m_alpha_long = CleanProviderDisplayName(ResolvePreferredProviderName(row));
         row.provider = NormalizeNetworkLogProvider(row);
         row.band = NormalizeNetworkLogBand(row.band);
@@ -7503,7 +7506,9 @@ private static DownloadSizeMetrics ExtractDownloadSizeMetrics(NetworkLogCacheRow
         var rootElement = root.RootElement;
         var psElement = TryGetPropertyIgnoreCase(rootElement, "ps", out var psRaw)
             ? ParsePossiblyLooseJsonObject(JsonElementToString(psRaw))
-            : null;
+            : TryGetPropertyIgnoreCase(rootElement, "ps_data", out var psDataRaw)
+                ? ParsePossiblyLooseJsonObject(JsonElementToString(psDataRaw))
+                : null;
 
         try
         {
@@ -7521,21 +7526,42 @@ private static DownloadSizeMetrics ExtractDownloadSizeMetrics(NetworkLogCacheRow
                 rootElement,
                 "down_bytes",
                 "downloaded_bytes",
-                "download_bytes");
+                "download_bytes",
+                "downloaded_file_size_bytes",
+                "downloaded_file_size_4g_bytes");
 
             var fileSizeBytes = FirstJsonNumber(
                 ps.HasValue ? ps.Value : default,
                 rootElement,
                 "file_size_bytes",
-                "filesize_bytes");
+                "filesize_bytes",
+                "downloaded_file_size_bytes");
 
             var durationMs = FirstJsonNumber(
                 ps.HasValue ? ps.Value : default,
                 rootElement,
-                "duration_ms");
+                "duration_ms",
+                "duration");
 
-            var lteMbps = FirstJsonNumber(rootElement, default, "lte_mac_dl_delivered_mbps", "lte_mac_dl_mbps");
-            var nrMbps = FirstJsonNumber(rootElement, default, "nr_mac_dl_delivered_mbps", "nr_mac_dl_mbps");
+            var lteMbps = FirstPositiveJsonNumber(rootElement, default,
+                "lte_mac_dl_delivered_mbps",
+                "lte_mac_dl_mbps",
+                "lte_mac_dl_cc1_mbps",
+                "ps_app_dl_mbps",
+                "wire_dl_mbps",
+                "pdcp_dl_mbps");
+            var nrMbps = FirstPositiveJsonNumber(rootElement, default,
+                "nr_mac_dl_delivered_mbps",
+                "nr_mac_dl_mbps");
+            var flatTotalDlMbps = FirstPositiveJsonNumber(rootElement, default,
+                "ps_app_dl_mbps",
+                "wire_dl_mbps",
+                "pdcp_dl_mbps");
+            var flatUlMbps = FirstPositiveJsonNumber(rootElement, default,
+                "ps_app_ul_mbps",
+                "wire_ul_mbps",
+                "lte_mac_ul_mbps",
+                "lte_mac_ul_delivered_mbps");
 
             long? lteBytes = null;
             long? nrBytes = null;
@@ -7543,7 +7569,7 @@ private static DownloadSizeMetrics ExtractDownloadSizeMetrics(NetworkLogCacheRow
 
             if (durationMs is > 0)
             {
-                lteBytes = MbpsDurationToBytes(lteMbps, durationMs);
+                lteBytes = MbpsDurationToBytes(lteMbps ?? flatTotalDlMbps, durationMs);
                 nrBytes = MbpsDurationToBytes(nrMbps, durationMs);
             }
 
@@ -7559,11 +7585,10 @@ private static DownloadSizeMetrics ExtractDownloadSizeMetrics(NetworkLogCacheRow
             }
             else
             {
-                if (!durationMs.HasValue && (lteMbps is > 0 || nrMbps is > 0))
+                if (!durationMs.HasValue && (lteMbps is > 0 || nrMbps is > 0 || flatTotalDlMbps is > 0))
                 {
-                    lteBytes = MbpsDurationToBytes(lteMbps, 1000);
+                    lteBytes = MbpsDurationToBytes(lteMbps ?? flatTotalDlMbps, 1000);
                     nrBytes = MbpsDurationToBytes(nrMbps, 1000);
-                    source = "extra_json_mac_dl_mbps_1s_estimate";
                 }
 
                 var estimatedTotal = SafeAdd(lteBytes, nrBytes);
@@ -7571,14 +7596,18 @@ private static DownloadSizeMetrics ExtractDownloadSizeMetrics(NetworkLogCacheRow
                 {
                     totalBytes = estimatedTotal.Value;
                     if (string.IsNullOrWhiteSpace(source))
-                        source = "extra_json_mac_dl_mbps_duration_estimate";
+                        source = durationMs.HasValue
+                            ? "extra_json_dl_mbps_duration_estimate"
+                            : (lteMbps is > 0 || nrMbps is > 0)
+                                ? "extra_json_mac_dl_mbps_1s_estimate"
+                                : "extra_json_flat_dl_mbps_1s_estimate";
                 }
             }
 
             return new DownloadSizeMetrics
             {
-                Direction = direction,
-                ResultStatus = resultStatus,
+                Direction = FirstNonBlank(direction, InferTransferDirection(flatTotalDlMbps, flatUlMbps)),
+                ResultStatus = FirstNonBlank(resultStatus, totalBytes.HasValue ? "ESTIMATED" : null),
                 Source = source,
                 TotalBytes = totalBytes,
                 LteBytes = lteBytes,
@@ -7625,6 +7654,15 @@ private static bool TryParseJsonObject(string? raw, out JsonDocument document)
         {
             document = parsed;
             return true;
+        }
+
+        if (parsed.RootElement.ValueKind == JsonValueKind.String)
+        {
+            var inner = parsed.RootElement.GetString();
+            parsed.Dispose();
+            if (!string.IsNullOrWhiteSpace(inner) && !string.Equals(inner, raw, StringComparison.Ordinal))
+                return TryParseJsonObject(inner, out document);
+            return false;
         }
 
         parsed.Dispose();
@@ -7693,6 +7731,68 @@ private static double? GetJsonNumber(JsonElement element, string name)
 
     if (value.ValueKind == JsonValueKind.String)
         return TryParseNullableDouble(value.GetString());
+
+    return null;
+}
+
+
+private static double? FirstPositiveJsonNumber(JsonElement primary, JsonElement secondary, params string[] names)
+{
+    foreach (var name in names)
+    {
+        var value = GetJsonNumber(primary, name) ?? GetJsonNumber(secondary, name);
+        if (value is > 0)
+            return value.Value;
+    }
+
+    return null;
+}
+
+private static string? InferTransferDirection(double? dlMbps, double? ulMbps)
+{
+    var hasDl = dlMbps is > 0;
+    var hasUl = ulMbps is > 0;
+    if (hasDl && hasUl) return "Both";
+    if (hasDl) return "Downlink";
+    if (hasUl) return "Uplink";
+    return null;
+}
+
+private static string? NormalizeTimingAdvance(string? currentTa, string? tac, string? primaryCellInfo)
+{
+    var extracted = ExtractTimingAdvance(primaryCellInfo);
+    if (string.IsNullOrWhiteSpace(currentTa))
+        return extracted;
+
+    var trimmed = currentTa.Trim();
+    if (trimmed.Equals("2147483647", StringComparison.OrdinalIgnoreCase))
+        return extracted ?? string.Empty;
+
+    if (trimmed.Equals(tac?.Trim(), StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(extracted))
+        return extracted;
+
+    if (long.TryParse(trimmed, NumberStyles.Integer, CultureInfo.InvariantCulture, out var taValue)
+        && taValue > 1282
+        && !string.IsNullOrWhiteSpace(extracted))
+        return extracted;
+
+    return trimmed;
+}
+
+private static string? ExtractTimingAdvance(string? primaryCellInfo)
+{
+    if (string.IsNullOrWhiteSpace(primaryCellInfo))
+        return null;
+
+    var matches = Regex.Matches(primaryCellInfo, @"ta\s*=\s*(-?\d+)", RegexOptions.IgnoreCase);
+    foreach (Match match in matches)
+    {
+        var value = match.Groups[1].Value;
+        if (long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)
+            && parsed >= 0
+            && parsed != 2147483647)
+            return value;
+    }
 
     return null;
 }
