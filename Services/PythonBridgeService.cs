@@ -518,6 +518,50 @@ namespace SignalTracker.Services
             }
         }
 
+        private static bool HasCompleteSitePredictionIdentity(IDictionary<string, object?> row)
+        {
+            return !string.IsNullOrWhiteSpace(ReadRowString(row, "site"))
+                && !string.IsNullOrWhiteSpace(ReadRowString(row, "cell_id"))
+                && !string.IsNullOrWhiteSpace(ReadRowString(row, "sector"))
+                && !string.IsNullOrWhiteSpace(ReadRowString(row, "band"))
+                && !string.IsNullOrWhiteSpace(ReadRowString(row, "provider", "operator_name", "project_provider", "cluster"));
+        }
+
+        private static string BuildSitePredictionIdentityKey(IDictionary<string, object?> row, string provider)
+        {
+            return string.Join("|", new[]
+            {
+                ReadRowString(row, "site"),
+                ReadRowString(row, "cell_id"),
+                ReadRowString(row, "sector"),
+                ReadRowString(row, "band"),
+                provider
+            }.Select(value => value.Trim()));
+        }
+
+        private static void NormalizeSitePredictionRows(List<Dictionary<string, object?>> rows)
+        {
+            foreach (var row in rows)
+            {
+                var rawCluster = ReadRowString(row, "original_cluster", "cluster", "optimized_cluster", "project_provider");
+                if (!string.IsNullOrWhiteSpace(rawCluster))
+                {
+                    row["raw_cluster"] = rawCluster;
+                }
+
+                var provider = ReadRowString(row, "provider", "operator_name", "project_provider", "cluster");
+                if (!string.IsNullOrWhiteSpace(provider))
+                {
+                    row["provider"] = provider;
+                    row["operator_name"] = provider;
+                }
+
+                row["has_complete_identity"] = HasCompleteSitePredictionIdentity(row);
+                var identityProvider = ReadRowString(row, "provider", "operator_name", "project_provider", "cluster");
+                row["site_prediction_key"] = BuildSitePredictionIdentityKey(row, identityProvider);
+                row["site_cell_sector_band_operator_key"] = row["site_prediction_key"];
+            }
+        }
         private static bool LooksLikeDroppedDbConnection(Exception exception)
         {
             for (var current = exception; current != null; current = current.InnerException)
@@ -774,7 +818,7 @@ namespace SignalTracker.Services
                     ? "AND LOWER(COALESCE(m_alpha_long, m_alpha_short)) = LOWER(@operator)"
                     : string.Empty;
                 var primaryClause = primaryOnly
-                    ? "AND LOWER(COALESCE(`primary`, '')) = 'yes'"
+                    ? "AND primary_cell_info_1 LIKE '%mRegistered=YES%'"
                     : string.Empty;
                 var dateClause = string.Empty;
                 if (request.StartDate.HasValue)
@@ -811,7 +855,7 @@ namespace SignalTracker.Services
                 var servingQuery = string.Format(servingSql, inClause, validBandPredicate, fiveGPredicate, $"AND ({primaryCellInfoPredicate})", operatorClause, primaryClause, dateClause, polygonClause, excludeSelfTaggedNeighbourPredicate, technologyClause);
                 var neighbourQuery = string.Format(neighbourSql, inClause, validBandPredicate, fiveGPredicate, $"AND ({primaryCellInfoPredicate})", operatorClause, primaryClause, dateClause, polygonClause, technologyClause);
 
-                command.CommandText = request.IncludeNeighbour
+                command.CommandText = request.IncludeNeighbour && !primaryOnly
                     ? $"{servingQuery} UNION ALL {neighbourQuery} LIMIT @lim OFFSET @off;"
                     : $"{servingQuery} LIMIT @lim OFFSET @off;";
 
@@ -1050,6 +1094,9 @@ namespace SignalTracker.Services
                     sp.*,
                     sp.cluster AS provider,
                     sp.cluster AS operator_name,
+                    p.provider AS project_provider,
+                    sp.cluster AS original_cluster,
+                    NULL AS optimized_cluster,
                     CONCAT(
                         TRIM(CAST(sp.site AS CHAR)), '|',
                         TRIM(CAST(sp.cell_id AS CHAR)), '|',
@@ -1065,6 +1112,7 @@ namespace SignalTracker.Services
                         TRIM(CAST(sp.cluster AS CHAR))
                     ) AS site_cell_sector_band_operator_key
                 FROM site_prediction sp
+                LEFT JOIN tbl_project p ON p.id = sp.tbl_project_id
                 WHERE sp.tbl_project_id = @pid
                   AND sp.site IS NOT NULL AND TRIM(CAST(sp.site AS CHAR)) <> ''
                   AND sp.cell_id IS NOT NULL AND TRIM(CAST(sp.cell_id AS CHAR)) <> ''
@@ -1228,6 +1276,9 @@ namespace SignalTracker.Services
                     sp.*,
                     sp.cluster AS provider,
                     sp.cluster AS operator_name,
+                    p.provider AS project_provider,
+                    sp.cluster AS original_cluster,
+                    NULL AS optimized_cluster,
                     CONCAT(
                         TRIM(CAST(sp.site AS CHAR)), '|',
                         TRIM(CAST(sp.cell_id AS CHAR)), '|',
@@ -1243,6 +1294,7 @@ namespace SignalTracker.Services
                         TRIM(CAST(sp.cluster AS CHAR))
                     ) AS site_cell_sector_band_operator_key
                 FROM site_prediction sp
+                LEFT JOIN tbl_project p ON p.id = sp.tbl_project_id
                 WHERE sp.tbl_project_id = @pid
                   AND sp.site IS NOT NULL AND TRIM(CAST(sp.site AS CHAR)) <> ''
                   AND sp.cell_id IS NOT NULL AND TRIM(CAST(sp.cell_id AS CHAR)) <> ''
@@ -1264,7 +1316,9 @@ namespace SignalTracker.Services
                     PythonBridgeDbTool.AddParam(command, "@off", offset);
 
                     await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-                    return await PythonBridgeDbTool.ReadRowsAsync(reader, cancellationToken);
+                    var rows = await PythonBridgeDbTool.ReadRowsAsync(reader, cancellationToken);
+                    NormalizeSitePredictionRows(rows);
+                    return rows;
                     }
                     finally
                     {
@@ -1534,7 +1588,9 @@ namespace SignalTracker.Services
                     }
 
                     await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-                    return await PythonBridgeDbTool.ReadRowsAsync(reader, cancellationToken);
+                    var rows = await PythonBridgeDbTool.ReadRowsAsync(reader, cancellationToken);
+                    NormalizeSitePredictionRows(rows);
+                    return rows;
                     }
                     finally
                     {
@@ -1666,7 +1722,9 @@ namespace SignalTracker.Services
                     PythonBridgeDbTool.AddParam(command, "@off", offset);
 
                     await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-                    return await PythonBridgeDbTool.ReadRowsAsync(reader, cancellationToken);
+                    var rows = await PythonBridgeDbTool.ReadRowsAsync(reader, cancellationToken);
+                    NormalizeSitePredictionRows(rows);
+                    return rows;
                     },
                     cancellationToken);
             }
