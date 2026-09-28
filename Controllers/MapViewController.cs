@@ -45,6 +45,7 @@ namespace SignalTracker.Controllers
         private readonly IConfiguration _configuration;
         private const int MapViewCacheTtlSeconds = 300;
         private static volatile bool NetworkLogUpdatedAtColumnEnsured;
+        private static volatile bool NetworkLogMapIndexesEnsured;
         private static volatile bool ObsoleteNetworkLogCachesInvalidated;
         private static readonly ConcurrentDictionary<string, Lazy<Task<NetworkLogFullResponse>>> NetworkLogPageBuilds = new();
         private static readonly string[] MapViewCacheInvalidationPatterns =
@@ -6466,6 +6467,7 @@ private async Task<JsonResult> GetNetworkLogCore(MapFilter1 filters)
         string? providerNormalized = null;
         await InvalidateObsoleteNetworkLogCachesAsync();
         await EnsureNetworkLogUpdatedAtColumnAsync(connString);
+        await EnsureNetworkLogMapIndexesAsync(connString);
 
         // Keep the latest key only as a write-through convenience. Reads must use
         // the data-versioned key below; otherwise a newly inserted log can leave
@@ -7375,6 +7377,59 @@ private async Task EnsureNetworkLogUpdatedAtColumnAsync(string connString)
     }
 }
 
+private async Task EnsureNetworkLogMapIndexesAsync(string connString)
+{
+    if (NetworkLogMapIndexesEnsured || string.IsNullOrWhiteSpace(connString))
+        return;
+
+    try
+    {
+        using var conn = new MySqlConnection(connString);
+        await conn.OpenAsync();
+
+        async Task EnsureIndexAsync(string indexName, string createSql)
+        {
+            using (var checkCmd = conn.CreateCommand())
+            {
+                checkCmd.CommandText = @"
+                    SELECT COUNT(*)
+                    FROM information_schema.statistics
+                    WHERE table_schema = DATABASE()
+                      AND table_name = 'tbl_network_log'
+                      AND index_name = @indexName;";
+                checkCmd.Parameters.AddWithValue("@indexName", indexName);
+
+                var exists = Convert.ToInt32(await checkCmd.ExecuteScalarAsync(), CultureInfo.InvariantCulture) > 0;
+                if (exists)
+                    return;
+            }
+
+            using var createCmd = conn.CreateCommand();
+            createCmd.CommandText = createSql;
+            createCmd.CommandTimeout = 300;
+            await createCmd.ExecuteNonQueryAsync();
+        }
+
+        await EnsureIndexAsync(
+            "idx_networklog_session_timestamp_id",
+            "CREATE INDEX idx_networklog_session_timestamp_id ON tbl_network_log (session_id, timestamp, id);");
+
+        await EnsureIndexAsync(
+            "idx_networklog_session_network_timestamp_id",
+            "CREATE INDEX idx_networklog_session_network_timestamp_id ON tbl_network_log (session_id, network, timestamp, id);");
+
+        await EnsureIndexAsync(
+            "idx_networklog_session_lat_lon",
+            "CREATE INDEX idx_networklog_session_lat_lon ON tbl_network_log (session_id, lat, lon);");
+
+        NetworkLogMapIndexesEnsured = true;
+    }
+    catch (Exception ex)
+    {
+        NetworkLogMapIndexesEnsured = true;
+        Console.WriteLine($" Network log map index ensure skipped: {SafeException.Get(ex)}");
+    }
+}
 private async Task<string> GetNetworkLogDataVersionAsync(
     string connString,
     List<long> sessionIds,
