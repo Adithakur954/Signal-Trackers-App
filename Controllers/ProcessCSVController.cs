@@ -134,11 +134,17 @@ namespace SignalTracker.Controllers
             [Name("RSRP", "ssRSRP / RSRP / RSCP")]
             public string? RSRP { get; set; }
 
+            [Name("RSCP", "rscp", "Disp 3G RSCP (dBm)")]
+            public string? RSCP { get; set; }
+
             [Name("RSRQ", "ssRSRQ / RSRQ / EcNo")]
             public string? RSRQ { get; set; }
 
             [Name("SINR", "NR-SINR / SINR / RxQual")]
             public string? SINR { get; set; }
+
+            [Name("Disp 3G EcNo (dB)", "EcNo", "ecno")]
+            public string? EcNo { get; set; }
 
             [Name("DL THPT", "dl_tpt")]
             public string? dl_tpt { get; set; }
@@ -1495,12 +1501,15 @@ public IActionResult UploadSitePrediction(
                 entity.earfcn        = row.EARFCN;
                 entity.direction    = row.Direction;
                 entity.channel      = string.IsNullOrWhiteSpace(row.Channel) ? row.EARFCN : row.Channel;
-
                 bool valid;
-                entity.rsrp = ValidParseFloat(row.RSRP, out valid);
-                if (!valid && !string.IsNullOrWhiteSpace(row.RSRP))
+                var rsrpSource = string.Equals(row.Network?.Trim(), "3G", StringComparison.OrdinalIgnoreCase)
+                    && !string.IsNullOrWhiteSpace(row.RSCP)
+                        ? row.RSCP
+                        : row.RSRP;
+                entity.rsrp = ValidParseFloat(rsrpSource, out valid);
+                if (!valid && !string.IsNullOrWhiteSpace(rsrpSource))
                 {
-                    errorList.Add($"Row {rowIndex} ({row.RSRP}): Invalid RSRP");
+                    errorList.Add($"Row {rowIndex} ({rsrpSource}): Invalid RSRP");
                     continue;
                 }
 
@@ -1511,10 +1520,14 @@ public IActionResult UploadSitePrediction(
                     continue;
                 }
 
-                entity.sinr = ValidParseFloat(row.SINR, out valid);
-                if (!valid && !string.IsNullOrWhiteSpace(row.SINR))
+                var sinrSource = string.Equals(row.Network?.Trim(), "3G", StringComparison.OrdinalIgnoreCase)
+                    && !string.IsNullOrWhiteSpace(row.EcNo)
+                        ? row.EcNo
+                        : row.SINR;
+                entity.sinr = ValidParseFloat(sinrSource, out valid);
+                if (!valid && !string.IsNullOrWhiteSpace(sinrSource))
                 {
-                    errorList.Add($"Row {rowIndex} ({row.SINR}): Invalid SINR");
+                    errorList.Add($"Row {rowIndex} ({sinrSource}): Invalid SINR");
                     continue;
                 }
 
