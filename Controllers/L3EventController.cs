@@ -2387,21 +2387,13 @@ public L3EventController(
                 where.Add($"h.session_id IN ({string.Join(", ", names)})");
             }
 
-            // Show diagnostic uploads when either L3 or Event rows were imported.
-            // Some valid uploads contain an empty/header-only L3 file and real Event rows.
-            where.Add(@"(
-                EXISTS (
-                    SELECT 1
-                    FROM tbl_l3_log l3
-                    WHERE l3.tbl_upload_id = h.tbl_upload_id
-                    LIMIT 1
-                )
-                OR EXISTS (
-                    SELECT 1
-                    FROM tbl_event_log ev
-                    WHERE ev.tbl_upload_id = h.tbl_upload_id
-                    LIMIT 1
-                )
+            // Show the L3/Event upload history only when actual L3 rows were imported.
+            // Event-only uploads stay stored, but they do not appear in this L3 history list.
+            where.Add(@"EXISTS (
+                SELECT 1
+                FROM tbl_l3_log l3
+                WHERE l3.tbl_upload_id = h.tbl_upload_id
+                LIMIT 1
             )");
 
             AddParam(cmd, "@take", take);
