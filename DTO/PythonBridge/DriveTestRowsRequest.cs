@@ -7,6 +7,7 @@
         public string? CountryCode { get; set; }
         public List<long> SessionIds { get; set; } = new();
         public bool IncludeNeighbour { get; set; } = true;
+        public string? Source { get; set; }
         public string? Operator { get; set; }
         public bool PrimaryOnly { get; set; } = false;
         // Optional technology filter -- exact `network` column values to keep (e.g. "4G",
@@ -20,6 +21,7 @@
         public DateTime? EndDate { get; set; }
         public int Limit { get; set; } = 50000;
         public int Offset { get; set; } = 0;
+        public long? LastId { get; set; }
     }
 }
 

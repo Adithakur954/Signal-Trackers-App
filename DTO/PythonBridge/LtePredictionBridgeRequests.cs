@@ -9,6 +9,7 @@
         public string? PolygonIds { get; set; }
         public int Limit { get; set; } = 50000;
         public int Offset { get; set; } = 0;
+        public long? LastId { get; set; }
     }
 
     public class LteBuildingRowsRequest
@@ -18,6 +19,7 @@
         public string? CountryCode { get; set; }
         public int Limit { get; set; } = 50000;
         public int Offset { get; set; } = 0;
+        public long? LastId { get; set; }
     }
 
     public class LteBaselineRowsRequest
@@ -39,6 +41,8 @@
         public string? Region { get; set; }
         public string? CountryCode { get; set; }
         public bool ReplaceExisting { get; set; }
+        public int? ChunkIndex { get; set; }
+        public bool? ReplaceExistingOnFirstChunkOnly { get; set; }
         public List<Dictionary<string, object?>> Rows { get; set; } = new();
     }
 

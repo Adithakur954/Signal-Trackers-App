@@ -9,6 +9,7 @@
         public DateTime? EndDate { get; set; }
         public int Limit { get; set; } = 50000;
         public int Offset { get; set; }
+        public long? LastId { get; set; }
     }
 
     public class ProjectDownloadPathUpdateRequest

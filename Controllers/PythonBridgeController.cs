@@ -18,6 +18,25 @@ namespace SignalTracker.Controllers
             _pythonBridgeService = pythonBridgeService;
         }
 
+        private static object? GetNextCursor(List<Dictionary<string, object?>> rows)
+        {
+            if (rows.Count == 0)
+            {
+                return null;
+            }
+
+            var last = rows[^1];
+            foreach (var key in new[] { "id", "Id", "grid_id", "row_no" })
+            {
+                if (last.TryGetValue(key, out var value) && value != null)
+                {
+                    return value;
+                }
+            }
+
+            return null;
+        }
+
         [HttpPost("GetDriveTestRows")]
         public async Task<IActionResult> GetDriveTestRows([FromBody] DriveTestRowsRequest request)
         {
@@ -48,6 +67,7 @@ namespace SignalTracker.Controllers
                 Count = result.Rows.Count,
                 Limit = result.Limit,
                 Offset = result.Offset,
+                NextCursor = GetNextCursor(result.Rows),
                 Data = result.Rows
             });
         }
@@ -88,6 +108,7 @@ namespace SignalTracker.Controllers
                 Count = result.Rows.Count,
                 Limit = result.Limit,
                 Offset = result.Offset,
+                NextCursor = GetNextCursor(result.Rows),
                 Data = result.Rows
             });
         }
@@ -116,6 +137,7 @@ namespace SignalTracker.Controllers
                 Count = result.Rows.Count,
                 Limit = result.Limit,
                 Offset = result.Offset,
+                NextCursor = GetNextCursor(result.Rows),
                 Data = result.Rows
             });
         }
@@ -144,6 +166,7 @@ namespace SignalTracker.Controllers
                 Count = result.Rows.Count,
                 Limit = result.Limit,
                 Offset = result.Offset,
+                NextCursor = GetNextCursor(result.Rows),
                 Data = result.Rows
             });
         }
@@ -172,6 +195,7 @@ namespace SignalTracker.Controllers
                 Count = result.Rows.Count,
                 Limit = result.Limit,
                 Offset = result.Offset,
+                NextCursor = GetNextCursor(result.Rows),
                 Data = result.Rows
             });
         }
@@ -214,6 +238,7 @@ namespace SignalTracker.Controllers
                 Count = result.Rows.Count,
                 Limit = result.Limit,
                 Offset = result.Offset,
+                NextCursor = GetNextCursor(result.Rows),
                 Data = result.Rows
             });
         }
@@ -242,7 +267,7 @@ namespace SignalTracker.Controllers
                 HttpContext.RequestAborted
             );
 
-            return Ok(new { Status = 1, Count = result.Rows.Count, Limit = result.Limit, Offset = result.Offset, Data = result.Rows });
+            return Ok(new { Status = 1, Count = result.Rows.Count, Limit = result.Limit, Offset = result.Offset, NextCursor = GetNextCursor(result.Rows), Data = result.Rows });
         }
 
         [HttpGet("GetLteBuildingRows")]
@@ -263,7 +288,7 @@ namespace SignalTracker.Controllers
                 HttpContext.RequestAborted
             );
 
-            return Ok(new { Status = 1, Count = result.Rows.Count, Limit = result.Limit, Offset = result.Offset, Data = result.Rows });
+            return Ok(new { Status = 1, Count = result.Rows.Count, Limit = result.Limit, Offset = result.Offset, NextCursor = GetNextCursor(result.Rows), Data = result.Rows });
         }
 
         [HttpGet("GetLteBaselineRows")]
@@ -279,7 +304,7 @@ namespace SignalTracker.Controllers
                 HttpContext.RequestAborted
             );
 
-            return Ok(new { Status = 1, Count = result.Rows.Count, Limit = result.Limit, Offset = result.Offset, Data = result.Rows });
+            return Ok(new { Status = 1, Count = result.Rows.Count, Limit = result.Limit, Offset = result.Offset, NextCursor = GetNextCursor(result.Rows), Data = result.Rows });
         }
 
         [HttpPost("SavePredictionData")]
@@ -651,6 +676,7 @@ namespace SignalTracker.Controllers
                 Count = result.Rows.Count,
                 Limit = result.Limit,
                 Offset = result.Offset,
+                NextCursor = GetNextCursor(result.Rows),
                 Data = result.Rows
             });
         }
@@ -755,6 +781,7 @@ namespace SignalTracker.Controllers
                 Count = result.Rows.Count,
                 Limit = result.Limit,
                 Offset = result.Offset,
+                NextCursor = GetNextCursor(result.Rows),
                 Data = result.Rows
             });
         }
