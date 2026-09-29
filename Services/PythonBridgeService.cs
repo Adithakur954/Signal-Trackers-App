@@ -1,4 +1,5 @@
-﻿using System.Data;
+﻿using System.Collections.Concurrent;
+using System.Data;
 using System.Data.Common;
 using System.Globalization;
 using System.Text;
@@ -21,6 +22,8 @@ namespace SignalTracker.Services
         // Bounded stripes avoid retaining a semaphore for every project forever.
         private static readonly SemaphoreSlim[] BaselineSaveGates = Enumerable.Range(0, 128)
             .Select(_ => new SemaphoreSlim(1, 1)).ToArray();
+        private static readonly ConcurrentDictionary<string, DbContextOptions<ApplicationDbContext>> DbContextOptionsCache = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly ConcurrentDictionary<string, HashSet<string>> TableColumnCache = new(StringComparer.OrdinalIgnoreCase);
 
         private readonly ApplicationDbContext _db;
         private readonly IConfiguration _configuration;
@@ -167,6 +170,34 @@ namespace SignalTracker.Services
             }
         }
 
+        private static async Task<HashSet<string>> GetCachedTableColumnsAsync(
+            DbConnection conn,
+            string tableName,
+            CancellationToken cancellationToken)
+        {
+            var cacheKey = $"{conn.DataSource}|{conn.Database}|{tableName}";
+            if (TableColumnCache.TryGetValue(cacheKey, out var cachedColumns))
+            {
+                return cachedColumns;
+            }
+
+            var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            await using var columnCommand = conn.CreateCommand();
+            columnCommand.CommandText = @"
+                SELECT COLUMN_NAME
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = @table_name;";
+            PythonBridgeDbTool.AddParam(columnCommand, "@table_name", tableName);
+
+            await using var columnReader = await columnCommand.ExecuteReaderAsync(cancellationToken);
+            while (await columnReader.ReadAsync(cancellationToken))
+            {
+                columns.Add(Convert.ToString(columnReader.GetValue(0)) ?? string.Empty);
+            }
+
+            return TableColumnCache.GetOrAdd(cacheKey, columns);
+        }
         private static async Task<bool> ProjectHasFilterPolygonAsync(
             DbConnection conn,
             long? projectId,
@@ -197,13 +228,21 @@ namespace SignalTracker.Services
             Func<Task<List<Dictionary<string, object?>>>> loader,
             CancellationToken cancellationToken)
         {
-            if (_redisService.IsConnected)
+            var allowRedisCache = limit <= 5000;
+            if (allowRedisCache && _redisService.IsConnected)
             {
-                var cached = await _redisService.GetObjectAsync<BridgeRowsCacheEntry>(cacheKey);
-                if (cached != null)
+                try
                 {
-                    _logger.LogInformation("PythonBridge cache hit: {CacheKey} rows={RowCount}", cacheKey, cached.Rows.Count);
-                    return (cached.Limit, cached.Offset, cached.Rows);
+                    var cached = await _redisService.GetObjectAsync<BridgeRowsCacheEntry>(cacheKey);
+                    if (cached != null)
+                    {
+                        _logger.LogInformation("PythonBridge cache hit: {CacheKey} rows={RowCount}", cacheKey, cached.Rows.Count);
+                        return (cached.Limit, cached.Offset, cached.Rows);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "PythonBridge Redis read failed; continuing without cache. cacheKey={CacheKey}", cacheKey);
                 }
             }
 
@@ -213,20 +252,26 @@ namespace SignalTracker.Services
 
             _logger.LogInformation("PythonBridge DB fetch: {CacheKey} rows={RowCount} elapsedMs={ElapsedMs}", cacheKey, rows.Count, sw.ElapsedMilliseconds);
 
-            if (_redisService.IsConnected)
+            if (allowRedisCache && _redisService.IsConnected)
             {
-                var cacheEntry = new BridgeRowsCacheEntry
+                try
                 {
-                    Limit = limit,
-                    Offset = offset,
-                    Rows = rows
-                };
-                await _redisService.SetObjectAsync(cacheKey, cacheEntry, BridgeReadCacheTtlSeconds);
+                    var cacheEntry = new BridgeRowsCacheEntry
+                    {
+                        Limit = limit,
+                        Offset = offset,
+                        Rows = rows
+                    };
+                    await _redisService.SetObjectAsync(cacheKey, cacheEntry, BridgeReadCacheTtlSeconds);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "PythonBridge Redis write failed; response still succeeds. cacheKey={CacheKey}", cacheKey);
+                }
             }
 
             return (limit, offset, rows);
         }
-
         public bool IsAuthorized(string? incomingKey)
         {
             var configuredKey =
@@ -719,6 +764,10 @@ namespace SignalTracker.Services
 
             var limit = Math.Clamp(request.Limit, 1, 50000);
             var offset = Math.Max(request.Offset, 0);
+            var lastId = Math.Max(request.LastId ?? 0, 0);
+            var source = request.Source?.Trim();
+            var useSourcePaging = request.LastId.HasValue || !string.IsNullOrWhiteSpace(source);
+            var useNeighbourSource = string.Equals(source, "neighbour", StringComparison.OrdinalIgnoreCase) || string.Equals(source, "neighbor", StringComparison.OrdinalIgnoreCase);
             var operatorFilter = request.Operator?.Trim();
             var hasOperatorFilter = !string.IsNullOrWhiteSpace(operatorFilter);
             var primaryOnly = request.PrimaryOnly;
@@ -829,6 +878,7 @@ namespace SignalTracker.Services
                 {
                     dateClause += " AND timestamp < @endDate";
                 }
+                var idClause = request.LastId.HasValue ? " AND id > @lastId" : string.Empty;
                 // Compares against the stored polygon/region GEOMETRY columns directly (no
                 // ST_AsText/ST_GeomFromText round-trip on the polygon). For SRID 4326, MySQL's
                 // ST_GeomFromText() defaults to (lat, lon) axis order (matching EPSG:4326's own
@@ -852,15 +902,30 @@ namespace SignalTracker.Services
                             ) = 1
                         )"
                     : string.Empty;
-                var servingQuery = string.Format(servingSql, inClause, validBandPredicate, fiveGPredicate, $"AND ({primaryCellInfoPredicate})", operatorClause, primaryClause, dateClause, polygonClause, excludeSelfTaggedNeighbourPredicate, technologyClause);
-                var neighbourQuery = string.Format(neighbourSql, inClause, validBandPredicate, fiveGPredicate, $"AND ({primaryCellInfoPredicate})", operatorClause, primaryClause, dateClause, polygonClause, technologyClause);
-
-                command.CommandText = request.IncludeNeighbour && !primaryOnly
-                    ? $"{servingQuery} UNION ALL {neighbourQuery} LIMIT @lim OFFSET @off;"
-                    : $"{servingQuery} LIMIT @lim OFFSET @off;";
+                var servingQuery = string.Format(servingSql, inClause, validBandPredicate, fiveGPredicate, $"AND ({primaryCellInfoPredicate})", operatorClause, primaryClause, dateClause, polygonClause, excludeSelfTaggedNeighbourPredicate, technologyClause) + idClause;
+                var neighbourQuery = string.Format(neighbourSql, inClause, validBandPredicate, fiveGPredicate, $"AND ({primaryCellInfoPredicate})", operatorClause, primaryClause, dateClause, polygonClause, technologyClause) + idClause;
+                var pagingSql = request.LastId.HasValue ? "LIMIT @lim" : "LIMIT @lim OFFSET @off";
+                if (useSourcePaging)
+                {
+                    var selectedQuery = useNeighbourSource ? neighbourQuery : servingQuery;
+                    command.CommandText = $"{selectedQuery} ORDER BY id {pagingSql};";
+                }
+                else
+                {
+                    command.CommandText = request.IncludeNeighbour && !primaryOnly
+                        ? $"{servingQuery} UNION ALL {neighbourQuery} ORDER BY id {pagingSql};"
+                        : $"{servingQuery} ORDER BY id {pagingSql};";
+                }
 
                 PythonBridgeDbTool.AddParam(command, "@lim", limit);
-                PythonBridgeDbTool.AddParam(command, "@off", offset);
+                if (!request.LastId.HasValue)
+                {
+                    PythonBridgeDbTool.AddParam(command, "@off", offset);
+                }
+                else
+                {
+                    PythonBridgeDbTool.AddParam(command, "@lastId", lastId);
+                }
                 if (hasOperatorFilter)
                 {
                     PythonBridgeDbTool.AddParam(command, "@operator", operatorFilter);
@@ -1013,6 +1078,7 @@ namespace SignalTracker.Services
 
             var limit = Math.Clamp(request.Limit, 1, 50000);
             var offset = Math.Max(request.Offset, 0);
+            var lastId = Math.Max(request.LastId ?? 0, 0);
             var operatorFilter = request.Operator?.Trim();
             var hasOperatorFilter = !string.IsNullOrWhiteSpace(operatorFilter)
                 && !string.Equals(operatorFilter, "all", StringComparison.OrdinalIgnoreCase);
@@ -1041,8 +1107,9 @@ namespace SignalTracker.Services
                 FROM lte_prediction_baseline_results
                 WHERE project_id = @pid
                 {(hasOperatorFilter ? "AND operator = @operator" : string.Empty)}
+                {(request.LastId.HasValue ? "AND id > @lastId" : string.Empty)}
                 ORDER BY id
-                LIMIT @lim OFFSET @off;";
+                {(request.LastId.HasValue ? "LIMIT @lim" : "LIMIT @lim OFFSET @off")};";
 
                 PythonBridgeDbTool.AddParam(command, "@pid", request.ProjectId);
                 if (hasOperatorFilter)
@@ -1050,7 +1117,14 @@ namespace SignalTracker.Services
                     PythonBridgeDbTool.AddParam(command, "@operator", operatorFilter!);
                 }
                 PythonBridgeDbTool.AddParam(command, "@lim", limit);
-                PythonBridgeDbTool.AddParam(command, "@off", offset);
+                if (!request.LastId.HasValue)
+                {
+                    PythonBridgeDbTool.AddParam(command, "@off", offset);
+                }
+                else
+                {
+                    PythonBridgeDbTool.AddParam(command, "@lastId", lastId);
+                }
 
                 await using var reader = await command.ExecuteReaderAsync(cancellationToken);
                 var rows = await PythonBridgeDbTool.ReadRowsAsync(reader, cancellationToken);
@@ -1077,6 +1151,7 @@ namespace SignalTracker.Services
 
             var limit = Math.Clamp(request.Limit, 1, 50000);
             var offset = Math.Max(request.Offset, 0);
+            var lastId = Math.Max(request.LastId ?? 0, 0);
 
             var contextToUse = CreateDbContextForRegion(request.Region, request.CountryCode);
             var ownsContext = contextToUse != _db;
@@ -1089,7 +1164,7 @@ namespace SignalTracker.Services
                 }
 
                 await using var command = conn.CreateCommand();
-                command.CommandText = @"
+                command.CommandText = $@"
                 SELECT
                     sp.*,
                     sp.cluster AS provider,
@@ -1119,12 +1194,20 @@ namespace SignalTracker.Services
                   AND sp.sector IS NOT NULL AND TRIM(CAST(sp.sector AS CHAR)) <> ''
                   AND sp.band IS NOT NULL AND TRIM(CAST(sp.band AS CHAR)) <> ''
                   AND sp.cluster IS NOT NULL AND TRIM(CAST(sp.cluster AS CHAR)) <> ''
+                  {(request.LastId.HasValue ? "AND sp.id > @lastId" : string.Empty)}
                 ORDER BY sp.id
-                LIMIT @lim OFFSET @off;";
+                {(request.LastId.HasValue ? "LIMIT @lim" : "LIMIT @lim OFFSET @off")};";
 
                 PythonBridgeDbTool.AddParam(command, "@pid", request.ProjectId);
                 PythonBridgeDbTool.AddParam(command, "@lim", limit);
-                PythonBridgeDbTool.AddParam(command, "@off", offset);
+                if (!request.LastId.HasValue)
+                {
+                    PythonBridgeDbTool.AddParam(command, "@off", offset);
+                }
+                else
+                {
+                    PythonBridgeDbTool.AddParam(command, "@lastId", lastId);
+                }
 
                 await using var reader = await command.ExecuteReaderAsync(cancellationToken);
                 var rows = await PythonBridgeDbTool.ReadRowsAsync(reader, cancellationToken);
@@ -1153,7 +1236,9 @@ namespace SignalTracker.Services
             var offset = Math.Max(request.Offset, 0);
             var region = ResolveRegionOrCountry(request.Region, request.CountryCode) ?? "india";
             region = region.Trim().ToLowerInvariant();
-            var cacheKey = BuildCacheKey("lte_geo_v2", request.ProjectId, region, limit, offset);
+            var lastId = Math.Max(request.LastId ?? 0, 0);
+            var requestedKeysetPaging = request.LastId.HasValue;
+            var cacheKey = BuildCacheKey("lte_geo_v3", request.ProjectId, region, limit, requestedKeysetPaging ? lastId : offset);
 
             return await GetCachedOrLoadRowsAsync(
                 cacheKey,
@@ -1172,8 +1257,9 @@ namespace SignalTracker.Services
                         }
 
                         await using var command = conn.CreateCommand();
-                        command.CommandText = @"
+                        command.CommandText = $@"
                 SELECT
+                    id,
                     project_id,
                     region,
                     operator,
@@ -1211,13 +1297,21 @@ namespace SignalTracker.Services
                 FROM lte_prediction_geo_features
                 WHERE project_id = @pid
                   AND region = @region
-                ORDER BY nodeb_id_cell_id, lat, lon
-                LIMIT @lim OFFSET @off;";
+                  {(requestedKeysetPaging ? "AND id > @lastId" : string.Empty)}
+                ORDER BY id
+                {(requestedKeysetPaging ? "LIMIT @lim" : "LIMIT @lim OFFSET @off")};";
 
                         PythonBridgeDbTool.AddParam(command, "@pid", request.ProjectId);
                         PythonBridgeDbTool.AddParam(command, "@region", region);
                         PythonBridgeDbTool.AddParam(command, "@lim", limit);
-                        PythonBridgeDbTool.AddParam(command, "@off", offset);
+                        if (requestedKeysetPaging)
+                        {
+                            PythonBridgeDbTool.AddParam(command, "@lastId", lastId);
+                        }
+                        else
+                        {
+                            PythonBridgeDbTool.AddParam(command, "@off", offset);
+                        }
 
                         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
                         return await PythonBridgeDbTool.ReadRowsAsync(reader, cancellationToken);
@@ -1245,6 +1339,7 @@ namespace SignalTracker.Services
 
             var limit = Math.Clamp(request.Limit, 1, 50000);
             var offset = Math.Max(request.Offset, 0);
+            var lastId = Math.Max(request.LastId ?? 0, 0);
             var operatorFilter = request.Operator?.Trim();
             var hasOperatorFilter = !string.IsNullOrWhiteSpace(operatorFilter)
                 && !string.Equals(operatorFilter, "all", StringComparison.OrdinalIgnoreCase);
@@ -1252,7 +1347,7 @@ namespace SignalTracker.Services
             var polygonFilter = BuildPolygonFilterClause(polygonIds, "latitude", "longitude");
             var polygonKey = polygonIds.Count > 0 ? string.Join("-", polygonIds) : "all";
             var resolvedRegion = ResolveRegionOrCountry(request.Region, request.CountryCode) ?? "india";
-            var cacheKey = BuildCacheKey("lte_site_pred_complete_identity_v2", request.ProjectId, resolvedRegion, operatorFilter ?? "all", polygonKey, limit, offset);
+            var cacheKey = BuildCacheKey("lte_site_pred_complete_identity_v3", request.ProjectId, resolvedRegion, operatorFilter ?? "all", polygonKey, limit, request.LastId.HasValue ? lastId : offset);
 
             return await GetCachedOrLoadRowsAsync(
                 cacheKey,
@@ -1303,8 +1398,9 @@ namespace SignalTracker.Services
                   AND sp.cluster IS NOT NULL AND TRIM(CAST(sp.cluster AS CHAR)) <> ''
                 {(hasOperatorFilter ? "AND LOWER(TRIM(CAST(sp.cluster AS CHAR))) = LOWER(TRIM(@operator))" : string.Empty)}
                 {polygonFilter}
+                {(request.LastId.HasValue ? "AND sp.id > @lastId" : string.Empty)}
                 ORDER BY sp.id
-                LIMIT @lim OFFSET @off;";
+                {(request.LastId.HasValue ? "LIMIT @lim" : "LIMIT @lim OFFSET @off")};";
 
                     PythonBridgeDbTool.AddParam(command, "@pid", request.ProjectId);
                     if (hasOperatorFilter)
@@ -1313,7 +1409,14 @@ namespace SignalTracker.Services
                     }
                     AddPolygonIdsParameters(command, polygonIds);
                     PythonBridgeDbTool.AddParam(command, "@lim", limit);
-                    PythonBridgeDbTool.AddParam(command, "@off", offset);
+                    if (request.LastId.HasValue)
+                    {
+                        PythonBridgeDbTool.AddParam(command, "@lastId", lastId);
+                    }
+                    else
+                    {
+                        PythonBridgeDbTool.AddParam(command, "@off", offset);
+                    }
 
                     await using var reader = await command.ExecuteReaderAsync(cancellationToken);
                     var rows = await PythonBridgeDbTool.ReadRowsAsync(reader, cancellationToken);
@@ -1343,6 +1446,7 @@ namespace SignalTracker.Services
 
             var limit = Math.Clamp(request.Limit, 1, 50000);
             var offset = Math.Max(request.Offset, 0);
+            var lastId = Math.Max(request.LastId ?? 0, 0);
             var contextToUse = CreateDbContextForRegion(request.Region, request.CountryCode);
             var ownsContext = contextToUse != _db;
             try
@@ -1354,7 +1458,7 @@ namespace SignalTracker.Services
                 }
 
                 await using var command = conn.CreateCommand();
-                command.CommandText = @"
+                command.CommandText = $@"
                 SELECT
                     id,
                     name,
@@ -1369,12 +1473,20 @@ namespace SignalTracker.Services
                 FROM tbl_savepolygon
                 WHERE project_id = @pid
                   AND (source_name IS NULL OR source_name IN ('overture_building', 'osm_building'))
+                  {(request.LastId.HasValue ? "AND id > @lastId" : string.Empty)}
                 ORDER BY id
-                LIMIT @lim OFFSET @off;";
+                {(request.LastId.HasValue ? "LIMIT @lim" : "LIMIT @lim OFFSET @off")};";
 
                 PythonBridgeDbTool.AddParam(command, "@pid", request.ProjectId);
                 PythonBridgeDbTool.AddParam(command, "@lim", limit);
-                PythonBridgeDbTool.AddParam(command, "@off", offset);
+                if (!request.LastId.HasValue)
+                {
+                    PythonBridgeDbTool.AddParam(command, "@off", offset);
+                }
+                else
+                {
+                    PythonBridgeDbTool.AddParam(command, "@lastId", lastId);
+                }
 
                 await using var reader = await command.ExecuteReaderAsync(cancellationToken);
                 var rows = await PythonBridgeDbTool.ReadRowsAsync(reader, cancellationToken);
@@ -1500,20 +1612,7 @@ namespace SignalTracker.Services
                         "created_at",
                         "id"
                     };
-                    var existingColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                    await using (var columnCommand = conn.CreateCommand())
-                    {
-                        columnCommand.CommandText = @"
-                            SELECT COLUMN_NAME
-                            FROM INFORMATION_SCHEMA.COLUMNS
-                            WHERE TABLE_SCHEMA = DATABASE()
-                              AND TABLE_NAME = 'lte_prediction_baseline_results';";
-                        await using var columnReader = await columnCommand.ExecuteReaderAsync(cancellationToken);
-                        while (await columnReader.ReadAsync(cancellationToken))
-                        {
-                            existingColumns.Add(Convert.ToString(columnReader.GetValue(0)) ?? string.Empty);
-                        }
-                    }
+                    var existingColumns = await GetCachedTableColumnsAsync(conn, "lte_prediction_baseline_results", cancellationToken);
 
                     var selectColumns = requestedColumns
                         .Where(existingColumns.Contains)
@@ -1541,25 +1640,9 @@ namespace SignalTracker.Services
                     var pagingSql = useKeysetPaging
                         ? "LIMIT @lim"
                         : "LIMIT @lim OFFSET @off";
-                    var offsetOrderColumns = new[]
-                    {
-                        "nodeb_id_cell_id",
-                        "cell_id",
-                        "grid_id",
-                        "lat",
-                        "lon",
-                        "created_at",
-                        "id"
-                    }
-                        .Where(existingColumns.Contains)
-                        .Distinct(StringComparer.OrdinalIgnoreCase)
-                        .Select(col => $"`{col}`")
-                        .ToList();
-                    var orderSql = useKeysetPaging
+                    var orderSql = existingColumns.Contains("id")
                         ? "ORDER BY `id`"
-                        : (offsetOrderColumns.Count > 0
-                            ? $"ORDER BY {string.Join(", ", offsetOrderColumns)}"
-                            : string.Empty);
+                        : string.Empty;
 
                     command.CommandText = $@"
                 SELECT {string.Join(", ", selectColumns.Select(col => col == "*" ? "*" : $"`{col}`"))}
@@ -2559,6 +2642,7 @@ namespace SignalTracker.Services
 
             command.CommandText = $@"
                 SELECT
+                    id,
                     project_id,
                     scenario_id,
                     `operator`,
@@ -3058,7 +3142,7 @@ namespace SignalTracker.Services
                 }
 
                 await using var command = conn.CreateCommand();
-                command.CommandText = @"
+                command.CommandText = $@"
                 SELECT
                     id,
                     name,

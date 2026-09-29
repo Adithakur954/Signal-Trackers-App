@@ -1,4 +1,4 @@
-namespace SignalTracker.DTO.PythonBridge
+﻿namespace SignalTracker.DTO.PythonBridge
 {
     public class L3LogRowsRequest
     {
@@ -9,5 +9,6 @@ namespace SignalTracker.DTO.PythonBridge
         public List<long> SessionIds { get; set; } = new();
         public int Limit { get; set; } = 50000;
         public int Offset { get; set; } = 0;
+        public long? LastId { get; set; }
     }
 }
