@@ -6643,11 +6643,13 @@ private async Task<NetworkLogFullResponse> BuildNetworkLogPageCacheAsync(
 
     async Task<NetworkLogFullResponse> FetchPageAsync(MapFilter1 activeFilters)
     {
+        var (whereClause, parameters) = await BuildSqlWhereAsync(sessionIds, provider, activeFilters);
+
         if (!includeSummary)
         {
             return new NetworkLogFullResponse
             {
-                data = await GetMainDataOnlyRaw(connString, sessionIds, provider, activeFilters, limit, pageOffset),
+                data = await GetMainDataOnlyRaw(connString, activeFilters, limit, pageOffset, whereClause, parameters),
                 app_summary = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase),
                 io_summary = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase),
                 tpt_volume = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase),
@@ -6658,9 +6660,9 @@ private async Task<NetworkLogFullResponse> BuildNetworkLogPageCacheAsync(
             };
         }
 
-        var taskData = GetMainDataOnlyRaw(connString, sessionIds, provider, activeFilters, limit, pageOffset);
-        var taskApps = GetAppSummaryRaw(connString, sessionIds, provider, activeFilters);
-        var taskStats = GetCombinedStatsRaw(connString, sessionIds, provider, activeFilters);
+        var taskData = GetMainDataOnlyRaw(connString, activeFilters, limit, pageOffset, whereClause, parameters);
+        var taskApps = GetAppSummaryRaw(connString, whereClause, parameters);
+        var taskStats = GetCombinedStatsRaw(connString, whereClause, parameters);
         await Task.WhenAll(taskData, taskApps, taskStats);
         var stats = taskStats.Result;
 
@@ -6903,7 +6905,12 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyEF(
 }
 
 private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
-    string connString, List<long> sessionIds, string? provider, MapFilter1 filters, int limit, int offset)
+    string connString,
+    MapFilter1 filters,
+    int limit,
+    int offset,
+    string baseWhereClause,
+    IReadOnlyDictionary<string, object> baseParameters)
 {
     using var conn = new MySqlConnection(connString);
     await conn.OpenAsync();
@@ -6911,7 +6918,8 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
     using var cmdConfig = new MySqlCommand("SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;", conn);
     await cmdConfig.ExecuteNonQueryAsync();
 
-    var (whereClause, parameters) = await BuildSqlWhereAsync(sessionIds, provider, filters);
+    var whereClause = baseWhereClause;
+    var parameters = new Dictionary<string, object>(baseParameters);
     const string cleanedShortTemplate = "NULLIF(TRIM(BOTH CHAR(39) FROM TRIM(BOTH '\"\"' FROM TRIM({0}.m_alpha_short))), '')";
     const string cleanedLongTemplate = "NULLIF(TRIM(BOTH CHAR(39) FROM TRIM(BOTH '\"\"' FROM TRIM({0}.m_alpha_long))), '')";
     const string techKeyTemplate = @"
@@ -7029,6 +7037,7 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
 
     var rows = new List<NetworkLogCacheRow>();
     using var cmd = new MySqlCommand(sql, conn);
+    cmd.CommandTimeout = 180;
     foreach (var p in parameters) cmd.Parameters.AddWithValue(p.Key, p.Value);
     cmd.Parameters.AddWithValue("@limit", limit);
     cmd.Parameters.AddWithValue("@offset", offset);
@@ -7088,7 +7097,9 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
 //  APP SUMMARY (Fixed: Shows Multiple Operators)
 // ---------------------------------------------------------
 private async Task<Dictionary<string, object>> GetAppSummaryRaw(
-    string connString, List<long> sessionIds, string? provider, MapFilter1 filters)
+    string connString,
+    string whereClause,
+    IReadOnlyDictionary<string, object> baseParameters)
 {
     using var conn = new MySqlConnection(connString);
     await conn.OpenAsync();
@@ -7097,7 +7108,7 @@ private async Task<Dictionary<string, object>> GetAppSummaryRaw(
     using var cmdConfig = new MySqlCommand("SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;", conn);
     await cmdConfig.ExecuteNonQueryAsync();
 
-    var (whereClause, parameters) = await BuildSqlWhereAsync(sessionIds, provider, filters);
+    var parameters = new Dictionary<string, object>(baseParameters);
 
     // List of apps to track
     var baseApps = new[] { "Whatsapp", "Instagram", "YT", "Google Chrome", "Google Search", "FB", "Gmail", "Outlook", "Spotify", "Blinkit", "Jio Hotstar","Netflix", "Amazon Prime ", };
@@ -7149,6 +7160,7 @@ private async Task<Dictionary<string, object>> GetAppSummaryRaw(
     var result = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
     
     using var cmd = new MySqlCommand(sql, conn);
+    cmd.CommandTimeout = 180;
     foreach(var p in parameters) cmd.Parameters.AddWithValue(p.Key, p.Value);
 
     using var rd = await cmd.ExecuteReaderAsync();
@@ -7192,7 +7204,9 @@ private async Task<Dictionary<string, object>> GetAppSummaryRaw(
 // 3Ã¯Â¸ÂÃ¢Æ’Â£ COMBINED STATS (Volume + IO + Sessions in ONE Query)
 // ---------------------------------------------------------
 private async Task<CombinedStatsDto> GetCombinedStatsRaw(
-    string connString, List<long> sessionIds, string? provider, MapFilter1 filters)
+    string connString,
+    string whereClause,
+    IReadOnlyDictionary<string, object> baseParameters)
 {
     using var conn = new MySqlConnection(connString);
     await conn.OpenAsync();
@@ -7201,7 +7215,7 @@ private async Task<CombinedStatsDto> GetCombinedStatsRaw(
     using var cmdConfig = new MySqlCommand("SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;", conn);
     await cmdConfig.ExecuteNonQueryAsync();
 
-    var (whereClause, parameters) = await BuildSqlWhereAsync(sessionIds, provider, filters);
+    var parameters = new Dictionary<string, object>(baseParameters);
 
     // Multi-Statement Query
     string sql = $@"
@@ -7220,6 +7234,7 @@ private async Task<CombinedStatsDto> GetCombinedStatsRaw(
     var stats = new CombinedStatsDto();
     
     using var cmd = new MySqlCommand(sql, conn);
+    cmd.CommandTimeout = 180;
     foreach(var p in parameters) cmd.Parameters.AddWithValue(p.Key, p.Value);
 
     using var rd = await cmd.ExecuteReaderAsync();
@@ -7259,6 +7274,13 @@ private async Task<string?> ResolveProjectFilterWktAsync(long? projectId)
     if (!projectId.HasValue || projectId.Value <= 0)
         return null;
 
+    var requestCacheKey = $"mapview:project-filter-wkt:{projectId.Value}";
+    if (HttpContext?.Items.TryGetValue(requestCacheKey, out var cachedValue) == true)
+    {
+        var cachedText = cachedValue as string;
+        return string.IsNullOrWhiteSpace(cachedText) ? null : cachedText;
+    }
+
     string connString = db.Database.GetConnectionString() ?? throw new InvalidOperationException("Database connection is not configured.");
     using var conn = new MySqlConnection(connString);
     await conn.OpenAsync();
@@ -7293,7 +7315,11 @@ private async Task<string?> ResolveProjectFilterWktAsync(long? projectId)
         ? null
         : Convert.ToString(result, CultureInfo.InvariantCulture);
 
-    return string.IsNullOrWhiteSpace(wkt) ? null : wkt.Trim();
+    var normalizedWkt = string.IsNullOrWhiteSpace(wkt) ? null : wkt.Trim();
+    if (HttpContext != null)
+        HttpContext.Items[requestCacheKey] = normalizedWkt ?? string.Empty;
+
+    return normalizedWkt;
 }
 
 private async Task<(string Clause, Dictionary<string, object> Params)> BuildSqlWhereAsync(
