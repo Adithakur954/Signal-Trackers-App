@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Authorization;
+﻿using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -218,6 +218,24 @@ namespace SignalTracker.Controllers
                 device = "Unknown device"
             };
         }
+        private static bool IsSameClientLoginLock(string? value, ActiveLoginInfo current)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return false;
+            }
+
+            var parts = value.Split('|');
+            if (parts.Length < 6)
+            {
+                return false;
+            }
+
+            return int.TryParse(parts[0], out var userId)
+                && userId == current.UserId
+                && string.Equals(DecodeBase64(parts[3]), current.IpAddress ?? string.Empty, StringComparison.Ordinal)
+                && string.Equals(DecodeBase64(parts[4]), current.UserAgent ?? string.Empty, StringComparison.Ordinal);
+        }
 
         private static string DecodeBase64(string value)
         {
@@ -361,14 +379,28 @@ namespace SignalTracker.Controllers
                     var lockResult = await _redis.TrySetStringWhenNotExistsAsync(userLockKey, lockValue, UserLoginLockTtlSeconds);
                     if (lockResult == RedisSetWhenNotExistsResult.AlreadyExists)
                     {
-                        var activeLogin = ParseLoginLockValue(await _redis.GetStringAsync(userLockKey));
-                        return Unauthorized(new
+                        var existingLockValue = await _redis.GetStringAsync(userLockKey);
+                        if (IsSameClientLoginLock(existingLockValue, activeLoginInfo))
                         {
-                            message = "Sorry, someone is already logged in. Please logout from old devices.",
-                            already_logged_in = true,
-                            can_force_logout = true,
-                            active_login = activeLogin
-                        });
+                            var refreshed = await _redis.SetStringAsync(userLockKey, lockValue, UserLoginLockTtlSeconds);
+                            if (!refreshed && RequireRedisLoginLock)
+                            {
+                                return StatusCode(503, new { message = "Login service is temporarily unavailable. Please try again." });
+                            }
+
+                            loginLockAcquired = refreshed;
+                        }
+                        else
+                        {
+                            var activeLogin = ParseLoginLockValue(existingLockValue);
+                            return Unauthorized(new
+                            {
+                                message = "Sorry, someone is already logged in. Please logout from old devices.",
+                                already_logged_in = true,
+                                can_force_logout = true,
+                                active_login = activeLogin
+                            });
+                        }
                     }
                     if (lockResult == RedisSetWhenNotExistsResult.Unavailable)
                     {

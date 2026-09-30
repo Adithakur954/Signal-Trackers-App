@@ -1134,6 +1134,9 @@ namespace SignalTracker.Controllers
 
     public sealed class ZipReportUploadRequest
     {
+        /// <summary>Optional client-generated job ID for real-time progress tracking.</summary>
+        public string? JobId { get; set; }
+
         /// <summary>Single zip file — kept for backward compatibility.</summary>
         public IFormFile? LogZip { get; set; }
 

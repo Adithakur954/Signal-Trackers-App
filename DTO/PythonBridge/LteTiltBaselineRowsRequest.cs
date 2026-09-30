@@ -8,6 +8,7 @@
         public string? Operator { get; set; }
         public int Limit { get; set; } = 5000;
         public int Offset { get; set; } = 0;
+        public long? LastId { get; set; }
     }
 
     public class LteTiltAntennaRowsRequest
@@ -17,6 +18,7 @@
         public string? CountryCode { get; set; }
         public int Limit { get; set; } = 5000;
         public int Offset { get; set; } = 0;
+        public long? LastId { get; set; }
     }
 
     public class LtePredictionGeoFeatureRowsRequest
@@ -26,6 +28,7 @@
         public string? CountryCode { get; set; }
         public int Limit { get; set; } = 5000;
         public int Offset { get; set; } = 0;
+        public long? LastId { get; set; }
     }
 }
 

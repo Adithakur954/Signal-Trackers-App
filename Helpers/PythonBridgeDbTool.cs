@@ -1,4 +1,4 @@
-using System.Data.Common;
+﻿using System.Data.Common;
 using System.Globalization;
 
 namespace SignalTracker.Helper
@@ -128,14 +128,21 @@ namespace SignalTracker.Helper
             CancellationToken cancellationToken = default
         )
         {
+            var fieldCount = reader.FieldCount;
+            var columnNames = new string[fieldCount];
+            for (var i = 0; i < fieldCount; i++)
+            {
+                columnNames[i] = reader.GetName(i);
+            }
+
             var rows = new List<Dictionary<string, object?>>();
 
             while (await reader.ReadAsync(cancellationToken))
             {
-                var row = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-                for (var i = 0; i < reader.FieldCount; i++)
+                var row = new Dictionary<string, object?>(fieldCount, StringComparer.OrdinalIgnoreCase);
+                for (var i = 0; i < fieldCount; i++)
                 {
-                    row[reader.GetName(i)] = await reader.IsDBNullAsync(i, cancellationToken)
+                    row[columnNames[i]] = await reader.IsDBNullAsync(i, cancellationToken)
                         ? null
                         : ConvertDbValue(reader.GetValue(i));
                 }

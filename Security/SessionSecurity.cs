@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.AspNetCore.Authentication;
@@ -86,7 +86,9 @@ public static class SessionSecurity
         }
         catch (OperationCanceledException) when (context.HttpContext.RequestAborted.IsCancellationRequested)
         {
-            context.RejectPrincipal();
+            // Closing a tab/modal can abort in-flight API requests. Do not turn that
+            // cancelled request into a logout for the still-valid browser session.
+            return;
         }
         catch (Exception)
         {

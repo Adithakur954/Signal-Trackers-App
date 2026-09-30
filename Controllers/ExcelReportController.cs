@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.IO.Compression;
 using System.Data.Common;
@@ -14,6 +14,8 @@ using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;
 using SkiaSharp;
 using SignalTracker.Models;
+using SignalTracker.Services;
+using System.Text.Json;
 
 namespace SignalTracker.Controllers
 {
@@ -155,6 +157,138 @@ namespace SignalTracker.Controllers
             return Generate(request);
         }
 
+        private static string ResolveJobId(string? requestJobId, HttpRequest request)
+        {
+            if (!string.IsNullOrWhiteSpace(requestJobId))
+                return requestJobId.Trim();
+
+            if (request.HasFormContentType && request.Form.TryGetValue("jobId", out var formJobId) && !string.IsNullOrWhiteSpace(formJobId))
+                return formJobId.ToString().Trim();
+
+            if (request.Query.TryGetValue("jobId", out var queryJobId) && !string.IsNullOrWhiteSpace(queryJobId))
+                return queryJobId.ToString().Trim();
+
+            if (request.Headers.TryGetValue("X-Job-Id", out var headerJobId) && !string.IsNullOrWhiteSpace(headerJobId))
+                return headerJobId.ToString().Trim();
+
+            return Guid.NewGuid().ToString("N");
+        }
+
+        [HttpGet("Progress/{jobId?}")]
+        [AllowAnonymous]
+        public IActionResult GetProgress([FromRoute] string? jobId, [FromQuery] string? queryJobId)
+        {
+            var id = !string.IsNullOrWhiteSpace(jobId) ? jobId : queryJobId;
+            if (string.IsNullOrWhiteSpace(id))
+                return BadRequest(new { Message = "JobId is required." });
+
+            var item = ReportProgressTracker.Get(id);
+            if (item == null)
+            {
+                return NotFound(new { JobId = id, Status = 0, Message = "Job not found or expired." });
+            }
+
+            return Ok(new
+            {
+                JobId = item.JobId,
+                Progress = item.Progress,
+                Stage = item.Stage,
+                Status = item.Status,
+                IsCompleted = item.IsCompleted,
+                IsFailed = item.IsFailed,
+                IsProcessing = item.IsProcessing,
+                Error = item.Error,
+                FileName = item.FileName,
+                DownloadUrl = item.IsCompleted ? $"/api/ExcelReport/Download/{item.JobId}" : null,
+                CreatedAt = item.CreatedAt,
+                UpdatedAt = item.UpdatedAt
+            });
+        }
+
+        [HttpGet("ProgressStream/{jobId}")]
+        [AllowAnonymous]
+        public async Task GetProgressStream([FromRoute] string jobId, CancellationToken ct)
+        {
+            Response.ContentType = "text/event-stream";
+            Response.Headers["Cache-Control"] = "no-cache";
+            Response.Headers["X-Accel-Buffering"] = "no";
+
+            if (string.IsNullOrWhiteSpace(jobId))
+            {
+                await Response.WriteAsync("event: error\ndata: {\"error\":\"JobId is required\"}\n\n", ct);
+                return;
+            }
+
+            int lastReportedProgress = -1;
+            string lastReportedStage = "";
+            var startTime = DateTime.UtcNow;
+
+            while (!ct.IsCancellationRequested && (DateTime.UtcNow - startTime).TotalMinutes < 30)
+            {
+                var item = ReportProgressTracker.Get(jobId);
+                if (item != null)
+                {
+                    if (item.Progress != lastReportedProgress || item.Stage != lastReportedStage || item.IsCompleted || item.IsFailed)
+                    {
+                        lastReportedProgress = item.Progress;
+                        lastReportedStage = item.Stage;
+
+                        var payload = JsonSerializer.Serialize(new
+                        {
+                            JobId = item.JobId,
+                            Progress = item.Progress,
+                            Stage = item.Stage,
+                            Status = item.Status,
+                            IsCompleted = item.IsCompleted,
+                            IsFailed = item.IsFailed,
+                            IsProcessing = item.IsProcessing,
+                            Error = item.Error,
+                            FileName = item.FileName,
+                            DownloadUrl = item.IsCompleted ? $"/api/ExcelReport/Download/{item.JobId}" : null
+                        });
+
+                        await Response.WriteAsync($"data: {payload}\n\n", ct);
+                        await Response.Body.FlushAsync(ct);
+
+                        if (item.IsCompleted || item.IsFailed)
+                            break;
+                    }
+                }
+
+                await Task.Delay(400, ct);
+            }
+        }
+
+        [HttpGet("Download/{jobId}")]
+        [AllowAnonymous]
+        public IActionResult DownloadReport([FromRoute] string jobId)
+        {
+            if (string.IsNullOrWhiteSpace(jobId))
+                return BadRequest(new { Message = "JobId is required." });
+
+            var item = ReportProgressTracker.Get(jobId);
+            if (item == null)
+                return NotFound(new { Message = "Report not found or has expired." });
+
+            if (!item.IsCompleted)
+                return BadRequest(new { Message = "Report is not ready yet.", Status = item.Status, Progress = item.Progress });
+
+            var filename = item.FileName ?? $"Walk_Test_Report_{jobId}.xlsx";
+
+            if (item.FileBytes != null && item.FileBytes.Length > 0)
+            {
+                return File(item.FileBytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename);
+            }
+
+            if (!string.IsNullOrWhiteSpace(item.DownloadPath) && System.IO.File.Exists(item.DownloadPath))
+            {
+                var stream = new FileStream(item.DownloadPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                return File(stream, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename);
+            }
+
+            return NotFound(new { Message = "Report file could not be located." });
+        }
+
         [HttpPost("Generate")]
         [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("Report")]
         public async Task<IActionResult> Generate([FromBody] WalkTestExcelReportRequest request)
@@ -165,50 +299,289 @@ namespace SignalTracker.Controllers
             if (request.ProjectId <= 0)
                 return BadRequest(new { Message = "ProjectId is required." });
 
-            var project = await _db.tbl_project
-                .AsNoTracking()
-                .FirstOrDefaultAsync(x => x.id == request.ProjectId, HttpContext.RequestAborted);
+            var jobId = ResolveJobId(request.JobId, Request);
+            Response.Headers["X-Job-Id"] = jobId;
+            ReportProgressTracker.Update(jobId, 5, "Loading project details...", 2);
 
-            if (project == null)
-                return BadRequest(new { Message = "Project not found." });
+            try
+            {
+                var project = await _db.tbl_project
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(x => x.id == request.ProjectId, HttpContext.RequestAborted);
 
-            var sessionIds = ResolveSessionIds(request.SessionIds, project.ref_session_id);
-            if (sessionIds.Count == 0)
-                return BadRequest(new { Message = "No valid session IDs are available for this report." });
+                if (project == null)
+                {
+                    ReportProgressTracker.Fail(jobId, "Project not found.");
+                    return BadRequest(new { Message = "Project not found." });
+                }
 
-            var earfcnWise = ResolveEarfcnWise(request.EarfcnMode, request.EarfcnWise, Request.HasFormContentType ? Request.Form : null, Request.Query);
+                var sessionIds = ResolveSessionIds(request.SessionIds, project.ref_session_id);
+                if (sessionIds.Count == 0)
+                {
+                    ReportProgressTracker.Fail(jobId, "No valid session IDs are available for this report.");
+                    return BadRequest(new { Message = "No valid session IDs are available for this report." });
+                }
 
-            var rows = await QueryWalkTestRowsAsync(request, sessionIds, earfcnWise);
+                var earfcnWise = ResolveEarfcnWise(request.EarfcnMode, request.EarfcnWise, Request.HasFormContentType ? Request.Form : null, Request.Query);
+
+                ReportProgressTracker.Update(jobId, 20, "Querying network logs from database...", 2);
+                var rows = await QueryWalkTestRowsAsync(request, sessionIds, earfcnWise);
+                if (rows.Count == 0)
+                {
+                    ReportProgressTracker.Fail(jobId, "No network logs found for the selected sessions.");
+                    return BadRequest(new { Message = "No network logs found for the selected sessions." });
+                }
+
+                ReportProgressTracker.Update(jobId, 35, "Querying site predictions and threshold settings...", 2);
+                var siteRows = await QuerySiteSummaryRowsAsync(request.ProjectId);
+
+                // Fetch session notes threshold config (exclusively from tbl_session.notes, no db.thresholds fallback)
+                var thresholds = await GetSessionNotesThresholdConfigAsync(sessionIds, HttpContext.RequestAborted);
+
+                ReportProgressTracker.Update(jobId, 45, "Downloading report images...", 2);
+                // Download the chart/report images once so they can be embedded directly in the workbook.
+                var imageBytesByUrl = await FetchReportImagesAsync(sessionIds, HttpContext.RequestAborted);
+
+                var reportMode = request.ReportMode ?? request.SheetMode ?? request.Mode ?? "separate";
+                var filterByImageName = ResolveFilterByImageName(request, Request.HasFormContentType ? Request.Form : null, Request.Query);
+
+                var workbook = BuildWorkbook(
+                    project.project_name ?? $"Project {project.id}",
+                    sessionIds,
+                    rows,
+                    siteRows,
+                    imageBytesByUrl,
+                    thresholds,
+                    reportMode,
+                    filterByImageName,
+                    showSampleCount: false,
+                    customSheetNames: null,
+                    earfcnWise: earfcnWise,
+                    onProgress: (pct, stage) => ReportProgressTracker.Update(jobId, pct, stage, 2));
+
+                ReportProgressTracker.Update(jobId, 88, "Packaging Excel workbook (.xlsx)...", 2);
+                var bytes = SimpleXlsxWriter.Write(workbook);
+                var filename = $"Walk_Test_Report_{request.ProjectId}_{DateTime.Now:yyyy-MM-dd}.xlsx";
+
+                ReportProgressTracker.Complete(jobId, filename, bytes: bytes);
+                return File(bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename);
+            }
+            catch (Exception ex)
+            {
+                ReportProgressTracker.Fail(jobId, ex.Message);
+                throw;
+            }
+        }
+
+        // POST api/ExcelReport/StartGenerateFromZip
+        // Asynchronous generation endpoint: returns JobId immediately,
+        // allowing frontend to poll GET /api/ExcelReport/Progress/{jobId}
+        // and download via GET /api/ExcelReport/Download/{jobId}
+        [HttpPost("StartGenerateFromZip")]
+        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("Report")]
+        [Consumes("multipart/form-data")]
+        [RequestSizeLimit(1_000_000_000)]
+        public async Task<IActionResult> StartGenerateFromZip([FromForm] ZipReportUploadRequest request)
+        {
+            var uploads = ResolveUploadedFiles(request, Request);
+            if (uploads.Count == 0)
+                return BadRequest(new { Message = "At least one log zip file is required." });
+
+            var jobId = ResolveJobId(request?.JobId, Request);
+            ReportProgressTracker.Update(jobId, 5, "Receiving upload...", 2);
+
+            var tempFiles = new List<(string TempPath, string OriginalFileName)>();
+            try
+            {
+                for (int i = 0; i < uploads.Count; i++)
+                {
+                    var upload = uploads[i];
+                    if (upload.Length <= 0) return InvalidZipUpload(upload.FileName);
+                    var tempPath = await SaveUploadToTempFileAsync(upload, HttpContext.RequestAborted);
+                    tempFiles.Add((tempPath, upload.FileName));
+                }
+            }
+            catch (Exception ex)
+            {
+                foreach (var (p, _) in tempFiles) try { System.IO.File.Delete(p); } catch { }
+                ReportProgressTracker.Fail(jobId, ex.Message);
+                return StatusCode(500, new { Message = "Error saving upload: " + ex.Message });
+            }
+
+            var fileGroups = ResolveLogFileGroups(uploads.Count, Request.HasFormContentType ? Request.Form : null, Request.Query);
+            var earfcnWise = ResolveEarfcnWise(request?.EarfcnMode, request?.EarfcnWise, Request.HasFormContentType ? Request.Form : null, Request.Query);
+            var filterByImageName = ResolveFilterByImageName(request, Request.HasFormContentType ? Request.Form : null);
+            var reportMode = ResolveReportMode(request, Request.HasFormContentType ? Request.Form : null);
+            var showSampleCount = ResolveShowSampleCount(request, Request.HasFormContentType ? Request.Form : null);
+            var customSheetNames = ResolveCustomSheetNames(Request.HasFormContentType ? Request.Form : null, Request.Query);
+            var selectedBands = ResolveSelectedBands(request, Request.HasFormContentType ? Request.Form : null);
+
+            var reqCopy = new ZipReportUploadRequest
+            {
+                JobId = jobId,
+                ProjectName = request?.ProjectName,
+                Title = request?.Title,
+                SessionIdOverride = request?.SessionIdOverride,
+                BandFilter = request?.BandFilter,
+                Bands = request?.Bands,
+                EarfcnMode = request?.EarfcnMode,
+                EarfcnWise = request?.EarfcnWise,
+                ShowSampleCount = request?.ShowSampleCount
+            };
+
+            // Run in background task
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await ProcessGenerateFromZipAsync(
+                        jobId, tempFiles, reqCopy, fileGroups, earfcnWise,
+                        filterByImageName, reportMode, showSampleCount, customSheetNames, selectedBands);
+                }
+                catch (Exception ex)
+                {
+                    ReportProgressTracker.Fail(jobId, ex.Message);
+                }
+                finally
+                {
+                    foreach (var (p, _) in tempFiles)
+                    {
+                        try { System.IO.File.Delete(p); } catch { }
+                    }
+                }
+            });
+
+            return Accepted(new
+            {
+                JobId = jobId,
+                Status = 2,
+                Message = "Report generation started.",
+                ProgressUrl = $"/api/ExcelReport/Progress/{jobId}",
+                ProgressStreamUrl = $"/api/ExcelReport/ProgressStream/{jobId}",
+                DownloadUrl = $"/api/ExcelReport/Download/{jobId}"
+            });
+        }
+
+        private static async Task ProcessGenerateFromZipAsync(
+            string jobId,
+            List<(string TempPath, string OriginalFileName)> tempFiles,
+            ZipReportUploadRequest request,
+            List<int> fileGroups,
+            bool earfcnWise,
+            bool filterByImageName,
+            string reportMode,
+            bool showSampleCount,
+            List<string>? customSheetNames,
+            List<string> selectedBands)
+        {
+            var allRawRows    = new List<WalkTestLogRow>();
+            var mergedImages  = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
+            var allSiteRows   = new List<WalkTestSiteSummaryRow>();
+            var sessionIds    = new List<int>();
+            ReportThresholdConfig? thresholds = null;
+            var fileNames     = new List<string>();
+
+            for (int zipIdx = 0; zipIdx < tempFiles.Count; zipIdx++)
+            {
+                var (tempPath, originalFileName) = tempFiles[zipIdx];
+                string fileName = Path.GetFileNameWithoutExtension(originalFileName);
+                ReportProgressTracker.Update(jobId, 10 + (int)(20.0 * (zipIdx + 0.5) / tempFiles.Count), $"Extracting {fileName} ({zipIdx + 1}/{tempFiles.Count})...", 2);
+
+                await using var zipStream = new FileStream(
+                    tempPath, FileMode.Open, FileAccess.Read,
+                    FileShare.Read, bufferSize: 128 * 1024, useAsync: true);
+                using var archive = new ZipArchive(zipStream, ZipArchiveMode.Read, leaveOpen: true);
+
+                var mapImages = ExtractMapImagesFromZip(archive, out var detectedSessionId);
+                var sid = (int)(request.SessionIdOverride ?? detectedSessionId ?? (zipIdx + 1));
+                if (sid > 0 && !sessionIds.Contains(sid)) sessionIds.Add(sid);
+
+                foreach (var kvp in mapImages)
+                {
+                    mergedImages[$"file_{zipIdx}_{kvp.Key}"] = kvp.Value;
+                    mergedImages[$"idx_{zipIdx}_{kvp.Key}"] = kvp.Value;
+                    if (!string.IsNullOrWhiteSpace(fileName))
+                        mergedImages[$"{fileName}_{kvp.Key}"] = kvp.Value;
+                    mergedImages[$"{sid}_{kvp.Key}"] = kvp.Value;
+                    if (!mergedImages.ContainsKey(kvp.Key))
+                        mergedImages[kvp.Key] = kvp.Value;
+                }
+
+                var zipRows = ExtractNetworkRowsFromZip(archive, sid, earfcnWise);
+                int assignedGroup = (zipIdx < fileGroups.Count) ? fileGroups[zipIdx] : (zipIdx + 1);
+                foreach (var r in zipRows)
+                {
+                    r.FileIndex = zipIdx;
+                    r.SourceFileName = fileName;
+                    r.FileGroup = assignedGroup;
+                    r.SessionId = sid;
+                }
+                allRawRows.AddRange(zipRows);
+
+                if (thresholds == null)
+                {
+                    var candidate = ExtractThresholdConfigFromZip(archive);
+                    if (!candidate.Source.Equals("Hardcoded", StringComparison.OrdinalIgnoreCase))
+                        thresholds = candidate;
+                }
+
+                allSiteRows.AddRange(ExtractSiteSummaryRowsFromZip(archive));
+                fileNames.Add(fileName);
+            }
+
+            thresholds ??= ReportThresholdConfig.Hardcoded();
+
+            ReportProgressTracker.Update(jobId, 32, "Cleaning and deduplicating rows...", 2);
+            var rows = CleanZipRows(allRawRows, earfcnWise);
             if (rows.Count == 0)
-                return BadRequest(new { Message = "No network logs found for the selected sessions." });
+            {
+                ReportProgressTracker.Fail(jobId, "No usable network log rows were found inside the uploaded zip(s).");
+                return;
+            }
 
-            var siteRows = await QuerySiteSummaryRowsAsync(request.ProjectId);
+            if (filterByImageName)
+            {
+                var imageRows = rows.Where(r => RowHasImageName(r)).ToList();
+                if (imageRows.Count > 0) rows = imageRows;
+            }
 
-            // Fetch session notes threshold config (exclusively from tbl_session.notes, no db.thresholds fallback)
-            var thresholds = await GetSessionNotesThresholdConfigAsync(sessionIds, HttpContext.RequestAborted);
+            if (selectedBands.Count > 0)
+            {
+                rows = FilterZipRowsByBands(rows, selectedBands);
+                if (rows.Count == 0)
+                {
+                    ReportProgressTracker.Fail(jobId, $"No samples found for band(s): {string.Join(", ", selectedBands)}.");
+                    return;
+                }
+            }
 
-            // Download the chart/report images once so they can be embedded directly in the workbook.
-            var imageBytesByUrl = await FetchReportImagesAsync(sessionIds, HttpContext.RequestAborted);
+            var projectName = !string.IsNullOrWhiteSpace(request.ProjectName)
+                ? request.ProjectName
+                : fileNames.Count == 1
+                    ? fileNames[0]
+                    : "Walk Test";
 
-            var reportMode = request.ReportMode ?? request.SheetMode ?? request.Mode ?? "separate";
-            var filterByImageName = ResolveFilterByImageName(request, Request.HasFormContentType ? Request.Form : null, Request.Query);
+            if (selectedBands.Count > 0)
+                projectName += $" ({(selectedBands.Count == 1 ? "Band" : "Bands")}: {string.Join(", ", selectedBands)})";
+
+            ReportProgressTracker.Update(jobId, 45, "Preparing threshold configs and map images...", 2);
+            var imageBytesByUrl = BuildImageBytesByUrlFromZip(mergedImages, sessionIds);
 
             var workbook = BuildWorkbook(
-                project.project_name ?? $"Project {project.id}",
-                sessionIds,
-                rows,
-                siteRows,
-                imageBytesByUrl,
-                thresholds,
-                reportMode,
-                filterByImageName,
-                showSampleCount: false,
-                customSheetNames: null,
-                earfcnWise: earfcnWise);
+                projectName, sessionIds, rows, allSiteRows,
+                imageBytesByUrl, thresholds, reportMode, filterByImageName, showSampleCount, customSheetNames, earfcnWise,
+                onProgress: (pct, stage) => ReportProgressTracker.Update(jobId, pct, stage, 2));
 
+            ReportProgressTracker.Update(jobId, 88, "Packaging Excel workbook (.xlsx)...", 2);
             var bytes = SimpleXlsxWriter.Write(workbook);
-            var filename = $"Walk_Test_Report_{request.ProjectId}_{DateTime.Now:yyyy-MM-dd}.xlsx";
-            return File(bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename);
+            var primarySessionId = sessionIds.Count > 0 ? sessionIds[0] : 0;
+            var filename = $"Walk_Test_Report_Zip_{primarySessionId}_{DateTime.Now:yyyy-MM-dd}.xlsx";
+
+            // Save to temp file for download
+            var outFilePath = Path.Combine(Path.GetTempPath(), $"Report_{jobId}.xlsx");
+            await System.IO.File.WriteAllBytesAsync(outFilePath, bytes);
+
+            ReportProgressTracker.Complete(jobId, filename, downloadPath: outFilePath, bytes: bytes);
         }
 
         // POST api/ExcelReport/GenerateFromZip
@@ -218,6 +591,7 @@ namespace SignalTracker.Controllers
         //   SessionIdOverride -> optional, forces the session id used for image lookup
         //   BandFilter/Bands -> optional, one or more selected bands; ALL/empty = no filter
         //   ShowSampleCount  -> optional (true/false); when true legend shows "(count | %)"
+        //   JobId            -> optional, client-provided tracking id for progress updates
         [HttpPost("GenerateFromZip")]
         [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("Report")]
         [Consumes("multipart/form-data")]
@@ -227,6 +601,10 @@ namespace SignalTracker.Controllers
             var uploads = ResolveUploadedFiles(request, Request);
             if (uploads.Count == 0)
                 return BadRequest(new { Message = "At least one log zip file is required." });
+
+            var jobId = ResolveJobId(request?.JobId, Request);
+            Response.Headers["X-Job-Id"] = jobId;
+            ReportProgressTracker.Update(jobId, 5, "Receiving upload...", 2);
 
             var allTempPaths  = new List<string>();
             var allRawRows    = new List<WalkTestLogRow>();
@@ -239,15 +617,18 @@ namespace SignalTracker.Controllers
             try
             {
                 var fileGroups = ResolveLogFileGroups(uploads.Count, Request.HasFormContentType ? Request.Form : null, Request.Query);
-                var earfcnWise = ResolveEarfcnWise(request.EarfcnMode, request.EarfcnWise, Request.HasFormContentType ? Request.Form : null, Request.Query);
+                var earfcnWise = ResolveEarfcnWise(request?.EarfcnMode, request?.EarfcnWise, Request.HasFormContentType ? Request.Form : null, Request.Query);
 
                 for (int zipIdx = 0; zipIdx < uploads.Count; zipIdx++)
                 {
                     var upload = uploads[zipIdx];
                     if (upload.Length <= 0)
                     {
+                        ReportProgressTracker.Fail(jobId, $"Invalid empty upload: {upload.FileName}");
                         return InvalidZipUpload(upload.FileName);
                     }
+
+                    ReportProgressTracker.Update(jobId, 8 + (int)(22.0 * zipIdx / uploads.Count), $"Reading upload ({zipIdx + 1}/{uploads.Count})...", 2);
                     var tempPath = await SaveUploadToTempFileAsync(upload, HttpContext.RequestAborted);
                     allTempPaths.Add(tempPath);
 
@@ -261,16 +642,18 @@ namespace SignalTracker.Controllers
                     }
                     catch (InvalidDataException)
                     {
+                        ReportProgressTracker.Fail(jobId, $"Invalid zip archive: {upload.FileName}");
                         return InvalidZipUpload(upload.FileName);
                     }
                     using var archive = archiveHandle;
 
+                    string fileName = Path.GetFileNameWithoutExtension(upload.FileName);
+                    ReportProgressTracker.Update(jobId, 10 + (int)(20.0 * (zipIdx + 0.5) / uploads.Count), $"Extracting {fileName} ({zipIdx + 1}/{uploads.Count})...", 2);
+
                     // Extract map images (preserve file-specific and session-specific keys)
                     var mapImages = ExtractMapImagesFromZip(archive, out var detectedSessionId);
-                    var sid = (int)(request.SessionIdOverride ?? detectedSessionId ?? (zipIdx + 1));
+                    var sid = (int)(request?.SessionIdOverride ?? detectedSessionId ?? (zipIdx + 1));
                     if (sid > 0 && !sessionIds.Contains(sid)) sessionIds.Add(sid);
-
-                    string fileName = Path.GetFileNameWithoutExtension(upload.FileName);
 
                     foreach (var kvp in mapImages)
                     {
@@ -319,10 +702,14 @@ namespace SignalTracker.Controllers
 
                 thresholds ??= ReportThresholdConfig.Hardcoded();
 
+                ReportProgressTracker.Update(jobId, 32, "Cleaning and deduplicating rows...", 2);
                 // Merge & deduplicate all rows across all zips
                 var rows = CleanZipRows(allRawRows, earfcnWise);
                 if (rows.Count == 0)
+                {
+                    ReportProgressTracker.Fail(jobId, "No usable network log rows were found inside the uploaded zip(s).");
                     return BadRequest(new { Message = "No usable network log rows were found inside the uploaded zip(s)." });
+                }
 
                 var filterByImageName = ResolveFilterByImageName(request, Request.HasFormContentType ? Request.Form : null);
                 if (filterByImageName)
@@ -344,15 +731,18 @@ namespace SignalTracker.Controllers
                 {
                     rows = FilterZipRowsByBands(rows, selectedBands);
                     if (rows.Count == 0)
+                    {
+                        ReportProgressTracker.Fail(jobId, $"No samples found for band(s): {string.Join(", ", selectedBands)}.");
                         return BadRequest(new
                         {
                             Message = $"No samples found for band(s): {string.Join(", ", selectedBands)}. Check the band value (e.g. B3, B8, B40, n78).",
                             AvailableBands = bandsPresent
                         });
+                    }
                 }
 
                 // Build project name: default to "Walk Test" when multiple zips and no custom name
-                var projectName = !string.IsNullOrWhiteSpace(request.ProjectName)
+                var projectName = !string.IsNullOrWhiteSpace(request?.ProjectName)
                     ? request.ProjectName
                     : fileNames.Count == 1
                         ? fileNames[0]
@@ -361,6 +751,7 @@ namespace SignalTracker.Controllers
                 if (selectedBands.Count > 0)
                     projectName += $" ({(selectedBands.Count == 1 ? "Band" : "Bands")}: {string.Join(", ", selectedBands)})";
 
+                ReportProgressTracker.Update(jobId, 45, "Preparing threshold configs and map images...", 2);
                 var imageBytesByUrl = BuildImageBytesByUrlFromZip(mergedImages, sessionIds);
                 var reportMode      = ResolveReportMode(request, Request.HasFormContentType ? Request.Form : null);
                 var showSampleCount = ResolveShowSampleCount(request, Request.HasFormContentType ? Request.Form : null);
@@ -368,12 +759,21 @@ namespace SignalTracker.Controllers
 
                 var workbook = BuildWorkbook(
                     projectName, sessionIds, rows, allSiteRows,
-                    imageBytesByUrl, thresholds, reportMode, filterByImageName, showSampleCount, customSheetNames, earfcnWise);
+                    imageBytesByUrl, thresholds, reportMode, filterByImageName, showSampleCount, customSheetNames, earfcnWise,
+                    onProgress: (pct, stage) => ReportProgressTracker.Update(jobId, pct, stage, 2));
 
+                ReportProgressTracker.Update(jobId, 88, "Packaging Excel workbook (.xlsx)...", 2);
                 var bytes = SimpleXlsxWriter.Write(workbook);
                 var primarySessionId = sessionIds.Count > 0 ? sessionIds[0] : 0;
                 var filename = $"Walk_Test_Report_Zip_{primarySessionId}_{DateTime.Now:yyyy-MM-dd}.xlsx";
+
+                ReportProgressTracker.Complete(jobId, filename, bytes: bytes);
                 return File(bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename);
+            }
+            catch (Exception ex)
+            {
+                ReportProgressTracker.Fail(jobId, ex.Message);
+                throw;
             }
             finally
             {
@@ -546,7 +946,7 @@ namespace SignalTracker.Controllers
             return result;
         }
 
-        private Dictionary<string, byte[]> ExtractMapImagesFromZip(ZipArchive archive, out long? detectedSessionId)
+        private static Dictionary<string, byte[]> ExtractMapImagesFromZip(ZipArchive archive, out long? detectedSessionId)
         {
             var images = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
             var sessionCounts = new Dictionary<long, int>();
@@ -906,9 +1306,9 @@ namespace SignalTracker.Controllers
                         Earfcn = earfcnVal,
                         Band = bandVal,
                         BandSheetName = sheetName,
-                        Rsrp = ClampKpiFloat(ParseFloatSafe(GetCleanVal(cols, rsrpIdx)), -140, -44),
-                        Rsrq = ClampKpiFloat(ParseFloatSafe(GetCleanVal(cols, rsrqIdx)), -34, 3),
-                        Sinr = ClampKpiFloat(ParseFloatSafe(GetCleanVal(cols, sinrIdx)), -23, 40),
+                        Rsrp = ParseFloatSafe(GetCleanVal(cols, rsrpIdx)),
+                        Rsrq = ParseFloatSafe(GetCleanVal(cols, rsrqIdx)),
+                        Sinr = ParseFloatSafe(GetCleanVal(cols, sinrIdx)),
                         DlTpt = GetCleanVal(cols, dlIdx),
                         UlTpt = GetCleanVal(cols, ulIdx),
                         Bler = GetCleanVal(cols, blerIdx),
@@ -932,7 +1332,7 @@ namespace SignalTracker.Controllers
             return rows;
         }
 
-        private List<WalkTestLogRow> ExtractNetworkRowsFromZip(ZipArchive archive, long sessionId, bool earfcnWise = true)
+        private static List<WalkTestLogRow> ExtractNetworkRowsFromZip(ZipArchive archive, long sessionId, bool earfcnWise = true)
         {
             var rows = new List<WalkTestLogRow>();
             var nextId = 1;
@@ -1247,7 +1647,7 @@ namespace SignalTracker.Controllers
             return null;
         }
 
-        private WalkTestLogRow? ParseZipRow(List<string> cols, ZipColumnMap map, long sessionId, ref int nextId, DateTime? fileBaseTime = null, bool earfcnWise = false)
+        private static WalkTestLogRow? ParseZipRow(List<string> cols, ZipColumnMap map, long sessionId, ref int nextId, DateTime? fileBaseTime = null, bool earfcnWise = false)
         {
             var tsRaw = GetZipCol(cols, map.Timestamp);
             if (!string.IsNullOrWhiteSpace(tsRaw) && tsRaw.Contains("@@"))
@@ -1332,9 +1732,9 @@ namespace SignalTracker.Controllers
                 Band = band,
                 BandSheetName = ToBandSheetName(band, network, earfcn, string.IsNullOrWhiteSpace(primaryCellInfo) ? primary : primaryCellInfo, earfcnWise),
                 Pci = GetZipCol(cols, map.Pci),
-                Rsrp = ClampKpiFloat(ParseFloatSafe(GetZipCol(cols, map.Rsrp)), -140, -44),
-                Rsrq = ClampKpiFloat(ParseFloatSafe(GetZipCol(cols, map.Rsrq)), -34, 3),
-                Sinr = ClampKpiFloat(ParseFloatSafe(GetZipCol(cols, map.Sinr)), -23, 40),
+                Rsrp = ParseFloatSafe(GetZipCol(cols, map.Rsrp)),
+                Rsrq = ParseFloatSafe(GetZipCol(cols, map.Rsrq)),
+                Sinr = ParseFloatSafe(GetZipCol(cols, map.Sinr)),
                 Mos = ParseFloatSafe(GetZipCol(cols, map.Mos)),
                 Earfcn = GetZipCol(cols, map.Earfcn),
                 Bler = GetZipCol(cols, map.Bler),
@@ -1516,15 +1916,18 @@ namespace SignalTracker.Controllers
             return v;
         }
 
-        private static List<string> ResolveSelectedBands(ZipReportUploadRequest request, IFormCollection? form)
+        private static List<string> ResolveSelectedBands(ZipReportUploadRequest? request, IFormCollection? form)
         {
             var values = new List<string>();
-            AddRawBandValues(values, request.BandFilter);
-
-            if (request.Bands != null)
+            if (request != null)
             {
-                foreach (var band in request.Bands)
-                    AddRawBandValues(values, band);
+                AddRawBandValues(values, request.BandFilter);
+
+                if (request.Bands != null)
+                {
+                    foreach (var band in request.Bands)
+                        AddRawBandValues(values, band);
+                }
             }
 
             if (form != null)
@@ -1587,6 +1990,103 @@ namespace SignalTracker.Controllers
             return key;
         }
 
+        private static ReportThresholdConfig? ExtractThresholdConfigFromImagePlot(ZipArchive archive)
+        {
+            var entry = archive.Entries.FirstOrDefault(e => e.FullName.EndsWith("image_plot.csv", StringComparison.OrdinalIgnoreCase));
+            if (entry == null) return null;
+
+            try
+            {
+                using var stream = entry.Open();
+                using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+                var text = reader.ReadToEnd();
+                var lines = text.Split('\n').Select(l => l.TrimEnd('\r')).Where(l => l.Length > 0).ToList();
+                if (lines.Count < 2) return null;
+
+                var headers = ParseCsvLine(lines[0]).Select(h => h.Trim()).ToList();
+                var config = new ReportThresholdConfig { Source = "image_plot.csv" };
+
+                var metrics = new Dictionary<string, Action<List<ThresholdRange>>>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["RSRP"] = ranges => config.Rsrp = ranges,
+                    ["RSRQ"] = ranges => config.Rsrq = ranges,
+                    ["SINR"] = ranges => config.Sinr = ranges,
+                    ["DL_THPT"] = ranges => config.DlTpt = ranges,
+                    ["UL_THPT"] = ranges => config.UlTpt = ranges,
+                    ["LTE_BLER"] = ranges => config.Bler = ranges,
+                    ["PUSCH_TX"] = ranges => config.PuschTx = ranges,
+                    ["VOLTE_CALL"] = ranges => config.VolteCall = ranges
+                };
+
+                bool anyExtracted = false;
+
+                foreach (var (metricName, setter) in metrics)
+                {
+                    int colIdx = headers.FindIndex(h => h.Equals(metricName, StringComparison.OrdinalIgnoreCase) ||
+                        (metricName == "DL_THPT" && (h.Equals("DL THPT", StringComparison.OrdinalIgnoreCase) || h.Contains("dl", StringComparison.OrdinalIgnoreCase))) ||
+                        (metricName == "UL_THPT" && (h.Equals("UL THPT", StringComparison.OrdinalIgnoreCase) || h.Contains("ul", StringComparison.OrdinalIgnoreCase))) ||
+                        (metricName == "PUSCH_TX" && (h.Equals("PUSCH Tx", StringComparison.OrdinalIgnoreCase) || h.Contains("pusch", StringComparison.OrdinalIgnoreCase))) ||
+                        (metricName == "LTE_BLER" && (h.Equals("LTE BLER", StringComparison.OrdinalIgnoreCase) || h.Contains("bler", StringComparison.OrdinalIgnoreCase))) ||
+                        (metricName == "VOLTE_CALL" && (h.Equals("VoLTE Call", StringComparison.OrdinalIgnoreCase) || h.Contains("volte", StringComparison.OrdinalIgnoreCase))));
+
+                    if (colIdx < 0) continue;
+
+                    var colorValues = new Dictionary<string, List<double>>(StringComparer.OrdinalIgnoreCase);
+
+                    for (int i = 1; i < lines.Count; i++)
+                    {
+                        var cols = ParseCsvLine(lines[i]);
+                        if (colIdx >= cols.Count) continue;
+                        var raw = cols[colIdx].Trim();
+                        if (string.IsNullOrWhiteSpace(raw) || raw.StartsWith("#")) continue;
+
+                        if (raw.Contains('@'))
+                        {
+                            var parts = raw.Split('@');
+                            var valStr = parts[0].Trim();
+                            var colHex = parts.Length > 1 ? NormalizeColorHex(parts[1].Trim()) : null;
+
+                            if (!string.IsNullOrWhiteSpace(colHex) &&
+                                !colHex.Equals("#000000", StringComparison.OrdinalIgnoreCase) &&
+                                !colHex.Equals("#888888", StringComparison.OrdinalIgnoreCase))
+                            {
+                                if (double.TryParse(valStr, NumberStyles.Float, CultureInfo.InvariantCulture, out var dVal))
+                                {
+                                    if (!colorValues.TryGetValue(colHex, out var list))
+                                    {
+                                        list = new List<double>();
+                                        colorValues[colHex] = list;
+                                    }
+                                    list.Add(dVal);
+                                }
+                            }
+                        }
+                    }
+
+                    if (colorValues.Count > 0)
+                    {
+                        var ranges = new List<ThresholdRange>();
+                        foreach (var (hex, vals) in colorValues)
+                        {
+                            var min = vals.Min();
+                            var max = vals.Max();
+                            ranges.Add(new ThresholdRange($"{min:0.##} to {max:0.##}", min, max, hex));
+                        }
+
+                        ranges = ranges.OrderByDescending(r => r.Max).ToList();
+                        setter(ranges);
+                        anyExtracted = true;
+                    }
+                }
+
+                return anyExtracted ? config : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         private static ReportThresholdConfig ExtractThresholdConfigFromZip(ZipArchive archive)
         {
             var thresholds = ReportThresholdConfig.Hardcoded();
@@ -1596,7 +2096,11 @@ namespace SignalTracker.Controllers
                                      Path.GetFileName(e.FullName).StartsWith("colorsetting", StringComparison.OrdinalIgnoreCase) ||
                                      Path.GetFileName(e.FullName).StartsWith("thresholds", StringComparison.OrdinalIgnoreCase));
 
-            if (entry == null) return thresholds;
+            if (entry == null)
+            {
+                var fromPlot = ExtractThresholdConfigFromImagePlot(archive);
+                return fromPlot ?? thresholds;
+            }
 
             try
             {
@@ -1687,6 +2191,19 @@ namespace SignalTracker.Controllers
                 ApplyZipMetricRanges(rangesByMetric, "CI", ranges => thresholds.CellId = ranges);
 
                 thresholds.Source = $"Log zip color settings ({Path.GetFileName(entry.FullName)})";
+
+                var fromPlot = ExtractThresholdConfigFromImagePlot(archive);
+                if (fromPlot != null)
+                {
+                    if (thresholds.Rsrp == null || thresholds.Rsrp.Count == 0) thresholds.Rsrp = fromPlot.Rsrp;
+                    if (thresholds.Rsrq == null || thresholds.Rsrq.Count == 0) thresholds.Rsrq = fromPlot.Rsrq;
+                    if (thresholds.Sinr == null || thresholds.Sinr.Count == 0) thresholds.Sinr = fromPlot.Sinr;
+                    if (thresholds.DlTpt == null || thresholds.DlTpt.Count == 0) thresholds.DlTpt = fromPlot.DlTpt;
+                    if (thresholds.UlTpt == null || thresholds.UlTpt.Count == 0) thresholds.UlTpt = fromPlot.UlTpt;
+                    if (thresholds.Bler == null || thresholds.Bler.Count == 0) thresholds.Bler = fromPlot.Bler;
+                    if (thresholds.PuschTx == null || thresholds.PuschTx.Count == 0) thresholds.PuschTx = fromPlot.PuschTx;
+                    if (thresholds.VolteCall == null || thresholds.VolteCall.Count == 0) thresholds.VolteCall = fromPlot.VolteCall;
+                }
             }
             catch
             {
@@ -1802,7 +2319,7 @@ namespace SignalTracker.Controllers
         {
             if (!value.HasValue) return null;
             if (value.Value >= 100000 || value.Value <= -100000) return null;
-            return Math.Min(Math.Max(value.Value, min), max);
+            return value.Value;
         }
 
         private static string NormalizeColorHex(string color)
@@ -2380,9 +2897,11 @@ namespace SignalTracker.Controllers
             bool filterByImageName = true,
             bool showSampleCount = false,
             List<string>? customSheetNames = null,
-            bool earfcnWise = true)
+            bool earfcnWise = true,
+            Action<int, string>? onProgress = null)
         {
             var workbook = new XlsxWorkbook();
+            onProgress?.Invoke(50, "Generating Site Summary sheet...");
             workbook.Sheets.Add(BuildSiteSummarySheet(projectName, sessionIds, rows, siteRows));
 
             var bandGroups = rows
@@ -2406,6 +2925,8 @@ namespace SignalTracker.Controllers
                     for (int idx = 0; idx < fileGroupIds.Count; idx++)
                     {
                         int fg = fileGroupIds[idx];
+                        int pct = 52 + (int)(33.0 * (idx + 1) / fileGroupIds.Count);
+                        onProgress?.Invoke(pct, $"Generating Combined Group {fg} ({idx + 1}/{fileGroupIds.Count})...");
                         var fgRows = rows.Where(x => x.FileGroup == fg).ToList();
                         var fgBandBlocks = CreateBandBlocks(fgRows, earfcnWise, imageBytesByUrl);
 
@@ -2426,6 +2947,7 @@ namespace SignalTracker.Controllers
                 }
                 else
                 {
+                    onProgress?.Invoke(65, "Generating Combined sheet...");
                     var bandBlocks = CreateBandBlocks(rows, earfcnWise, imageBytesByUrl);
 
                     string sheetTitle = (customSheetNames != null && customSheetNames.Count > 0 && !string.IsNullOrWhiteSpace(customSheetNames[0]))
@@ -2441,22 +2963,29 @@ namespace SignalTracker.Controllers
             {
                 if (!earfcnWise)
                 {
-                    // In without-earfcn mode, single sheet without band separation
+                    onProgress?.Invoke(65, "Generating Combined sheet...");
                     var validRows = rows.Where(x => x.Timestamp.HasValue).ToList();
                     if (validRows.Count == 0) validRows = rows;
                     workbook.Sheets.Add(BuildBandSheet("Combined", validRows, rows, imageBytesByUrl, thresholds, filterByImageName, showSampleCount, earfcnWise));
                 }
                 else
                 {
-                    foreach (var group in bandGroups)
+                    int totalBands = bandGroups.Count;
+                    for (int idx = 0; idx < totalBands; idx++)
+                    {
+                        var group = bandGroups[idx];
+                        int pct = 52 + (int)(33.0 * (idx + 1) / Math.Max(1, totalBands));
+                        onProgress?.Invoke(pct, $"Generating sheet for {group.Key} ({idx + 1}/{totalBands})...");
                         workbook.Sheets.Add(BuildBandSheet(group.Key, group.ToList(), rows, imageBytesByUrl, thresholds, filterByImageName, showSampleCount, earfcnWise));
+                    }
                 }
             }
 
+            onProgress?.Invoke(86, "Sheets generated. Finalizing layout...");
             return workbook;
         }
 
-        private static string ResolveReportMode(ZipReportUploadRequest request, IFormCollection? form)
+        private static string ResolveReportMode(ZipReportUploadRequest? request, IFormCollection? form)
         {
             string? raw = null;
             if (form != null)
@@ -2584,15 +3113,15 @@ namespace SignalTracker.Controllers
             return files;
         }
 
-        private static bool ResolveShowSampleCount(ZipReportUploadRequest request, IFormCollection? form)
+        private static bool ResolveShowSampleCount(ZipReportUploadRequest? request, IFormCollection? form)
         {
-            if (request.ShowSampleCount.HasValue) return request.ShowSampleCount.Value;
+            if (request?.ShowSampleCount.HasValue == true) return request.ShowSampleCount.Value;
             if (form != null && form.TryGetValue("ShowSampleCount", out var v))
             {
                 var s = v.ToString().Trim().ToLowerInvariant();
                 return s == "true" || s == "1" || s == "yes";
             }
-            return false;
+            return true;
         }
 
         private static string SanitizeExcelSheetName(string name)
@@ -3579,6 +4108,8 @@ namespace SignalTracker.Controllers
             var noCoverageRows = targetRows.Where(r => IsNoCoverageRow(r, headerUpper)).ToList();
             var coveredRows = targetRows.Where(r => !IsNoCoverageRow(r, headerUpper)).ToList();
 
+            var outOfRangeRows = new List<(WalkTestLogRow Row, double? NumVal, string RawVal, string ColorHex)>();
+
             if (headerUpper == "RSRP" || headerUpper == "RSRQ" || headerUpper == "SINR" ||
                 headerUpper == "DL_THPT" || headerUpper == "UL_THPT" || headerUpper == "LTE_BLER" ||
                 headerUpper == "BLER" || headerUpper == "MOS" || headerUpper == "PUSCH_TX" || headerUpper == "EARFCN")
@@ -3597,6 +4128,20 @@ namespace SignalTracker.Controllers
                         "PUSCH_TX" => ParseDouble(x.Ta),
                         "EARFCN" => ParseDouble(x.Earfcn),
                         _ => null
+                    };
+
+                    string rawVal = headerUpper switch
+                    {
+                        "RSRP" => x.Rsrp.HasValue ? x.Rsrp.Value.ToString(CultureInfo.InvariantCulture) : "",
+                        "RSRQ" => x.Rsrq.HasValue ? x.Rsrq.Value.ToString(CultureInfo.InvariantCulture) : "",
+                        "SINR" => x.Sinr.HasValue ? x.Sinr.Value.ToString(CultureInfo.InvariantCulture) : "",
+                        "MOS" => x.Mos.HasValue ? x.Mos.Value.ToString(CultureInfo.InvariantCulture) : "",
+                        "DL_THPT" => (x.DlTpt ?? "").Trim(),
+                        "UL_THPT" => (x.UlTpt ?? "").Trim(),
+                        "LTE_BLER" or "BLER" => (x.Bler ?? "").Trim(),
+                        "PUSCH_TX" => (x.Ta ?? "").Trim(),
+                        "EARFCN" => (x.Earfcn ?? "").Trim(),
+                        _ => ""
                     };
 
                     LegendStatRow? match = null;
@@ -3643,22 +4188,122 @@ namespace SignalTracker.Controllers
                     {
                         match.Count++;
                     }
+                    else
+                    {
+                        string? colorHex = null;
+                        if (x.MetricColors != null && x.MetricColors.TryGetValue(headerUpper, out var ch) && !string.IsNullOrWhiteSpace(ch))
+                            colorHex = NormalizeColorHex(ch);
+                        if (string.IsNullOrWhiteSpace(colorHex))
+                            colorHex = GetHexColorFromRows(new List<WalkTestLogRow> { x }, headerUpper);
+                        if (string.IsNullOrWhiteSpace(colorHex))
+                            colorHex = "#888888";
+
+                        outOfRangeRows.Add((x, val, rawVal, colorHex));
+                    }
                 }
             }
             else
             {
+                var matchedRowIds = new HashSet<int>();
                 foreach (var item in result)
                 {
                     if (!string.IsNullOrWhiteSpace(item.Range.ValueMatch))
                     {
-                        item.Count = coveredRows.Count(x =>
+                        var matched = coveredRows.Where(x =>
                             (x.Band ?? "").Contains(item.Range.ValueMatch, StringComparison.OrdinalIgnoreCase) ||
                             (x.Earfcn ?? "").Contains(item.Range.ValueMatch, StringComparison.OrdinalIgnoreCase) ||
-                            (x.VolteCall ?? "").Contains(item.Range.ValueMatch, StringComparison.OrdinalIgnoreCase));
+                            (x.VolteCall ?? "").Contains(item.Range.ValueMatch, StringComparison.OrdinalIgnoreCase) ||
+                            (item.Range.ValueMatch.Contains("Active", StringComparison.OrdinalIgnoreCase) && (x.VolteCall == "1")) ||
+                            (item.Range.ValueMatch.Contains("No", StringComparison.OrdinalIgnoreCase) && (x.VolteCall == "0"))).ToList();
+                        item.Count = matched.Count;
+                        foreach (var m in matched) matchedRowIds.Add(m.Id);
                     }
                     else
                     {
                         item.Count = coveredRows.Count;
+                        foreach (var m in coveredRows) matchedRowIds.Add(m.Id);
+                    }
+                }
+
+                foreach (var x in coveredRows.Where(r => !matchedRowIds.Contains(r.Id)))
+                {
+                    string? colorHex = null;
+                    if (x.MetricColors != null && x.MetricColors.TryGetValue(headerUpper, out var ch) && !string.IsNullOrWhiteSpace(ch))
+                        colorHex = NormalizeColorHex(ch);
+                    if (string.IsNullOrWhiteSpace(colorHex))
+                        colorHex = GetHexColorFromRows(new List<WalkTestLogRow> { x }, headerUpper);
+                    if (string.IsNullOrWhiteSpace(colorHex))
+                        colorHex = "#888888";
+
+                    string rawVal = (x.VolteCall ?? x.Band ?? "").Trim();
+                    double? val = ParseDouble(rawVal);
+                    outOfRangeRows.Add((x, val, rawVal, colorHex));
+                }
+            }
+
+            if (outOfRangeRows.Count > 0)
+            {
+                var colorGroups = outOfRangeRows
+                    .GroupBy(r => r.ColorHex, StringComparer.OrdinalIgnoreCase);
+
+                foreach (var cg in colorGroups)
+                {
+                    var cHex = cg.Key;
+                    var numericItems = cg.Where(r => r.NumVal.HasValue).ToList();
+                    var nonNumericItems = cg.Where(r => !r.NumVal.HasValue).ToList();
+
+                    if (numericItems.Count > 0)
+                    {
+                        var minVal = numericItems.Min(r => r.NumVal!.Value);
+                        var maxVal = numericItems.Max(r => r.NumVal!.Value);
+                        string display = Math.Abs(minVal - maxVal) < 0.0001
+                            ? $"{minVal:0.##}"
+                            : $"{minVal:0.##} to {maxVal:0.##}";
+
+                        var oorRange = new ThresholdRange
+                        {
+                            Display = display,
+                            Label = display,
+                            ValueMatch = display,
+                            ColorHex = cHex,
+                            Min = minVal,
+                            Max = maxVal
+                        };
+
+                        result.Add(new LegendStatRow
+                        {
+                            Range = oorRange,
+                            Count = numericItems.Count
+                        });
+                    }
+
+                    if (nonNumericItems.Count > 0)
+                    {
+                        var distinctStrings = nonNumericItems
+                            .Select(r => r.RawVal)
+                            .Where(s => !string.IsNullOrWhiteSpace(s))
+                            .Distinct(StringComparer.OrdinalIgnoreCase)
+                            .ToList();
+
+                        string display = distinctStrings.Count == 1
+                            ? distinctStrings[0]
+                            : "Out of Range";
+
+                        var oorRange = new ThresholdRange
+                        {
+                            Display = display,
+                            Label = display,
+                            ValueMatch = display,
+                            ColorHex = cHex,
+                            Min = 0,
+                            Max = 0
+                        };
+
+                        result.Add(new LegendStatRow
+                        {
+                            Range = oorRange,
+                            Count = nonNumericItems.Count
+                        });
                     }
                 }
             }
@@ -4299,6 +4944,8 @@ namespace SignalTracker.Controllers
                 var noCoverageRows = targetRows.Where(r => IsNoCoverageRow(r, headerUpper)).ToList();
                 var coveredRows = targetRows.Where(r => !IsNoCoverageRow(r, headerUpper)).ToList();
 
+                var matchedRowIds = new HashSet<int>();
+
                 for (int i = 0; i < uniqueVals.Count; i++)
                 {
                     var val = uniqueVals[i];
@@ -4310,6 +4957,8 @@ namespace SignalTracker.Controllers
                             "EARFCN" => r.Earfcn,
                             _ => r.CellId
                         }, val, StringComparison.OrdinalIgnoreCase)).ToList();
+
+                    foreach (var mr in matchingRows) matchedRowIds.Add(mr.Id);
 
                     int valCount = matchingRows.Count;
 
@@ -4325,9 +4974,7 @@ namespace SignalTracker.Controllers
                         }
                     }
 
-                    string lineLabel = showSampleCount
-                        ? $"{headerUpper} {valDisplay}  ({valCount} | {pct:0.00}%)"
-                        : $"{headerUpper} {valDisplay}  ({pct:0.00}%)";
+                    string lineLabel = $"{headerUpper} {valDisplay}  ({valCount} | {pct:0.00}%)";
 
                     // Color lookup:
                     // 1. From Image Name (MetricColors) of matching rows (image_plot / image_name)
@@ -4355,13 +5002,31 @@ namespace SignalTracker.Controllers
                     lines.Add((lineLabel, new Rgba32(r, g, b)));
                 }
 
+                var unmatchedCoveredRows = coveredRows.Where(r => !matchedRowIds.Contains(r.Id)).ToList();
+                if (unmatchedCoveredRows.Count > 0)
+                {
+                    var groups = unmatchedCoveredRows.GroupBy(r =>
+                        (r.MetricColors != null && r.MetricColors.TryGetValue(headerUpper, out var ch) && !string.IsNullOrWhiteSpace(ch))
+                            ? NormalizeColorHex(ch)
+                            : (GetHexColorFromRows(new List<WalkTestLogRow> { r }, headerUpper) ?? "#888888"),
+                        StringComparer.OrdinalIgnoreCase);
+
+                    foreach (var cg in groups)
+                    {
+                        var hexColor = cg.Key;
+                        int groupCount = cg.Count();
+                        double pct = totalCount > 0 ? (groupCount * 100.0 / totalCount) : 0;
+                        var (r, g, b) = ParseHexColor(hexColor);
+                        string lineLabel = $"Out of Range  ({groupCount} | {pct:0.00}%)";
+                        lines.Add((lineLabel, new Rgba32(r, g, b)));
+                    }
+                }
+
                 if (noCoverageRows.Count > 0)
                 {
                     int noCovCount = noCoverageRows.Count;
                     double noCovPct = totalCount > 0 ? (noCovCount * 100.0 / totalCount) : 0;
-                    string noCovLabel = showSampleCount
-                        ? $"No Coverage  ({noCovCount} | {noCovPct:0.00}%)"
-                        : $"No Coverage  ({noCovPct:0.00}%)";
+                    string noCovLabel = $"No Coverage  ({noCovCount} | {noCovPct:0.00}%)";
                     lines.Add((noCovLabel, new Rgba32(0, 0, 0)));
                 }
 
@@ -4381,9 +5046,7 @@ namespace SignalTracker.Controllers
                         : stat.Range.RangeOnlyDisplay;
                     if (string.IsNullOrWhiteSpace(rangeDisplay)) rangeDisplay = stat.Range.Display;
 
-                    string label = showSampleCount
-                        ? $"{rangeDisplay}  ({stat.Count} | {stat.Percentage:0.00}%)"
-                        : $"{rangeDisplay}  ({stat.Percentage:0.00}%)";
+                    string label = $"{rangeDisplay}  ({stat.Count} | {stat.Percentage:0.00}%)";
                     lines.Add((label, new Rgba32(r, g, b)));
                 }
             }
@@ -4709,6 +5372,7 @@ namespace SignalTracker.Controllers
 
         public sealed class WalkTestExcelReportRequest
         {
+            public string? JobId { get; set; }
             public int ProjectId { get; set; }
             public List<long>? SessionIds { get; set; }
             public string? Provider { get; set; }

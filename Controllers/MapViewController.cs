@@ -3119,31 +3119,41 @@ public class AvailablePolygonsResponse
         {
             public string Id { get; init; } = string.Empty;
             public string SourceType { get; init; } = string.Empty;
+            [System.Text.Json.Serialization.JsonIgnore]
             public string Type { get; init; } = string.Empty;
+            [System.Text.Json.Serialization.JsonIgnore]
             public long SourceId { get; init; }
             public int? UploadId { get; init; }
             public int? SessionId { get; init; }
             public string? SourceFile { get; init; }
             public int? SourceIndex { get; init; }
             public string? TimestampLabel { get; init; }
+            [System.Text.Json.Serialization.JsonIgnore]
             public string? Timestamp { get; init; }
+            [System.Text.Json.Serialization.JsonIgnore]
             public double? TimeOfDaySeconds { get; init; }
+            [System.Text.Json.Serialization.JsonIgnore]
             public string? Category { get; init; }
+            [System.Text.Json.Serialization.JsonIgnore]
             public string? SourceCategory { get; init; }
             public string Domain { get; init; } = "Radio";
             public string Title { get; init; } = string.Empty;
+            [System.Text.Json.Serialization.JsonIgnore]
             public string OfficialName { get; init; } = string.Empty;
             public string Message { get; init; } = string.Empty;
             public string Summary { get; init; } = string.Empty;
             public string RawMessage { get; init; } = string.Empty;
             public string? Cause { get; init; }
+            [System.Text.Json.Serialization.JsonIgnore]
             public string? OriginSource { get; init; }
             public string? Direction { get; init; }
             public string? Channel { get; init; }
             public string Severity { get; init; } = "info";
             public string Technology { get; init; } = "Unknown";
             public string? Interface { get; init; }
+            [System.Text.Json.Serialization.JsonIgnore]
             public string? Protocol { get; init; }
+            [System.Text.Json.Serialization.JsonIgnore]
             public string? Procedure { get; init; }
             public List<string> ServiceIndicators { get; init; } = new();
             public string? EventKey { get; init; }

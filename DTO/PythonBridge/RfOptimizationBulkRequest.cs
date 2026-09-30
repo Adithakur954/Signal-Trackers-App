@@ -5,6 +5,8 @@
         public long ProjectId { get; set; }
         public int ScenarioId { get; set; }
         public List<RfOptimizationRow> Rows { get; set; } = new();
+        public int? ChunkIndex { get; set; }
+        public bool? ReplaceExistingOnFirstChunkOnly { get; set; }
     }
 
     public class RfOptimizationRowsRequest
@@ -14,6 +16,7 @@
         public string? Operator { get; set; }
         public int Limit { get; set; } = 50000;
         public int Offset { get; set; } = 0;
+        public long? LastId { get; set; }
     }
 
     public class RfOptimizationRow
