@@ -124,6 +124,24 @@ public partial class MapViewController
         var connectedCalls = report.Calls.Where(c => c.Result.Equals("Connected", StringComparison.OrdinalIgnoreCase)).ToArray();
         var duration = report.Calls.Sum(c => Milliseconds(c.Duration) ?? 0);
         static object Observed(L3ObservedEvents value) => new { endcSetupRows = value.EndcSetupRows, handoverRows = value.HandoverRows };
+        static object ServiceSummary(DiagnosticServiceSummary value) => new
+        {
+            hasVolte = value.HasVolte,
+            hasVonr = value.HasVonr,
+            hasTmsi = value.HasTmsi,
+            hasRrcSibParameters = value.HasRrcSibParameters,
+            volteText = value.VolteTextRows,
+            vonrText = value.VonrTextRows,
+            tmsi = value.TmsiRows,
+            rrcSibParameters = value.RrcSibParameterRows,
+            networkLog = value.NetworkLogRows,
+            volteNetwork = value.VolteNetworkRows,
+            volteCallMinusOne = value.VolteCallMinusOneRows,
+            volteCallActive = value.VolteCallActiveRows,
+            volteCallBlank = value.VolteCallBlankRows,
+            evidence = value.Evidence,
+            volteCallValues = value.VolteCallValues
+        };
 
         return new
         {
@@ -140,7 +158,7 @@ public partial class MapViewController
                 totalDurationMs = duration,
                 totalConnectedDurationMs = duration,
                 observedEvents = Observed(report.ObservedEvents),
-                detectedServices,
+                detectedServices = ServiceSummary(detectedServices),
                 sourceFile = report.SourceFile,
                 scope = report.Scope,
                 generatedAt = report.GeneratedAt,
@@ -230,11 +248,21 @@ public partial class MapViewController
         }
 
         await AddNetworkLogServiceCountsAsync(conn, request, summary);
-        summary.HasVolte = summary.VolteTextRows > 0 || summary.VolteNetworkRows > 0;
+        summary.HasVolte = summary.VolteTextRows > 0 || summary.VolteCallActiveRows > 0;
         summary.HasVonr = summary.VonrTextRows > 0;
         summary.HasTmsi = summary.TmsiRows > 0;
         summary.HasRrcSibParameters = summary.RrcSibParameterRows > 0;
         return summary;
+    }
+
+    private static bool IsActiveVoLteCallValue(string value)
+    {
+        var normalized = value.Trim();
+        return normalized.Equals("1", StringComparison.OrdinalIgnoreCase)
+            || normalized.Equals("true", StringComparison.OrdinalIgnoreCase)
+            || normalized.Equals("yes", StringComparison.OrdinalIgnoreCase)
+            || normalized.Equals("active", StringComparison.OrdinalIgnoreCase)
+            || normalized.Equals("connected", StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task AddNetworkLogServiceCountsAsync(DbConnection conn, DiagnosticQueryRequest request, DiagnosticServiceSummary summary)
@@ -281,11 +309,23 @@ public partial class MapViewController
             var count = Convert.ToInt64(valueReader.GetValue(1), CultureInfo.InvariantCulture);
             summary.VolteCallValues[value] = count;
             summary.NetworkLogRows += count;
-            if (value.Equals("<blank>", StringComparison.OrdinalIgnoreCase)) summary.VolteCallBlankRows += count;
-            else summary.VolteNetworkRows += count;
-            if (value.Equals("-1", StringComparison.OrdinalIgnoreCase)) summary.VolteCallMinusOneRows += count;
-            if (value.Equals("1", StringComparison.OrdinalIgnoreCase) || value.Equals("true", StringComparison.OrdinalIgnoreCase) || value.Equals("active", StringComparison.OrdinalIgnoreCase))
+            if (value.Equals("<blank>", StringComparison.OrdinalIgnoreCase))
+            {
+                summary.VolteCallBlankRows += count;
+                continue;
+            }
+
+            if (value.Equals("-1", StringComparison.OrdinalIgnoreCase))
+            {
+                summary.VolteCallMinusOneRows += count;
+                continue;
+            }
+
+            if (IsActiveVoLteCallValue(value))
+            {
+                summary.VolteNetworkRows += count;
                 summary.VolteCallActiveRows += count;
+            }
         }
     }
 
