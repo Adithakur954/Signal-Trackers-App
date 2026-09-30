@@ -785,6 +785,9 @@ namespace SignalTracker.Services
                     OR UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''), COALESCE(primary_cell_info_1, ''), COALESCE(all_neigbor_cell_info, ''))) LIKE '%NCI%'
                     OR UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''), COALESCE(primary_cell_info_1, ''), COALESCE(all_neigbor_cell_info, ''))) REGEXP '(^|[^A-Z0-9])NR([^A-Z0-9]|$)'
                     OR UPPER(CONCAT_WS(' ', COALESCE(network, ''), COALESCE(band, ''), COALESCE(primary_cell_info_1, ''), COALESCE(all_neigbor_cell_info, ''))) REGEXP '(^|[^A-Z0-9])N[0-9]{1,3}([^A-Z0-9]|$)'";
+            const string wifiPredicate = @"
+                    primary_cell_info_1 LIKE 'SSID:%'
+                    OR primary_cell_info_1 LIKE '%BSSID:%'";
             // tbl_network_log (the serving/primary table) can itself contain rows whose own
             // `network` string is self-tagged e.g. "4G (Neighbour)" while `primary` = 'Yes' --
             // confirmed against real data (project 358: 52 such rows, all primary='Yes'). These
@@ -867,7 +870,7 @@ namespace SignalTracker.Services
                     ? "AND LOWER(COALESCE(m_alpha_long, m_alpha_short)) = LOWER(@operator)"
                     : string.Empty;
                 var primaryClause = primaryOnly
-                    ? "AND primary_cell_info_1 LIKE '%mRegistered=YES%'"
+                    ? $"AND (primary_cell_info_1 LIKE '%mRegistered=YES%' OR ({wifiPredicate}) OR ({fiveGPredicate}))"
                     : string.Empty;
                 var dateClause = string.Empty;
                 if (request.StartDate.HasValue)

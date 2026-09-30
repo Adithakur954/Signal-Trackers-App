@@ -4281,13 +4281,23 @@ public class AvailablePolygonsResponse
         {
             if (HasAny(text, "SIP", "IMS"))
                 return "IMS";
-            if (HasAny(text, "NR"))
+            if (HasExplicitNrDiagnosticInterface(text))
                 return "NR-Uu";
             if (HasAny(text, "LTE", "RRC"))
                 return "LTE-Uu";
             if (HasAny(text, "NAS"))
                 return "NAS";
             return "Event";
+        }
+
+        private static bool HasExplicitNrDiagnosticInterface(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return false;
+
+            return Regex.IsMatch(text,
+                @"\b(?:NR[-_\s]?RRC|NR[-_\s]?UU|NR[-_\s]?Uu|RRC[-_\s]?NR|5G[-_\s]?NR)\b",
+                RegexOptions.IgnoreCase);
         }
 
         private static string ResolveDiagnosticProcedure(string text)
