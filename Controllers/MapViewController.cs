@@ -612,7 +612,7 @@ public async Task<IActionResult> GetProjectPolygons(
     int targetCompanyId = GetTargetCompanyId(company_id);
 
     if (!isSuperAdmin && targetCompanyId == 0)
-        return Unauthorized(new { Status = 0, Message = "Unauthorized. Unable to resolve Company Context." });
+        return StatusCode(StatusCodes.Status403Forbidden, new { Status = 0, Message = "Unable to resolve company context.", Code = "INVALID_COMPANY_CONTEXT" });
 
     try
     {
@@ -628,7 +628,7 @@ public async Task<IActionResult> GetProjectPolygons(
             
             if (!hasAccess)
             {
-                return Unauthorized(new { Status = 0, Message = "Unauthorized. Project does not belong to your company." });
+                return StatusCode(StatusCodes.Status403Forbidden, new { Status = 0, Message = "Project does not belong to your company.", Code = "PROJECT_FORBIDDEN" });
             }
         }
 
@@ -1627,7 +1627,7 @@ public async Task<IActionResult> GetAvailablePolygons(
     }
 
     if (!isSuperAdmin && targetCompanyId == 0)
-        return Unauthorized(new { Status = 0, Message = "Unauthorized. Unable to resolve Company Context." });
+        return StatusCode(StatusCodes.Status403Forbidden, new { Status = 0, Message = "Unable to resolve company context.", Code = "INVALID_COMPANY_CONTEXT" });
 
     // =========================================================
     // 2. VALIDATE SPECIFIC SESSION OWNERSHIP (FIXED)
@@ -1644,7 +1644,7 @@ public async Task<IActionResult> GetAvailablePolygons(
 
         if (!isOwned)
         {
-            return Unauthorized(new { Status = 0, Message = "Unauthorized. Session does not belong to your company." });
+            return StatusCode(StatusCodes.Status403Forbidden, new { Status = 0, Message = "Session does not belong to your company.", Code = "SESSION_FORBIDDEN" });
         }
     }
 
@@ -1812,7 +1812,7 @@ public async Task<IActionResult> DeleteAvailablePolygon(
         int targetCompanyId = GetTargetCompanyId(company_id);
 
         if (!isSuperAdmin && targetCompanyId == 0)
-            return Unauthorized(new { Status = 0, Message = "Unauthorized. Unable to resolve Company Context." });
+            return StatusCode(StatusCodes.Status403Forbidden, new { Status = 0, Message = "Unable to resolve company context.", Code = "INVALID_COMPANY_CONTEXT" });
 
         var conn = db.Database.GetDbConnection();
         if (conn.State != ConnectionState.Open)
@@ -10702,7 +10702,7 @@ public async Task<IActionResult> GetNeighbourLogsByDateRange(
         bool useUserScope = !isSuperAdmin && targetCompanyId == 0 && currentUserId > 0;
 
         if (!isSuperAdmin && targetCompanyId == 0 && !useUserScope)
-            return Unauthorized(new { Status = 0, Message = "Unauthorized. Unable to resolve Company Context." });
+            return StatusCode(StatusCodes.Status403Forbidden, new { Status = 0, Message = "Unable to resolve company context.", Code = "INVALID_COMPANY_CONTEXT" });
 
         var cacheKey = BuildMapViewCacheKey(
             "neighbour-logs-date-range",
@@ -10977,7 +10977,7 @@ public async Task<IActionResult> GetLogsByDateRange(
         bool useUserScope = !isSuperAdmin && targetCompanyId == 0 && currentUserId > 0;
 
         if (!isSuperAdmin && targetCompanyId == 0 && !useUserScope)
-            return Unauthorized(new { Status = 0, Message = "Unauthorized. Unable to resolve Company Context." });
+            return StatusCode(StatusCodes.Status403Forbidden, new { Status = 0, Message = "Unable to resolve company context.", Code = "INVALID_COMPANY_CONTEXT" });
 
         // =========================================================
         // 2. BUILD DATES & CACHE KEY
