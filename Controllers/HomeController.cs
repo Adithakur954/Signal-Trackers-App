@@ -195,6 +195,49 @@ namespace SignalTracker.Controllers
             }
         }
 
+        private static bool IsSuperAdminLoginUser(UserLite user)
+        {
+            return user.m_user_type_id == UserScopeService.ROLE_SUPER_ADMIN
+                || string.Equals(RegionAccess.Normalize(user.country_code), "TW", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private async Task<bool> HasActivePortalLicenseAsync(UserLite user, string sourceDb, CancellationToken ct = default)
+        {
+            if (IsSuperAdminLoginUser(user))
+                return true;
+
+            if (user.id <= 0)
+                return false;
+
+            if (string.Equals(sourceDb, "TW", StringComparison.OrdinalIgnoreCase))
+            {
+                var twConnectionString = MySqlConnectionStringHelper.EnsureZeroDateTimeHandling(_configuration.GetConnectionString("MySqlConnection2"));
+                if (string.IsNullOrWhiteSpace(twConnectionString))
+                    return false;
+
+                var optionsBuilder = new DbContextOptionsBuilder<ApplicationDbContext>();
+                optionsBuilder.UseMySql(twConnectionString, new MySqlServerVersion(new Version(8, 0, 29)), mysqlOptions =>
+                {
+                    mysqlOptions.EnableRetryOnFailure(3, TimeSpan.FromSeconds(5), null);
+                });
+
+                await using var twDb = new ApplicationDbContext(optionsBuilder.Options);
+                return await HasActivePortalLicenseInDbAsync(twDb, user.id, ct);
+            }
+
+            return await HasActivePortalLicenseInDbAsync(_db, user.id, ct);
+        }
+
+        private static Task<bool> HasActivePortalLicenseInDbAsync(ApplicationDbContext db, int userId, CancellationToken ct)
+        {
+            var today = DateTime.UtcNow.Date;
+            return db.tbl_company_user_license_issued
+                .AsNoTracking()
+                .AnyAsync(lic => lic.tbl_user_id == userId
+                    && lic.status == 1
+                    && lic.valid_till.Date >= today, ct);
+        }
+
         [HttpPost("UserLogin")]
         [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("Auth")]
         public async Task<JsonResult> UserLogin([FromBody] LoginData obj)
@@ -256,6 +299,16 @@ namespace SignalTracker.Controllers
                         user = twUser;
                         loginSource = "TW";
                     }
+                }
+
+                if (!await HasActivePortalLicenseAsync(user!, loginSource, HttpContext.RequestAborted))
+                {
+                    return Json(new
+                    {
+                        success = false,
+                        message = "Your portal license is disabled or expired. Please contact your administrator.",
+                        license_disabled = true
+                    });
                 }
 
                 var lockValue = $"{user!.id}:{user.email}:{DateTimeOffset.UtcNow:O}";
