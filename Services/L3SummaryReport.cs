@@ -25,7 +25,7 @@ public sealed class L3SummaryReport
     public DateTimeOffset GeneratedAt { get; init; } = DateTimeOffset.UtcNow;
     public IReadOnlyList<L3ReportMessage> Messages { get; init; } = [];
     public IReadOnlyList<L3ReportCall> Calls { get; init; } = [];
-    public IReadOnlyList<L3ReportTechnology> Technologies { get; init; } = [];
+    public IReadOnlyList<L3ReportTechnology> Technologies { get; set; } = [];
     public int NetworkLogRows { get; set; }
     public List<string> Warnings { get; } = [];
     public bool HasNetworkLogFallback => Kpis.Concat(Mobility).Concat(Parameters).Any(v => v.Source == "Network Log");
@@ -203,18 +203,40 @@ public static class L3SummaryReportBuilder
         report.Mobility.Add(new("Handover RACH success events", success.ToString(Inv)));
         report.Mobility.Add(new("Handover RACH failure events", failures.ToString(Inv), "Zero means no failures observed in selected rows."));
         report.Mobility.Add(new("Observed RACH outcome ratio", Ratio(success, success + failures), "Only explicit exported handover RACH outcomes."));
-        foreach (var (label, alias) in new[]
-        {
-            ("q-RxLevMin", "qRxLevMin"), ("q-QualMin", "qQualMin"), ("q-Hyst", "qHyst"),
-            ("s-IntraSearchP", "sIntraSearchP"), ("s-NonIntraSearchP", "sNonIntraSearchP"),
-            ("threshServingLowP", "threshServingLowP"), ("Cell Reselection Priority", "prio"),
-            ("t-ReselectionNR", "tReselNR"), ("Common Subcarrier Spacing", "scsCommon"),
-            ("SSB Subcarrier Offset", "ssbOffset"), ("CORESET#0 index", "coreset0"), ("SearchSpace#0 index", "ss0")
-        })
-            report.Parameters.Add(new(label, Join(Values(alias, label)), "Captured decoded value(s); distinct values retained."));
+        void AddParameter(string label, string[] aliases, string note = "Captured decoded value(s); distinct values retained.") =>
+            report.Parameters.Add(new(label, Join(Values(aliases)), note));
+
+        var qRxLevMinValues = Values("qRxLevMin", "q-RxLevMin")
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(v => v, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var qRxLevMinResult = qRxLevMinValues.Length == 0
+            ? Missing
+            : string.Join(", ", qRxLevMinValues.Select(value =>
+                double.TryParse(value, NumberStyles.Float, Inv, out var coded)
+                    ? $"{value} ({(coded * 2d).ToString("0.#", Inv)} dBm)"
+                    : value));
+        report.Parameters.Add(new("q-RxLevMin", qRxLevMinResult,
+            "LTE SIB1 coded value; dBm equivalent is 2 x coded value."));
+        AddParameter("q-QualMin", ["qQualMin", "q-QualMin"]);
+        AddParameter("q-Hyst", ["qHyst", "q-Hyst"]);
+        AddParameter("s-IntraSearchP", ["sIntraSearchP", "s-IntraSearchP"]);
+        AddParameter("s-NonIntraSearchP", ["sNonIntraSearchP", "s-NonIntraSearchP"]);
+        AddParameter("threshServingLowP", ["threshServingLowP"]);
+        AddParameter("Cell Reselection Priority", ["prio"],
+            "Serving-cell priority from LTE SIB3 only; SIB5 neighbour priorities are shown separately.");
+        AddParameter("Inter-frequency Cell Reselection Priority", ["cellReselectionPriority", "reselectionPriority"],
+            "Neighbour/inter-frequency priority from LTE SIB5; not serving-cell priority.");
+        AddParameter("t-ReselectionNR", ["tReselNR", "t-ReselectionNR"]);
+        AddParameter("Inter-frequency t-ReselectionEUTRA", ["tReselectionEUTRA", "t-ReselectionEUTRA", "tReselEUTRA"],
+            "Neighbour/inter-frequency reselection timer from LTE SIB5; serving-cell timer requires SIB3.");
+        AddParameter("Common Subcarrier Spacing", ["scsCommon"]);
+        AddParameter("SSB Subcarrier Offset", ["ssbOffset"]);
+        AddParameter("CORESET#0 index", ["coreset0"]);
+        AddParameter("SearchSpace#0 index", ["ss0"]);
         // Keep technology context when more than one RAT contributes decoded parameters.
         report.Parameters.Add(new("Parameter source technologies", Join(decoded.Where(d => d.Fields.Keys.Any(k =>
-            k is "qrxlevmin" or "qhyst" or "scscommon")).Select(d => d.Row.Technology))));
+            k is "qrxlevmin" or "qhyst" or "scscommon" or "cellreselectionpriority" or "treselectioneutra")).Select(d => d.Row.Technology))));
         foreach (var group in new[] { report.Kpis, report.Mobility, report.Parameters })
             for (var i = 0; i < group.Count; i++)
                 group[i] = group[i] with { Source = NetworkLogDashboardFallback.Available(group[i].Result) ? "L3/Event" : "Not available" };

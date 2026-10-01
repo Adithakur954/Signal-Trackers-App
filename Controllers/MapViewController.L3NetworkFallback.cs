@@ -26,7 +26,11 @@ public partial class MapViewController
                 AND (h.id = @networkSummaryUpload OR h.tbl_upload_id = @networkSummaryUpload)))"
                 : "s.tbl_upload_id = @networkSummaryUploadText");
         }
-        return "SELECT DISTINCT s.id FROM tbl_session s WHERE " + (clauses.Count == 0 ? "1=0" : string.Join(" AND ", clauses));
+
+        // L3/Event summaries often carry both a selected diagnostic upload and
+        // one or more linked sessions. Network logs are session-scoped, so use
+        // either source to discover the session set; access is checked after.
+        return "SELECT DISTINCT s.id FROM tbl_session s WHERE " + (clauses.Count == 0 ? "1=0" : $"({string.Join(" OR ", clauses)})");
     }
 
     private async Task<(List<NetworkDashboardSample> Rows, IActionResult? Error)> LoadNetworkDashboardFallbackAsync(
