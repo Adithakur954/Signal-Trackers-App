@@ -63,7 +63,7 @@ public static class SessionSecurity
             if (userId == 0 || region == null || string.IsNullOrWhiteSpace(lockValue)
                 || !WithinAbsoluteLifetime(context.Properties, absoluteLifetime, DateTimeOffset.UtcNow))
             {
-                await RejectAsync(context);
+                await RejectAsync(context, "missing-or-expired-ticket");
                 return;
             }
 
@@ -72,7 +72,7 @@ public static class SessionSecurity
                 configuration.GetConnectionString(region == "TW" ? "MySqlConnection2" : "MySqlConnection"));
             if (string.IsNullOrWhiteSpace(connectionString))
             {
-                await RejectAsync(context);
+                await RejectAsync(context, "missing-region-connection");
                 return;
             }
             // Authentication runs before HttpContext.User is assigned: use the ticket's
@@ -83,7 +83,7 @@ public static class SessionSecurity
             var user = await db.tbl_user.AsNoTracking().FirstOrDefaultAsync(row => row.id == userId, context.HttpContext.RequestAborted);
             if (!IsCurrent(principal!, user))
             {
-                await RejectAsync(context);
+                await RejectAsync(context, "stale-user-or-credential");
                 return;
             }
 
@@ -91,25 +91,25 @@ public static class SessionSecurity
             // Disabling/revoking an issued license should invalidate the cookie too.
             if (user == null || !await HasActivePortalLicenseAsync(db, user, context.HttpContext.RequestAborted))
             {
-                await RejectAsync(context);
+                await RejectAsync(context, "inactive-or-expired-license");
                 return;
             }
 
             var redis = context.HttpContext.RequestServices.GetService<RedisService>();
             if (redis?.IsConnected != true)
             {
-                if (requireRedis) await RejectAsync(context);
+                if (requireRedis) await RejectAsync(context, "redis-unavailable");
                 return;
             }
             var key = LockKey(userId, region);
             var currentLock = await redis.GetStringAsync(key);
             if (string.IsNullOrWhiteSpace(currentLock) || !string.Equals(currentLock, lockValue, StringComparison.Ordinal))
             {
-                await RejectAsync(context);
+                await RejectAsync(context, "login-lock-mismatch");
                 return;
             }
             if (!await redis.ExtendTtlAsync(key, idleSeconds) && requireRedis)
-                await RejectAsync(context);
+                await RejectAsync(context, "login-lock-ttl-refresh-failed");
         }
         catch (OperationCanceledException) when (context.HttpContext.RequestAborted.IsCancellationRequested)
         {
@@ -122,15 +122,17 @@ public static class SessionSecurity
             // Do not accept a stale principal when the authoritative state cannot be checked.
             context.HttpContext.RequestServices.GetRequiredService<ILoggerFactory>()
                 .CreateLogger("SessionSecurity").LogWarning("Session validation failed; authentication rejected.");
-            await RejectAsync(context);
+            await RejectAsync(context, "validation-exception");
         }
     }
 
-    private static async Task RejectAsync(CookieValidatePrincipalContext context)
+    private static async Task RejectAsync(CookieValidatePrincipalContext context, string reason = "session-invalid")
     {
         context.RejectPrincipal();
         await context.HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
         context.HttpContext.Session.Clear();
-        context.HttpContext.Response.Headers["X-Session-Invalidated"] = "session-invalid";
+        context.HttpContext.Response.Headers["X-Session-Invalidated"] = reason;
+        context.HttpContext.RequestServices.GetRequiredService<ILoggerFactory>()
+            .CreateLogger("SessionSecurity").LogInformation("Session rejected: {Reason}", reason);
     }
 }
