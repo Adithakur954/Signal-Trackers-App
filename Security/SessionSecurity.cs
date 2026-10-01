@@ -19,6 +19,25 @@ public static class SessionSecurity
     public static string CredentialVersion(string? passwordHash) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(passwordHash ?? string.Empty)));
 
+    private static bool IsSuperAdminUser(tbl_user user)
+    {
+        return user.m_user_type_id == UserScopeService.ROLE_SUPER_ADMIN
+            || string.Equals(RegionAccess.Normalize(user.country_code), "TW", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static Task<bool> HasActivePortalLicenseAsync(ApplicationDbContext db, tbl_user user, CancellationToken ct)
+    {
+        if (IsSuperAdminUser(user))
+            return Task.FromResult(true);
+
+        var today = DateTime.UtcNow.Date;
+        return db.tbl_company_user_license_issued
+            .AsNoTracking()
+            .AnyAsync(lic => lic.tbl_user_id == user.id
+                && lic.status == 1
+                && lic.valid_till.Date >= today, ct);
+    }
+
     public static bool IsCurrent(System.Security.Claims.ClaimsPrincipal principal, tbl_user? user)
     {
         return user != null && user.isactive == 1 && ResourceAccess.UserId(principal) == user.id
@@ -63,6 +82,14 @@ public static class SessionSecurity
             await using var db = new ApplicationDbContext(options);
             var user = await db.tbl_user.AsNoTracking().FirstOrDefaultAsync(row => row.id == userId, context.HttpContext.RequestAborted);
             if (!IsCurrent(principal!, user))
+            {
+                await RejectAsync(context);
+                return;
+            }
+
+            // Keep active sessions tied to the authoritative license state.
+            // Disabling/revoking an issued license should invalidate the cookie too.
+            if (user == null || !await HasActivePortalLicenseAsync(db, user, context.HttpContext.RequestAborted))
             {
                 await RejectAsync(context);
                 return;
