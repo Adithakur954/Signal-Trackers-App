@@ -956,6 +956,11 @@ public IActionResult UploadSitePrediction(
 	                                    continue;
 	                                }
 
+	                                if (isZipFile && IsNetworkLogCompanionCsv(uploadCsvName))
+	                                {
+	                                    continue;
+	                                }
+
 	                                bool worksheetOk = ProcessNetLogWorkSheet(sessionId, resolvedCompanyId, file, imageList, excelID, ref rowInserted, ref rowUpdated, out errorList, outerTx);
 	                                IsValidSheet = IsValidSheet && worksheetOk;
 	                            }
@@ -1745,6 +1750,19 @@ public IActionResult UploadSitePrediction(
                     name.StartsWith("NetworkLogOffline_", StringComparison.OrdinalIgnoreCase));
         }
 
+        private static bool IsNetworkLogCompanionCsv(string? fileName)
+        {
+            var name = Path.GetFileNameWithoutExtension(fileName ?? string.Empty);
+            var extension = Path.GetExtension(fileName ?? string.Empty);
+            if (!extension.Equals(".csv", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            return name.StartsWith("SubSessions", StringComparison.OrdinalIgnoreCase) ||
+                   name.StartsWith("SubSession", StringComparison.OrdinalIgnoreCase) ||
+                   name.StartsWith("DeviceInfo", StringComparison.OrdinalIgnoreCase) ||
+                   name.StartsWith("AppInfo", StringComparison.OrdinalIgnoreCase);
+        }
+
         private bool HasSessionUploadRows(int sessionId, int uploadId)
         {
             if (sessionId <= 0)
@@ -1910,8 +1928,10 @@ public IActionResult UploadSitePrediction(
                 batch.Flush();
                 if (batch.RowsWritten == 0)
                 {
-                    errorList.Add($"{fileName} {kind} import warning: no {kind} diagnostic rows were stored.");
-                    return false;
+                    // Network-log export ZIPs can include empty Event/L3 companion files.
+                    // Treat those as optional metadata instead of surfacing them as
+                    // erroneous sheets for an otherwise valid network-log import.
+                    return true;
                 }
                 return true;
             }
