@@ -47,6 +47,7 @@ namespace SignalTracker.Controllers
         private static volatile bool NetworkLogUpdatedAtColumnEnsured;
         private static volatile bool NetworkLogHotspotColumnsEnsured;
         private static volatile bool SessionHotspotTableEnsured;
+        private static volatile bool HotspotTableEnsured;
         private static volatile bool NetworkLogMapIndexesEnsured;
         private static volatile bool ObsoleteNetworkLogCachesInvalidated;
         private static readonly ConcurrentDictionary<string, Lazy<Task<NetworkLogFullResponse>>> NetworkLogPageBuilds = new();
@@ -6468,13 +6469,25 @@ public Task<JsonResult> GetNetworkLogPost([FromBody] MapFilter1 filters)
 
 [HttpPost, Route("SaveNetworkLogHotspot")]
 [HttpPost, Route("SaveSessionHotspot")]
+[HttpPost, Route("SaveHotspot")]
 public async Task<IActionResult> UpdateNetworkLogHotspot([FromBody] UpdateNetworkLogHotspotRequest request)
 {
-    if (request == null || request.EffectiveProjectId <= 0 || request.EffectiveSessionId <= 0)
-        return BadRequest(new { Status = 0, Message = "ProjectId and SessionId are required." });
+    if (request == null || request.EffectiveProjectId <= 0)
+        return BadRequest(new { Status = 0, Message = "ProjectId is required." });
 
     var projectId = request.EffectiveProjectId;
     var sessionId = request.EffectiveSessionId;
+    var hotspotId = request.EffectiveHotspotId;
+    string scope;
+    try
+    {
+        scope = NormalizeHotspotScope(request.EffectiveScope, sessionId);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return BadRequest(new { Status = 0, Message = ex.Message });
+    }
+    var isSessionScope = string.Equals(scope, "session", StringComparison.OrdinalIgnoreCase);
 
     var project = await ResourceAccess.Projects(db.tbl_project, User)
         .AsNoTracking()
@@ -6486,11 +6499,18 @@ public async Task<IActionResult> UpdateNetworkLogHotspot([FromBody] UpdateNetwor
         return NotFound(new { Status = 0, Message = "Project not found or access denied." });
 
     var sessionIds = _networkLogData.ParseSessionIds(project.ref_session_id).ToList();
-    if (sessionIds.Count == 0)
-        return BadRequest(new { Status = 0, Message = "Project has no linked sessions." });
+    if (isSessionScope)
+    {
+        if (sessionId <= 0)
+            return BadRequest(new { Status = 0, Message = "SessionId is required when scope is session." });
 
-    if (!sessionIds.Contains(sessionId))
-        return NotFound(new { Status = 0, Message = "Session was not found in this project." });
+        if (!sessionIds.Contains(sessionId))
+            return NotFound(new { Status = 0, Message = "Session was not found in this project." });
+    }
+    else
+    {
+        sessionId = 0;
+    }
 
     string? lineJson;
     try
@@ -6506,30 +6526,55 @@ public async Task<IActionResult> UpdateNetworkLogHotspot([FromBody] UpdateNetwor
     var symbol = TrimToNull(request.EffectiveSymbol, 100);
 
     var connString = db.Database.GetConnectionString() ?? throw new InvalidOperationException("Database connection is not configured.");
-    await EnsureSessionHotspotTableAsync(connString);
+    await EnsureHotspotTableAsync(connString);
 
     await using var conn = new MySqlConnection(connString);
     await conn.OpenAsync(HttpContext.RequestAborted);
 
     await using var cmd = conn.CreateCommand();
-    cmd.CommandText = @"
-        INSERT INTO tbl_session_hotspots
-            (project_id, session_id, hotspot, hotspot_symbol, hotspot_line_json, created_at, updated_at)
-        VALUES
-            (@projectId, @sessionId, @hotspot, @symbol, @lineJson, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-        ON DUPLICATE KEY UPDATE
-            hotspot = VALUES(hotspot),
-            hotspot_symbol = VALUES(hotspot_symbol),
-            hotspot_line_json = VALUES(hotspot_line_json),
-            updated_at = CURRENT_TIMESTAMP;";
+    if (hotspotId > 0)
+    {
+        cmd.CommandText = @"
+            UPDATE tbl_hotspots
+            SET scope = @scope,
+                session_id = @sessionId,
+                hotspot = @hotspot,
+                hotspot_symbol = @symbol,
+                hotspot_line_json = @lineJson,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = @hotspotId
+              AND project_id = @projectId;";
 
-    cmd.Parameters.AddWithValue("@projectId", projectId);
-    cmd.Parameters.AddWithValue("@sessionId", sessionId);
-    cmd.Parameters.AddWithValue("@hotspot", (object?)hotspot ?? DBNull.Value);
-    cmd.Parameters.AddWithValue("@symbol", (object?)symbol ?? DBNull.Value);
-    cmd.Parameters.AddWithValue("@lineJson", (object?)lineJson ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@hotspotId", hotspotId);
+        cmd.Parameters.AddWithValue("@projectId", projectId);
+        cmd.Parameters.AddWithValue("@scope", scope);
+        cmd.Parameters.AddWithValue("@sessionId", isSessionScope ? (object)sessionId : DBNull.Value);
+        cmd.Parameters.AddWithValue("@hotspot", (object?)hotspot ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@symbol", (object?)symbol ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@lineJson", (object?)lineJson ?? DBNull.Value);
 
-    await cmd.ExecuteNonQueryAsync(HttpContext.RequestAborted);
+        var rows = await cmd.ExecuteNonQueryAsync(HttpContext.RequestAborted);
+        if (rows == 0)
+            return NotFound(new { Status = 0, Message = "Hotspot not found in this project." });
+    }
+    else
+    {
+        cmd.CommandText = @"
+            INSERT INTO tbl_hotspots
+                (project_id, scope, session_id, hotspot, hotspot_symbol, hotspot_line_json, created_at, updated_at)
+            VALUES
+                (@projectId, @scope, @sessionId, @hotspot, @symbol, @lineJson, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+            SELECT LAST_INSERT_ID();";
+
+        cmd.Parameters.AddWithValue("@projectId", projectId);
+        cmd.Parameters.AddWithValue("@scope", scope);
+        cmd.Parameters.AddWithValue("@sessionId", isSessionScope ? (object)sessionId : DBNull.Value);
+        cmd.Parameters.AddWithValue("@hotspot", (object?)hotspot ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@symbol", (object?)symbol ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@lineJson", (object?)lineJson ?? DBNull.Value);
+
+        hotspotId = Convert.ToInt64(await cmd.ExecuteScalarAsync(HttpContext.RequestAborted), CultureInfo.InvariantCulture);
+    }
 
     await InvalidateMapViewCachesAsync();
 
@@ -6539,8 +6584,10 @@ public async Task<IActionResult> UpdateNetworkLogHotspot([FromBody] UpdateNetwor
         Message = "Hotspot saved successfully.",
         Data = new
         {
+            id = hotspotId,
             projectId,
-            sessionId,
+            scope,
+            sessionId = isSessionScope ? sessionId : (long?)null,
             hotspot,
             hotspot_symbol = symbol,
             hotspot_line_json = lineJson
@@ -6550,7 +6597,11 @@ public async Task<IActionResult> UpdateNetworkLogHotspot([FromBody] UpdateNetwor
 
 [HttpGet, Route("GetNetworkLogHotspots")]
 [HttpGet, Route("GetSessionHotspots")]
-public async Task<IActionResult> GetNetworkLogHotspots([FromQuery] int projectId, [FromQuery] long sessionId = 0)
+[HttpGet, Route("GetHotspots")]
+public async Task<IActionResult> GetNetworkLogHotspots(
+    [FromQuery] int projectId,
+    [FromQuery] long sessionId = 0,
+    [FromQuery] string? scope = null)
 {
     if (projectId <= 0)
         return BadRequest(new { Status = 0, Message = "ProjectId is required." });
@@ -6564,29 +6615,43 @@ public async Task<IActionResult> GetNetworkLogHotspots([FromQuery] int projectId
     if (project == null)
         return NotFound(new { Status = 0, Message = "Project not found or access denied." });
 
-    var sessionIds = _networkLogData.ParseSessionIds(project.ref_session_id).ToList();
-    if (sessionIds.Count == 0)
-    {
-        return Ok(new
-        {
-            Status = 1,
-            Data = Array.Empty<object>()
-        });
-    }
-
     var connString = db.Database.GetConnectionString() ?? throw new InvalidOperationException("Database connection is not configured.");
-    await EnsureSessionHotspotTableAsync(connString);
+    await EnsureHotspotTableAsync(connString);
 
     await using var conn = new MySqlConnection(connString);
     await conn.OpenAsync(HttpContext.RequestAborted);
 
     await using var cmd = conn.CreateCommand();
-    var sessionFilter = sessionId > 0 ? "AND session_id = @sessionId" : "";
+    string? normalizedScope;
+    try
+    {
+        normalizedScope = NormalizeNullableHotspotScope(scope);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return BadRequest(new { Status = 0, Message = ex.Message });
+    }
+    var filters = new List<string>();
+    if (!string.IsNullOrEmpty(normalizedScope))
+    {
+        filters.Add("scope = @scope");
+        cmd.Parameters.AddWithValue("@scope", normalizedScope);
+    }
+
+    if (sessionId > 0)
+    {
+        filters.Add(normalizedScope == "session"
+            ? "session_id = @sessionId"
+            : "(scope = 'project' OR session_id = @sessionId)");
+        cmd.Parameters.AddWithValue("@sessionId", sessionId);
+    }
+
+    var extraFilter = filters.Count > 0 ? $"AND {string.Join(" AND ", filters)}" : "";
     cmd.CommandText = $@"
-        SELECT id, session_id, hotspot, hotspot_symbol, hotspot_line_json, updated_at
-        FROM tbl_session_hotspots
+        SELECT id, project_id, scope, session_id, hotspot, hotspot_symbol, hotspot_line_json, updated_at
+        FROM tbl_hotspots
         WHERE project_id = @projectId
-          {sessionFilter}
+          {extraFilter}
           AND (
               NULLIF(TRIM(COALESCE(hotspot, '')), '') IS NOT NULL
               OR NULLIF(TRIM(COALESCE(hotspot_symbol, '')), '') IS NOT NULL
@@ -6595,8 +6660,6 @@ public async Task<IActionResult> GetNetworkLogHotspots([FromQuery] int projectId
         ORDER BY updated_at, id;";
 
     cmd.Parameters.AddWithValue("@projectId", projectId);
-    if (sessionId > 0)
-        cmd.Parameters.AddWithValue("@sessionId", sessionId);
 
     var rows = new List<object>();
     await using var reader = await cmd.ExecuteReaderAsync(HttpContext.RequestAborted);
@@ -6605,11 +6668,13 @@ public async Task<IActionResult> GetNetworkLogHotspots([FromQuery] int projectId
         rows.Add(new
         {
             id = reader.IsDBNull(0) ? 0 : reader.GetInt32(0),
-            session_id = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture),
-            hotspot = reader.IsDBNull(2) ? "" : reader.GetString(2),
-            hotspot_symbol = reader.IsDBNull(3) ? "" : reader.GetString(3),
-            hotspot_line_json = reader.IsDBNull(4) ? "" : reader.GetString(4),
-            updated_at = reader.IsDBNull(5) ? (DateTime?)null : reader.GetDateTime(5)
+            project_id = reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
+            scope = reader.IsDBNull(2) ? "project" : reader.GetString(2),
+            session_id = reader.IsDBNull(3) ? (long?)null : Convert.ToInt64(reader.GetValue(3), CultureInfo.InvariantCulture),
+            hotspot = reader.IsDBNull(4) ? "" : reader.GetString(4),
+            hotspot_symbol = reader.IsDBNull(5) ? "" : reader.GetString(5),
+            hotspot_line_json = reader.IsDBNull(6) ? "" : reader.GetString(6),
+            updated_at = reader.IsDBNull(7) ? (DateTime?)null : reader.GetDateTime(7)
         });
     }
 
@@ -6628,9 +6693,13 @@ public sealed class UpdateNetworkLogHotspotRequest
     public long NetworkLogId { get; set; }
     [JsonPropertyName("network_log_id")]
     public long NetworkLogIdSnake { get; set; }
+    public long HotspotId { get; set; }
+    [JsonPropertyName("hotspot_id")]
+    public long HotspotIdSnake { get; set; }
     public long SessionId { get; set; }
     [JsonPropertyName("session_id")]
     public long SessionIdSnake { get; set; }
+    public string? Scope { get; set; }
     public string? Hotspot { get; set; }
     public string? Symbol { get; set; }
     public string? HotspotSymbol { get; set; }
@@ -6646,7 +6715,11 @@ public sealed class UpdateNetworkLogHotspotRequest
     [System.Text.Json.Serialization.JsonIgnore]
     public long EffectiveNetworkLogId => NetworkLogId > 0 ? NetworkLogId : NetworkLogIdSnake;
     [System.Text.Json.Serialization.JsonIgnore]
+    public long EffectiveHotspotId => HotspotId > 0 ? HotspotId : HotspotIdSnake;
+    [System.Text.Json.Serialization.JsonIgnore]
     public long EffectiveSessionId => SessionId > 0 ? SessionId : SessionIdSnake;
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string? EffectiveScope => Scope;
     [System.Text.Json.Serialization.JsonIgnore]
     public string? EffectiveSymbol => Symbol ?? HotspotSymbol ?? HotspotSymbolSnake;
     [System.Text.Json.Serialization.JsonIgnore]
@@ -6660,6 +6733,30 @@ private static string? TrimToNull(string? value, int maxLength)
 
     var trimmed = value.Trim();
     return trimmed.Length <= maxLength ? trimmed : trimmed[..maxLength];
+}
+
+private static string NormalizeHotspotScope(string? scope, long sessionId)
+{
+    if (string.IsNullOrWhiteSpace(scope))
+        return sessionId > 0 ? "session" : "project";
+
+    var normalized = scope.Trim().ToLowerInvariant();
+    if (normalized is "project" or "session")
+        return normalized;
+
+    throw new InvalidOperationException("Hotspot scope must be project or session.");
+}
+
+private static string? NormalizeNullableHotspotScope(string? scope)
+{
+    if (string.IsNullOrWhiteSpace(scope))
+        return null;
+
+    var normalized = scope.Trim().ToLowerInvariant();
+    if (normalized is "project" or "session")
+        return normalized;
+
+    throw new InvalidOperationException("Hotspot scope must be project or session.");
 }
 
 private static string? NormalizeHotspotLineJson(UpdateNetworkLogHotspotRequest request)
@@ -7740,6 +7837,70 @@ private async Task EnsureSessionHotspotTableAsync(string connString)
     catch (Exception ex)
     {
         Console.WriteLine($" Session hotspot table ensure skipped: {SafeException.Get(ex)}");
+    }
+}
+
+private async Task EnsureHotspotTableAsync(string connString)
+{
+    if (HotspotTableEnsured || string.IsNullOrWhiteSpace(connString))
+        return;
+
+    try
+    {
+        await using var conn = new MySqlConnection(connString);
+        await conn.OpenAsync(HttpContext.RequestAborted);
+
+        await using (var createCmd = conn.CreateCommand())
+        {
+            createCmd.CommandText = @"
+                CREATE TABLE IF NOT EXISTS tbl_hotspots (
+                    id INT NOT NULL AUTO_INCREMENT,
+                    project_id INT NOT NULL,
+                    scope VARCHAR(20) NOT NULL DEFAULT 'project',
+                    session_id BIGINT NULL,
+                    hotspot LONGTEXT NULL,
+                    hotspot_symbol VARCHAR(100) NULL,
+                    hotspot_line_json LONGTEXT NULL,
+                    legacy_session_hotspot_id INT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (id),
+                    KEY ix_hotspots_project_scope (project_id, scope),
+                    KEY ix_hotspots_project_session (project_id, session_id),
+                    UNIQUE KEY ux_hotspots_legacy_session (legacy_session_hotspot_id)
+                );";
+            await createCmd.ExecuteNonQueryAsync(HttpContext.RequestAborted);
+        }
+
+        var hasLegacySessionTable = false;
+        await using (var checkCmd = conn.CreateCommand())
+        {
+            checkCmd.CommandText = @"
+                SELECT COUNT(*)
+                FROM information_schema.tables
+                WHERE table_schema = DATABASE()
+                  AND table_name = 'tbl_session_hotspots';";
+            hasLegacySessionTable = Convert.ToInt32(await checkCmd.ExecuteScalarAsync(HttpContext.RequestAborted), CultureInfo.InvariantCulture) > 0;
+        }
+
+        if (hasLegacySessionTable)
+        {
+            await using var migrateCmd = conn.CreateCommand();
+            migrateCmd.CommandText = @"
+                INSERT IGNORE INTO tbl_hotspots
+                    (project_id, scope, session_id, hotspot, hotspot_symbol, hotspot_line_json,
+                     legacy_session_hotspot_id, created_at, updated_at)
+                SELECT project_id, 'session', session_id, hotspot, hotspot_symbol, hotspot_line_json,
+                       id, created_at, updated_at
+                FROM tbl_session_hotspots;";
+            await migrateCmd.ExecuteNonQueryAsync(HttpContext.RequestAborted);
+        }
+
+        HotspotTableEnsured = true;
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($" Hotspot table ensure skipped: {SafeException.Get(ex)}");
     }
 }
 
