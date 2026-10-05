@@ -12798,7 +12798,12 @@ public JsonResult GetPredictionLog(
                 // Keep older databases compatible with the current EF model.
                 await using (var networkSchemaCmd = conn.CreateCommand())
                 {
-                    networkSchemaCmd.CommandText = "ALTER TABLE tbl_network_log ADD COLUMN IF NOT EXISTS channel VARCHAR(128) NULL;";
+                    networkSchemaCmd.CommandText = @"
+                        ALTER TABLE tbl_network_log
+                            ADD COLUMN IF NOT EXISTS channel VARCHAR(128) NULL,
+                            ADD COLUMN IF NOT EXISTS hotspot LONGTEXT NULL,
+                            ADD COLUMN IF NOT EXISTS hotspot_symbol VARCHAR(100) NULL,
+                            ADD COLUMN IF NOT EXISTS hotspot_line_json LONGTEXT NULL;";
                     await networkSchemaCmd.ExecuteNonQueryAsync();
                 }
                 await using (var neighbourSchemaCmd = conn.CreateCommand())

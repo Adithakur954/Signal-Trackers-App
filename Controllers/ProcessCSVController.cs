@@ -2288,6 +2288,9 @@ public IActionResult UploadSitePrediction(
             EnsureColumn("tbl_network_log", "altitude", "DOUBLE NULL");
             EnsureColumn("tbl_network_log", "direction", "VARCHAR(64) NULL");
             EnsureColumn("tbl_network_log", "channel", "VARCHAR(128) NULL");
+            EnsureTextColumn("tbl_network_log", "hotspot");
+            EnsureColumn("tbl_network_log", "hotspot_symbol", "VARCHAR(100) NULL");
+            EnsureTextColumn("tbl_network_log", "hotspot_line_json");
             EnsureColumn("tbl_network_log_neighbour", "altitude", "DOUBLE NULL");
             EnsureColumn("tbl_network_log", "tbl_sub_session_ps_id", "BIGINT NULL");
             EnsureColumn("tbl_network_log", "tbl_sub_session_cs_id", "BIGINT NULL");
