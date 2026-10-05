@@ -6187,10 +6187,12 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
                 return Unauthorized(new { Status = 0, Message = "Unauthorized. Invalid Company." });
             }
 
-            var hasDateFilter = from.HasValue || to.HasValue;
+            // Always bound this aggregation. Without explicit dates the previous
+            // SQL scanned all network-log history and regularly timed out.
+            var hasDateFilter = true;
             var effectiveTo = to ?? DateTime.UtcNow;
             var effectiveFrom = from ?? effectiveTo.AddDays(-21);
-            if (hasDateFilter && effectiveFrom > effectiveTo)
+            if (effectiveFrom > effectiveTo)
             {
                 var tmp = effectiveFrom;
                 effectiveFrom = effectiveTo;
@@ -6202,8 +6204,8 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
             // =========================================================
             string opKey = operatorName ?? "ALL";
             string netKey = networkType ?? "ALL";
-            string fromKey = hasDateFilter ? effectiveFrom.ToString("yyyyMMdd") : "ALL";
-            string toKey = hasDateFilter ? effectiveTo.ToString("yyyyMMdd") : "ALL";
+            string fromKey = effectiveFrom.ToString("yyyyMMdd");
+            string toKey = effectiveTo.ToString("yyyyMMdd");
 
             var companyScope = await GetDashboardCompanyCacheScopeAsync(targetCompanyId, useUserScope ? currentUserId : 0);
             string cacheKey = $"BandDist:{GetCacheCountryScope()}:{companyScope}:{opKey}:{netKey}:{fromKey}:{toKey}";
@@ -6237,7 +6239,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
 
                 using (var cmd = conn.CreateCommand())
                 {
-                    cmd.CommandTimeout = 300;
+                    cmd.CommandTimeout = HeavyQueryTimeoutSeconds;
 
                     string sqlCore = @"
             SELECT
@@ -6323,6 +6325,14 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
                         }
                     }
                 }
+            }
+            catch (MySqlException ex) when (ex.ErrorCode == MySqlErrorCode.CommandTimeoutExpired || ex.Number == 1317 || ex.Message.Contains("timeout", StringComparison.OrdinalIgnoreCase))
+            {
+                return StatusCode(504, new
+                {
+                    Status = 0,
+                    Message = "Band distribution query timed out. Please select a smaller date range or retry after the current database load finishes."
+                });
             }
             finally
             {

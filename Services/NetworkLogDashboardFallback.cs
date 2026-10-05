@@ -107,6 +107,26 @@ public static class NetworkLogDashboardFallback
         samples = samples.Where(IsServingSample).ToList();
         report.NetworkLogRows = samples.Count;
         if (samples.Count == 0) return;
+
+        var networkTechnologies = samples
+            .GroupBy(TechnologySummaryLabel, StringComparer.OrdinalIgnoreCase)
+            .Select(group => new L3ReportTechnology(
+                group.Key,
+                group.Count(),
+                JoinTechnologyInterfaces(group)))
+            .OrderByDescending(row => row.Rows)
+            .ThenBy(row => row.Technology, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (networkTechnologies.Length > 0)
+        {
+            report.Technologies = networkTechnologies;
+            foreach (var technology in networkTechnologies)
+            {
+                if (!report.ObservedEventsByTechnology.ContainsKey(technology.Technology))
+                    report.ObservedEventsByTechnology[technology.Technology] = new(0, 0);
+            }
+        }
+
         void Fill(List<L3DashboardValue> group, string name, string? value, string note, string source = "Network Log")
         {
             var index = group.FindIndex(v => v.Parameter == name);
@@ -118,6 +138,12 @@ public static class NetworkLogDashboardFallback
             var unique = values.Where(Available).Select(v => v!.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(v => v).ToArray();
             return unique.Length == 0 ? null : string.Join(", ", unique);
         }
+        void Set(List<L3DashboardValue> group, string name, string? value, string note, string source = "Network Log")
+        {
+            var index = group.FindIndex(v => v.Parameter == name);
+            if (index < 0 || !Available(value)) return;
+            group[index] = new(name, value!, $"{source}: {note}") { Source = source };
+        }
         IEnumerable<string?> Values(params string[] names) => samples.Select(r => r.Get(names));
         void Ids(string name, IEnumerable<string?> values, bool count = false)
         {
@@ -125,8 +151,9 @@ public static class NetworkLogDashboardFallback
                 .Select(v => v!).Distinct().OrderBy(v => v).ToArray();
             Fill(report.Kpis, name, ids.Length == 0 ? null : (count ? $"{ids.Length} ({string.Join(", ", ids)})" : string.Join(", ", ids)), "captured serving-cell identifiers; unavailable values excluded.");
         }
-        Fill(report.Kpis, "Technology", Join(samples.Select(r => r.Technology)), "captured Network Type; SA/NSA is not inferred.");
-        Fill(report.Kpis, "Band", Join(Values("band").Where(v => v != "-1")), "captured band values.");
+        Set(report.Kpis, "Technology", Join(networkTechnologies.Select(row => row.Technology)), "captured Network Type; replaces L3/Event-only RAT labels when Network Log is available.");
+        Set(report.Kpis, "Band", Join(samples.Select(BandSummaryValue).Where(v => v != "-1")), "captured band values; NR bands keep the n-prefix.");
+        Set(report.Parameters, "Parameter source technologies", Join(networkTechnologies.Select(row => row.Technology)), "captured Network Type; includes NetworkLog-only RATs.");
         Ids("Serving PCI count", Values("pci"), true);
         Ids("NR Cell Identity count", samples.Where(IsNrSample).Select(r => r.Get("mci", "nci", "cell_id")), true);
         Ids("NR ARFCN", samples.Where(IsNrSample).Select(r => r.Get("nrArfcn", "NARFCN")));
@@ -293,6 +320,47 @@ public static class NetworkLogDashboardFallback
             ("t-ReselectionNR", "tReselNR"), ("Common Subcarrier Spacing", "scsCommon"),
             ("SSB Subcarrier Offset", "ssbOffset"), ("CORESET#0 index", "coreset0"), ("SearchSpace#0 index", "ss0")
         }) Fill(report.Parameters, label, Join(Values(alias, label)), "explicitly captured parameter; no inference from signal measurements.");
+    }
+
+    private static string TechnologySummaryLabel(NetworkDashboardSample sample)
+    {
+        var network = sample.Get("network", "Network Type") ?? string.Empty;
+        if (Regex.IsMatch(network, @"2G|GSM|GPRS|EDGE", RegexOptions.IgnoreCase)) return "2G";
+        if (Regex.IsMatch(network, @"5G|\bNR\b", RegexOptions.IgnoreCase)) return "5G";
+        if (Regex.IsMatch(network, @"LTE\s*Anchor|NSA", RegexOptions.IgnoreCase)) return "4G LTE Anchor NSA";
+        if (Regex.IsMatch(network, @"4G|LTE", RegexOptions.IgnoreCase)) return "4G LTE";
+        if (Regex.IsMatch(network, @"3G|WCDMA|UMTS|HSPA", RegexOptions.IgnoreCase)) return "3G";
+        return sample.Technology;
+    }
+
+    private static string? BandSummaryValue(NetworkDashboardSample sample)
+    {
+        var band = sample.Get("band");
+        if (!Available(band) || band == "-1") return null;
+        var normalizedBand = band!.Trim();
+        if (TechnologySummaryLabel(sample) == "5G")
+        {
+            var number = Regex.Match(normalizedBand, @"\d{1,3}").Value;
+            if (!string.IsNullOrWhiteSpace(number)) return "n" + number;
+        }
+        return Regex.Replace(normalizedBand, @"^B(\d{1,3})$", "B$1", RegexOptions.IgnoreCase);
+    }
+
+    private static string JoinTechnologyInterfaces(IEnumerable<NetworkDashboardSample> samples)
+    {
+        var interfaces = samples
+            .Select(sample => sample.Technology switch
+            {
+                "5G" => "NR-Uu",
+                "LTE" => "LTE-Uu",
+                "3G" => "Uu",
+                "2G" => "Um",
+                _ => "Network Log"
+            })
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        return interfaces.Length == 0 ? "Network Log" : string.Join(", ", interfaces);
     }
 
     private static double? Numeric(string? value, double min, double max)

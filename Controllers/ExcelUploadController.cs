@@ -696,7 +696,7 @@ namespace SignalTracker.Controllers
                 // Security Check: If regular admin (not super) and no company resolved, block.
                 if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
                 {
-                    return Unauthorized(new { Status = 0, Message = "Unauthorized. Invalid Company Context." });
+                    return StatusCode(StatusCodes.Status403Forbidden, new { Status = 0, Message = "Invalid company context for upload history.", Code = "INVALID_COMPANY_CONTEXT" });
                 }
 
                 Console.WriteLine($"📥 GetUploadedExcelFiles - fileType: {fileType}, CompanyId: {targetCompanyId}");
@@ -1284,7 +1284,7 @@ namespace SignalTracker.Controllers
 
                 if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
                 {
-                     return Unauthorized(new { Status = 0, Message = "Unauthorized." });
+                     return StatusCode(StatusCodes.Status403Forbidden, new { Status = 0, Message = "Invalid company context for sessions.", Code = "INVALID_COMPANY_CONTEXT" });
                 }
 
                 // =========================================================

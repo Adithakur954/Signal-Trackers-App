@@ -399,6 +399,8 @@ public class tbl_company_license_grant_history
         public string? uls { get; set; }
         public string? call_state { get; set; }
         public string? hotspot { get; set; }
+        public string? hotspot_symbol { get; set; }
+        public string? hotspot_line_json { get; set; }
         public string? apps { get; set; }
         public int? num_cells { get; set; }
         public string? network { get; set; }

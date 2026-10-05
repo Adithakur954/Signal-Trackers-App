@@ -674,6 +674,9 @@ namespace SignalTracker.Services.ZipImport
             await EnsureColumnAsync("tbl_network_log_neighbour", "altitude", "DOUBLE NULL", cancellationToken);
             await EnsureColumnAsync("tbl_network_log", "direction", "VARCHAR(64) NULL", cancellationToken);
             await EnsureColumnAsync("tbl_network_log", "channel", "VARCHAR(128) NULL", cancellationToken);
+            await EnsureTextColumnAsync("tbl_network_log", "hotspot", cancellationToken);
+            await EnsureColumnAsync("tbl_network_log", "hotspot_symbol", "VARCHAR(100) NULL", cancellationToken);
+            await EnsureTextColumnAsync("tbl_network_log", "hotspot_line_json", cancellationToken);
             await EnsureColumnAsync("tbl_network_log_neighbour", "direction", "VARCHAR(64) NULL", cancellationToken);
             await EnsureColumnAsync("tbl_network_log_neighbour", "channel", "VARCHAR(128) NULL", cancellationToken);
             await EnsureColumnAsync("tbl_network_log", "tbl_sub_session_ps_id", "BIGINT NULL", cancellationToken);

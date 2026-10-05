@@ -143,7 +143,7 @@ WHERE project_id = @projectId AND is_active = 1 AND geometry_wkt IS NOT NULL;";
             };
         }
 
-        var maxRows = Math.Clamp(limit, 1, 5000);
+        var maxRows = Math.Clamp(limit, 1, 50000);
         var rows = new List<object>();
         long totalCount;
         await using (var countCommand = connection.CreateCommand())
@@ -276,7 +276,7 @@ LIMIT @limit OFFSET @offset;";
 
         await using var ownedConnection = connection;
 
-        var maxRows = Math.Clamp(limit, 1, 5000);
+        var maxRows = Math.Clamp(limit, 1, 50000);
         var rows = new List<object>();
         long totalCount;
         var where = new StringBuilder("WHERE s.project_id = @projectId AND s.is_active = 1");
@@ -290,11 +290,25 @@ LIMIT @limit OFFSET @offset;";
             if (i > 0) where.Append(" OR ");
             where.Append($"s.source_name = @source{i} OR s.name = @source{i} OR s.name LIKE @sourcePrefix{i}");
         }
-        // Older building imports use overture_auto_<projectId> without a source tag.
-        // Include only that exact legacy name; other unclassified polygons stay excluded.
+        // Building imports have used several legacy tags across Overture/OSM jobs.
+        // Keep this broader match scoped only to the building/all layers so roads,
+        // water and land-cover overlays remain source-filtered.
         if (layerKey is "all" or "buildings")
         {
-            where.Append(" OR ((s.source_name IS NULL OR s.source_name = '') AND s.name = CONCAT('overture_auto_', @projectId))");
+            where.Append(@" OR LOWER(COALESCE(s.source_name, '')) LIKE '%building%'
+                OR LOWER(COALESCE(s.name, '')) LIKE '%building%'
+                OR LOWER(COALESCE(s.source_name, '')) LIKE CONCAT('overture_auto_', @projectId, '%')
+                OR LOWER(COALESCE(s.name, '')) LIKE CONCAT('overture_auto_', @projectId, '%')
+                OR (
+                    (s.source_name IS NULL OR s.source_name = '')
+                    AND COALESCE(s.geometry, s.region) IS NOT NULL
+                    AND LOWER(COALESCE(s.name, '')) NOT LIKE '%road%'
+                    AND LOWER(COALESCE(s.name, '')) NOT LIKE '%highway%'
+                    AND LOWER(COALESCE(s.name, '')) NOT LIKE '%rail%'
+                    AND LOWER(COALESCE(s.name, '')) NOT LIKE '%water%'
+                    AND LOWER(COALESCE(s.name, '')) NOT LIKE '%land_use%'
+                    AND LOWER(COALESCE(s.name, '')) NOT LIKE '%land_cover%'
+                )");
         }
         where.Append(')');
 

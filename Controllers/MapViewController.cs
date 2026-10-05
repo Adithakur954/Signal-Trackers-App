@@ -45,6 +45,7 @@ namespace SignalTracker.Controllers
         private readonly IConfiguration _configuration;
         private const int MapViewCacheTtlSeconds = 300;
         private static volatile bool NetworkLogUpdatedAtColumnEnsured;
+        private static volatile bool NetworkLogHotspotColumnsEnsured;
         private static volatile bool NetworkLogMapIndexesEnsured;
         private static volatile bool ObsoleteNetworkLogCachesInvalidated;
         private static readonly ConcurrentDictionary<string, Lazy<Task<NetworkLogFullResponse>>> NetworkLogPageBuilds = new();
@@ -612,7 +613,7 @@ public async Task<IActionResult> GetProjectPolygons(
     int targetCompanyId = GetTargetCompanyId(company_id);
 
     if (!isSuperAdmin && targetCompanyId == 0)
-        return Unauthorized(new { Status = 0, Message = "Unauthorized. Unable to resolve Company Context." });
+        return StatusCode(StatusCodes.Status403Forbidden, new { Status = 0, Message = "Unable to resolve company context.", Code = "INVALID_COMPANY_CONTEXT" });
 
     try
     {
@@ -628,7 +629,7 @@ public async Task<IActionResult> GetProjectPolygons(
             
             if (!hasAccess)
             {
-                return Unauthorized(new { Status = 0, Message = "Unauthorized. Project does not belong to your company." });
+                return StatusCode(StatusCodes.Status403Forbidden, new { Status = 0, Message = "Project does not belong to your company.", Code = "PROJECT_FORBIDDEN" });
             }
         }
 
@@ -1627,7 +1628,7 @@ public async Task<IActionResult> GetAvailablePolygons(
     }
 
     if (!isSuperAdmin && targetCompanyId == 0)
-        return Unauthorized(new { Status = 0, Message = "Unauthorized. Unable to resolve Company Context." });
+        return StatusCode(StatusCodes.Status403Forbidden, new { Status = 0, Message = "Unable to resolve company context.", Code = "INVALID_COMPANY_CONTEXT" });
 
     // =========================================================
     // 2. VALIDATE SPECIFIC SESSION OWNERSHIP (FIXED)
@@ -1644,7 +1645,7 @@ public async Task<IActionResult> GetAvailablePolygons(
 
         if (!isOwned)
         {
-            return Unauthorized(new { Status = 0, Message = "Unauthorized. Session does not belong to your company." });
+            return StatusCode(StatusCodes.Status403Forbidden, new { Status = 0, Message = "Session does not belong to your company.", Code = "SESSION_FORBIDDEN" });
         }
     }
 
@@ -1812,7 +1813,7 @@ public async Task<IActionResult> DeleteAvailablePolygon(
         int targetCompanyId = GetTargetCompanyId(company_id);
 
         if (!isSuperAdmin && targetCompanyId == 0)
-            return Unauthorized(new { Status = 0, Message = "Unauthorized. Unable to resolve Company Context." });
+            return StatusCode(StatusCodes.Status403Forbidden, new { Status = 0, Message = "Unable to resolve company context.", Code = "INVALID_COMPANY_CONTEXT" });
 
         var conn = db.Database.GetDbConnection();
         if (conn.State != ConnectionState.Open)
@@ -6464,6 +6465,241 @@ public Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
 public Task<JsonResult> GetNetworkLogPost([FromBody] MapFilter1 filters)
     => GetNetworkLogCore(filters);
 
+[HttpPost, Route("SaveNetworkLogHotspot")]
+public async Task<IActionResult> UpdateNetworkLogHotspot([FromBody] UpdateNetworkLogHotspotRequest request)
+{
+    if (request == null || request.EffectiveProjectId <= 0 || request.EffectiveNetworkLogId <= 0)
+        return BadRequest(new { Status = 0, Message = "ProjectId and NetworkLogId are required." });
+
+    var projectId = request.EffectiveProjectId;
+    var networkLogId = request.EffectiveNetworkLogId;
+
+    var project = await ResourceAccess.Projects(db.tbl_project, User)
+        .AsNoTracking()
+        .Where(row => row.id == projectId)
+        .Select(row => new { row.id, row.ref_session_id })
+        .FirstOrDefaultAsync();
+
+    if (project == null)
+        return NotFound(new { Status = 0, Message = "Project not found or access denied." });
+
+    var sessionIds = _networkLogData.ParseSessionIds(project.ref_session_id).ToList();
+    if (sessionIds.Count == 0)
+        return BadRequest(new { Status = 0, Message = "Project has no linked sessions." });
+
+    string? lineJson;
+    try
+    {
+        lineJson = NormalizeHotspotLineJson(request);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return BadRequest(new { Status = 0, Message = ex.Message });
+    }
+
+    var hotspot = TrimToNull(request.Hotspot, 1000);
+    var symbol = TrimToNull(request.EffectiveSymbol, 100);
+
+    var connString = db.Database.GetConnectionString() ?? throw new InvalidOperationException("Database connection is not configured.");
+    await EnsureNetworkLogUpdatedAtColumnAsync(connString);
+    await EnsureNetworkLogHotspotColumnsAsync(connString);
+
+    await using var conn = new MySqlConnection(connString);
+    await conn.OpenAsync(HttpContext.RequestAborted);
+
+    var sessionParams = new List<string>();
+    for (var i = 0; i < sessionIds.Count; i++)
+    {
+        sessionParams.Add($"@sid{i}");
+    }
+
+    await using var cmd = conn.CreateCommand();
+    cmd.CommandText = $@"
+        UPDATE tbl_network_log
+        SET hotspot = @hotspot,
+            hotspot_symbol = @symbol,
+            hotspot_line_json = @lineJson,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = @networkLogId
+          AND session_id IN ({string.Join(",", sessionParams)});";
+
+    cmd.Parameters.AddWithValue("@hotspot", (object?)hotspot ?? DBNull.Value);
+    cmd.Parameters.AddWithValue("@symbol", (object?)symbol ?? DBNull.Value);
+    cmd.Parameters.AddWithValue("@lineJson", (object?)lineJson ?? DBNull.Value);
+    cmd.Parameters.AddWithValue("@networkLogId", networkLogId);
+    for (var i = 0; i < sessionIds.Count; i++)
+        cmd.Parameters.AddWithValue(sessionParams[i], sessionIds[i]);
+
+    var rows = await cmd.ExecuteNonQueryAsync(HttpContext.RequestAborted);
+    if (rows == 0)
+    {
+        return NotFound(new
+        {
+            Status = 0,
+            Message = "Network log point was not found in this project's sessions."
+        });
+    }
+
+    await InvalidateMapViewCachesAsync();
+
+    return Ok(new
+    {
+        Status = 1,
+        Message = "Hotspot saved successfully.",
+        Data = new
+        {
+            projectId,
+            networkLogId,
+            hotspot,
+            hotspot_symbol = symbol,
+            hotspot_line_json = lineJson
+        }
+    });
+}
+
+[HttpGet, Route("GetNetworkLogHotspots")]
+public async Task<IActionResult> GetNetworkLogHotspots([FromQuery] int projectId)
+{
+    if (projectId <= 0)
+        return BadRequest(new { Status = 0, Message = "ProjectId is required." });
+
+    var project = await ResourceAccess.Projects(db.tbl_project, User)
+        .AsNoTracking()
+        .Where(row => row.id == projectId)
+        .Select(row => new { row.id, row.ref_session_id })
+        .FirstOrDefaultAsync();
+
+    if (project == null)
+        return NotFound(new { Status = 0, Message = "Project not found or access denied." });
+
+    var sessionIds = _networkLogData.ParseSessionIds(project.ref_session_id).ToList();
+    if (sessionIds.Count == 0)
+    {
+        return Ok(new
+        {
+            Status = 1,
+            Data = Array.Empty<object>()
+        });
+    }
+
+    var connString = db.Database.GetConnectionString() ?? throw new InvalidOperationException("Database connection is not configured.");
+    await EnsureNetworkLogHotspotColumnsAsync(connString);
+
+    await using var conn = new MySqlConnection(connString);
+    await conn.OpenAsync(HttpContext.RequestAborted);
+
+    var sessionParams = new List<string>();
+    for (var i = 0; i < sessionIds.Count; i++)
+        sessionParams.Add($"@sid{i}");
+
+    await using var cmd = conn.CreateCommand();
+    cmd.CommandText = $@"
+        SELECT id, session_id, timestamp, lat, lon, hotspot, hotspot_symbol, hotspot_line_json
+        FROM tbl_network_log
+        WHERE session_id IN ({string.Join(",", sessionParams)})
+          AND (
+              NULLIF(TRIM(COALESCE(hotspot, '')), '') IS NOT NULL
+              OR NULLIF(TRIM(COALESCE(hotspot_symbol, '')), '') IS NOT NULL
+              OR NULLIF(TRIM(COALESCE(hotspot_line_json, '')), '') IS NOT NULL
+          )
+        ORDER BY timestamp, id;";
+
+    for (var i = 0; i < sessionIds.Count; i++)
+        cmd.Parameters.AddWithValue(sessionParams[i], sessionIds[i]);
+
+    var rows = new List<object>();
+    await using var reader = await cmd.ExecuteReaderAsync(HttpContext.RequestAborted);
+    while (await reader.ReadAsync(HttpContext.RequestAborted))
+    {
+        rows.Add(new
+        {
+            id = reader.IsDBNull(0) ? 0 : reader.GetInt32(0),
+            session_id = reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1), CultureInfo.InvariantCulture),
+            timestamp = reader.IsDBNull(2) ? (DateTime?)null : reader.GetDateTime(2),
+            lat = reader.IsDBNull(3) ? (float?)null : reader.GetFloat(3),
+            lon = reader.IsDBNull(4) ? (float?)null : reader.GetFloat(4),
+            hotspot = reader.IsDBNull(5) ? "" : reader.GetString(5),
+            hotspot_symbol = reader.IsDBNull(6) ? "" : reader.GetString(6),
+            hotspot_line_json = reader.IsDBNull(7) ? "" : reader.GetString(7)
+        });
+    }
+
+    return Ok(new
+    {
+        Status = 1,
+        Data = rows
+    });
+}
+
+public sealed class UpdateNetworkLogHotspotRequest
+{
+    public int ProjectId { get; set; }
+    [JsonPropertyName("project_id")]
+    public int ProjectIdSnake { get; set; }
+    public long NetworkLogId { get; set; }
+    [JsonPropertyName("network_log_id")]
+    public long NetworkLogIdSnake { get; set; }
+    public string? Hotspot { get; set; }
+    public string? Symbol { get; set; }
+    public string? HotspotSymbol { get; set; }
+    [JsonPropertyName("hotspot_symbol")]
+    public string? HotspotSymbolSnake { get; set; }
+    public string? HotspotLineJson { get; set; }
+    [JsonPropertyName("hotspot_line_json")]
+    public string? HotspotLineJsonSnake { get; set; }
+    public JsonElement Line { get; set; }
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public int EffectiveProjectId => ProjectId > 0 ? ProjectId : ProjectIdSnake;
+    [System.Text.Json.Serialization.JsonIgnore]
+    public long EffectiveNetworkLogId => NetworkLogId > 0 ? NetworkLogId : NetworkLogIdSnake;
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string? EffectiveSymbol => Symbol ?? HotspotSymbol ?? HotspotSymbolSnake;
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string? EffectiveLineJson => HotspotLineJson ?? HotspotLineJsonSnake;
+}
+
+private static string? TrimToNull(string? value, int maxLength)
+{
+    if (string.IsNullOrWhiteSpace(value))
+        return null;
+
+    var trimmed = value.Trim();
+    return trimmed.Length <= maxLength ? trimmed : trimmed[..maxLength];
+}
+
+private static string? NormalizeHotspotLineJson(UpdateNetworkLogHotspotRequest request)
+{
+    const int MaxLineJsonLength = 100_000;
+    var rawLineJson = request.EffectiveLineJson;
+    if (!string.IsNullOrWhiteSpace(rawLineJson))
+    {
+        var trimmed = rawLineJson.Trim();
+        if (trimmed.Length > MaxLineJsonLength)
+            throw new InvalidOperationException("Hotspot line data is too large.");
+
+        try
+        {
+            using var _ = JsonDocument.Parse(trimmed);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            throw new InvalidOperationException("Hotspot line data must be valid JSON.");
+        }
+
+        return trimmed;
+    }
+
+    if (request.Line.ValueKind == JsonValueKind.Undefined || request.Line.ValueKind == JsonValueKind.Null)
+        return null;
+
+    var lineJson = request.Line.GetRawText();
+    if (lineJson.Length > MaxLineJsonLength)
+        throw new InvalidOperationException("Hotspot line data is too large.");
+
+    return lineJson;
+}
+
 private async Task<JsonResult> GetNetworkLogCore(MapFilter1 filters)
 {
     var totalStopwatch = Stopwatch.StartNew();
@@ -6487,6 +6723,7 @@ private async Task<JsonResult> GetNetworkLogCore(MapFilter1 filters)
         string? providerNormalized = null;
         await InvalidateObsoleteNetworkLogCachesAsync();
         await EnsureNetworkLogUpdatedAtColumnAsync(connString);
+        await EnsureNetworkLogHotspotColumnsAsync(connString);
         await EnsureNetworkLogMapIndexesAsync(connString);
 
         // Keep the latest key only as a write-through convenience. Reads must use
@@ -6905,6 +7142,9 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyEF(
             ul_tpt = log.ul_tpt ?? "0",
             band = log.band ?? "",
             image_path = log.image_path ?? "",
+            hotspot = log.hotspot ?? "",
+            hotspot_symbol = log.hotspot_symbol ?? "",
+            hotspot_line_json = log.hotspot_line_json ?? "",
             indoor_outdoor = log.indoor_outdoor ?? "",
             nodeb_id = log.nodeb_id ?? "",
             cell_id = log.cell_id ?? "",
@@ -7024,7 +7264,8 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
                 id, session_id, timestamp, lat, lon, battery, Speed, level, apps, num_cells,
                 network, m_alpha_short, m_alpha_long,
                 pci, rssi, rsrp, rsrq, sinr, mos, jitter, latency, tac,
-                packet_loss, dl_tpt, ul_tpt, band, image_path, indoor_outdoor, nodeb_id, cell_id,
+                packet_loss, dl_tpt, ul_tpt, band, image_path, hotspot, hotspot_symbol, hotspot_line_json,
+                indoor_outdoor, nodeb_id, cell_id,
                 primary_cell_info_1, earfcn, extra_json, direction, ta, channel
             FROM tbl_network_log
             WHERE {dataWhereClause}
@@ -7038,7 +7279,8 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
             bp.pci, bp.rssi, bp.rsrp, bp.rsrq, bp.sinr, bp.mos, bp.jitter, bp.latency, bp.tac,
             bp.packet_loss, bp.dl_tpt, bp.ul_tpt,
             bp.band,
-            bp.image_path, bp.indoor_outdoor, bp.nodeb_id, bp.cell_id,
+            bp.image_path, bp.hotspot, bp.hotspot_symbol, bp.hotspot_line_json,
+            bp.indoor_outdoor, bp.nodeb_id, bp.cell_id,
             CASE
                 WHEN bp.primary_cell_info_1 LIKE 'SSID:%'
                   OR bp.primary_cell_info_1 LIKE '%BSSID:%'
@@ -7093,16 +7335,19 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
             ul_tpt = rd.IsDBNull(23) ? "0" : Convert.ToString(rd.GetValue(23), CultureInfo.InvariantCulture) ?? "0",
             band = rd.IsDBNull(24) ? "" : rd.GetString(24),
             image_path = rd.IsDBNull(25) ? "" : rd.GetString(25),
-            indoor_outdoor = rd.IsDBNull(26) ? "" : rd.GetString(26),
-            nodeb_id = rd.IsDBNull(27) ? "" : rd.GetString(27),
-            cell_id = rd.IsDBNull(28) ? "" : rd.GetString(28),
-            connection_type = rd.IsDBNull(29) ? "network" : rd.GetString(29),
-            primary_cell_info_1 = rd.IsDBNull(30) ? "" : rd.GetString(30),
-            earfcn = rd.IsDBNull(31) ? "" : Convert.ToString(rd.GetValue(31), CultureInfo.InvariantCulture) ?? "",
-            extra_json = rd.IsDBNull(32) ? "" : rd.GetString(32),
-            direction = rd.IsDBNull(33) ? "" : rd.GetString(33),
-            ta = rd.IsDBNull(34) ? "" : Convert.ToString(rd.GetValue(34), CultureInfo.InvariantCulture) ?? "",
-            channel = rd.IsDBNull(35) ? "" : rd.GetString(35)
+            hotspot = rd.IsDBNull(26) ? "" : rd.GetString(26),
+            hotspot_symbol = rd.IsDBNull(27) ? "" : rd.GetString(27),
+            hotspot_line_json = rd.IsDBNull(28) ? "" : rd.GetString(28),
+            indoor_outdoor = rd.IsDBNull(29) ? "" : rd.GetString(29),
+            nodeb_id = rd.IsDBNull(30) ? "" : rd.GetString(30),
+            cell_id = rd.IsDBNull(31) ? "" : rd.GetString(31),
+            connection_type = rd.IsDBNull(32) ? "network" : rd.GetString(32),
+            primary_cell_info_1 = rd.IsDBNull(33) ? "" : rd.GetString(33),
+            earfcn = rd.IsDBNull(34) ? "" : Convert.ToString(rd.GetValue(34), CultureInfo.InvariantCulture) ?? "",
+            extra_json = rd.IsDBNull(35) ? "" : rd.GetString(35),
+            direction = rd.IsDBNull(36) ? "" : rd.GetString(36),
+            ta = rd.IsDBNull(37) ? "" : Convert.ToString(rd.GetValue(37), CultureInfo.InvariantCulture) ?? "",
+            channel = rd.IsDBNull(38) ? "" : rd.GetString(38)
         });
     }
 
@@ -7420,6 +7665,50 @@ private async Task EnsureNetworkLogUpdatedAtColumnAsync(string connString)
     catch (Exception ex)
     {
         Console.WriteLine($" Network log updated_at ensure skipped: {SafeException.Get(ex)}");
+    }
+}
+
+private async Task EnsureNetworkLogHotspotColumnsAsync(string connString)
+{
+    if (NetworkLogHotspotColumnsEnsured || string.IsNullOrWhiteSpace(connString))
+        return;
+
+    try
+    {
+        using var conn = new MySqlConnection(connString);
+        await conn.OpenAsync();
+
+        async Task EnsureColumnAsync(string columnName, string definition)
+        {
+            using (var checkCmd = conn.CreateCommand())
+            {
+                checkCmd.CommandText = @"
+                    SELECT COUNT(*)
+                    FROM information_schema.columns
+                    WHERE table_schema = DATABASE()
+                      AND table_name = 'tbl_network_log'
+                      AND column_name = @columnName;";
+                checkCmd.Parameters.AddWithValue("@columnName", columnName);
+
+                var exists = Convert.ToInt32(await checkCmd.ExecuteScalarAsync(), CultureInfo.InvariantCulture) > 0;
+                if (exists)
+                    return;
+            }
+
+            using var alterCmd = conn.CreateCommand();
+            alterCmd.CommandText = $"ALTER TABLE tbl_network_log ADD COLUMN `{columnName}` {definition};";
+            await alterCmd.ExecuteNonQueryAsync();
+        }
+
+        await EnsureColumnAsync("hotspot", "LONGTEXT NULL");
+        await EnsureColumnAsync("hotspot_symbol", "VARCHAR(100) NULL");
+        await EnsureColumnAsync("hotspot_line_json", "LONGTEXT NULL");
+
+        NetworkLogHotspotColumnsEnsured = true;
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($" Network log hotspot columns ensure skipped: {SafeException.Get(ex)}");
     }
 }
 
@@ -8414,6 +8703,9 @@ public class NetworkLogCacheRow
     public string ul_tpt { get; set; } = "";
     public string band { get; set; } = "";
     public string image_path { get; set; } = "";
+    public string hotspot { get; set; } = "";
+    public string hotspot_symbol { get; set; } = "";
+    public string hotspot_line_json { get; set; } = "";
     public string indoor_outdoor { get; set; } = "";
     public string nodeb_id { get; set; } = "";
     public string cell_id { get; set; } = "";
@@ -10702,7 +10994,7 @@ public async Task<IActionResult> GetNeighbourLogsByDateRange(
         bool useUserScope = !isSuperAdmin && targetCompanyId == 0 && currentUserId > 0;
 
         if (!isSuperAdmin && targetCompanyId == 0 && !useUserScope)
-            return Unauthorized(new { Status = 0, Message = "Unauthorized. Unable to resolve Company Context." });
+            return StatusCode(StatusCodes.Status403Forbidden, new { Status = 0, Message = "Unable to resolve company context.", Code = "INVALID_COMPANY_CONTEXT" });
 
         var cacheKey = BuildMapViewCacheKey(
             "neighbour-logs-date-range",
@@ -10977,7 +11269,7 @@ public async Task<IActionResult> GetLogsByDateRange(
         bool useUserScope = !isSuperAdmin && targetCompanyId == 0 && currentUserId > 0;
 
         if (!isSuperAdmin && targetCompanyId == 0 && !useUserScope)
-            return Unauthorized(new { Status = 0, Message = "Unauthorized. Unable to resolve Company Context." });
+            return StatusCode(StatusCodes.Status403Forbidden, new { Status = 0, Message = "Unable to resolve company context.", Code = "INVALID_COMPANY_CONTEXT" });
 
         // =========================================================
         // 2. BUILD DATES & CACHE KEY
@@ -12506,7 +12798,12 @@ public JsonResult GetPredictionLog(
                 // Keep older databases compatible with the current EF model.
                 await using (var networkSchemaCmd = conn.CreateCommand())
                 {
-                    networkSchemaCmd.CommandText = "ALTER TABLE tbl_network_log ADD COLUMN IF NOT EXISTS channel VARCHAR(128) NULL;";
+                    networkSchemaCmd.CommandText = @"
+                        ALTER TABLE tbl_network_log
+                            ADD COLUMN IF NOT EXISTS channel VARCHAR(128) NULL,
+                            ADD COLUMN IF NOT EXISTS hotspot LONGTEXT NULL,
+                            ADD COLUMN IF NOT EXISTS hotspot_symbol VARCHAR(100) NULL,
+                            ADD COLUMN IF NOT EXISTS hotspot_line_json LONGTEXT NULL;";
                     await networkSchemaCmd.ExecuteNonQueryAsync();
                 }
                 await using (var neighbourSchemaCmd = conn.CreateCommand())
