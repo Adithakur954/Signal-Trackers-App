@@ -6574,12 +6574,6 @@ public async Task<IActionResult> GetNetworkLogHotspots([FromQuery] int projectId
         });
     }
 
-    if (sessionId <= 0)
-        return BadRequest(new { Status = 0, Message = "SessionId is required." });
-
-    if (!sessionIds.Contains(sessionId))
-        return NotFound(new { Status = 0, Message = "Session was not found in this project." });
-
     var connString = db.Database.GetConnectionString() ?? throw new InvalidOperationException("Database connection is not configured.");
     await EnsureSessionHotspotTableAsync(connString);
 
@@ -6587,11 +6581,12 @@ public async Task<IActionResult> GetNetworkLogHotspots([FromQuery] int projectId
     await conn.OpenAsync(HttpContext.RequestAborted);
 
     await using var cmd = conn.CreateCommand();
-    cmd.CommandText = @"
+    var sessionFilter = sessionId > 0 ? "AND session_id = @sessionId" : "";
+    cmd.CommandText = $@"
         SELECT id, session_id, hotspot, hotspot_symbol, hotspot_line_json, updated_at
         FROM tbl_session_hotspots
         WHERE project_id = @projectId
-          AND session_id = @sessionId
+          {sessionFilter}
           AND (
               NULLIF(TRIM(COALESCE(hotspot, '')), '') IS NOT NULL
               OR NULLIF(TRIM(COALESCE(hotspot_symbol, '')), '') IS NOT NULL
@@ -6600,7 +6595,8 @@ public async Task<IActionResult> GetNetworkLogHotspots([FromQuery] int projectId
         ORDER BY updated_at, id;";
 
     cmd.Parameters.AddWithValue("@projectId", projectId);
-    cmd.Parameters.AddWithValue("@sessionId", sessionId);
+    if (sessionId > 0)
+        cmd.Parameters.AddWithValue("@sessionId", sessionId);
 
     var rows = new List<object>();
     await using var reader = await cmd.ExecuteReaderAsync(HttpContext.RequestAborted);
