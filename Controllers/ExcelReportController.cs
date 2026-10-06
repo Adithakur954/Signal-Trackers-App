@@ -1172,7 +1172,7 @@ namespace SignalTracker.Controllers
                 {
                     if (idx < 0 || idx >= cols.Count) return "";
                     var raw = cols[idx].Trim();
-                    if (raw.StartsWith("#")) return "";
+                    if (raw.StartsWith("#") || raw == "@") return "";
                     return raw.Contains('@') ? raw.Split('@')[0].Trim() : raw;
                 }
 
@@ -1180,7 +1180,7 @@ namespace SignalTracker.Controllers
                 {
                     if (idx < 0 || idx >= cols.Count) return null;
                     var raw = cols[idx].Trim();
-                    if (raw.StartsWith("#")) return null;
+                    if (raw.StartsWith("#") || raw == "@") return null;
                     if (raw.Contains('@'))
                     {
                         var parts = raw.Split('@');
@@ -1228,6 +1228,25 @@ namespace SignalTracker.Controllers
                     var cols = ParseCsvLine(lines[i]);
                     if (cols.Count < 2) continue;
                     if (cols[0].Trim().StartsWith("#")) continue;
+
+                    // If a row has only "@" without any measurement or color hex (e.g. gap / nodata marker), ignore that
+                    bool hasAnyData = false;
+                    foreach (var idx in new[] { rsrpIdx, rsrqIdx, sinrIdx, dlIdx, ulIdx, earfcnIdx, blerIdx, puschIdx, pciIdx, ciIdx, nodebIdx })
+                    {
+                        if (idx >= 0 && idx < cols.Count)
+                        {
+                            var raw = cols[idx].Trim();
+                            if (!string.IsNullOrWhiteSpace(raw) && raw != "@")
+                            {
+                                hasAnyData = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!hasAnyData)
+                    {
+                        continue;
+                    }
 
                     var tsRaw = tsIdx >= 0 && tsIdx < cols.Count ? cols[tsIdx].Trim() : "";
                     if (!DateTime.TryParse(tsRaw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var ts))
@@ -1578,31 +1597,17 @@ namespace SignalTracker.Controllers
 
         private static bool IsNoCoverageRow(WalkTestLogRow row, string headerUpper)
         {
-            // 1. Check if specific metric color is black #000000
+            // 1. Only rows/metrics that explicitly have black hex #000000 (@000000) are No Coverage
             if (row.MetricColors != null)
             {
                 string? hex = GetHexColorFromRows(new List<WalkTestLogRow> { row }, headerUpper);
                 if (IsBlackHex(hex)) return true;
-            }
 
-            // 2. For EARFCN: value of -1 or 0 (or <= 0 / empty)
-            if (string.Equals(headerUpper, "EARFCN", StringComparison.OrdinalIgnoreCase))
-            {
-                if (string.IsNullOrWhiteSpace(row.Earfcn) || row.Earfcn == "-1" || row.Earfcn == "0")
-                    return true;
-                if (double.TryParse(row.Earfcn, NumberStyles.Float, CultureInfo.InvariantCulture, out var ev) && ev <= 0)
+                if (row.MetricColors.Values.Any(IsBlackHex))
                     return true;
             }
 
-            // 3. If EARFCN is -1 or 0, this sample has no cellular coverage
-            if (row.Earfcn == "-1" || row.Earfcn == "0")
-                return true;
-
-            // 4. If any metric color is black #000000
-            if (row.MetricColors != null && row.MetricColors.Values.Any(IsBlackHex))
-                return true;
-
-            // 5. If RSRP or RSRQ sentinel indicates no signal
+            // 2. If RSRP or RSRQ sentinel indicates no signal
             if (row.Rsrp.HasValue && (row.Rsrp.Value >= 100000 || row.Rsrp.Value <= -100000))
                 return true;
             if (row.Rsrq.HasValue && (row.Rsrq.Value >= 100000 || row.Rsrq.Value <= -100000))
@@ -4190,6 +4195,11 @@ namespace SignalTracker.Controllers
                     }
                     else
                     {
+                        if (!val.HasValue && string.IsNullOrWhiteSpace(rawVal))
+                        {
+                            continue;
+                        }
+
                         string? colorHex = null;
                         if (x.MetricColors != null && x.MetricColors.TryGetValue(headerUpper, out var ch) && !string.IsNullOrWhiteSpace(ch))
                             colorHex = NormalizeColorHex(ch);
@@ -4227,6 +4237,10 @@ namespace SignalTracker.Controllers
 
                 foreach (var x in coveredRows.Where(r => !matchedRowIds.Contains(r.Id)))
                 {
+                    string rawVal = (x.VolteCall ?? x.Band ?? "").Trim();
+                    if (string.IsNullOrWhiteSpace(rawVal))
+                        continue;
+
                     string? colorHex = null;
                     if (x.MetricColors != null && x.MetricColors.TryGetValue(headerUpper, out var ch) && !string.IsNullOrWhiteSpace(ch))
                         colorHex = NormalizeColorHex(ch);
@@ -4235,7 +4249,6 @@ namespace SignalTracker.Controllers
                     if (string.IsNullOrWhiteSpace(colorHex))
                         colorHex = "#888888";
 
-                    string rawVal = (x.VolteCall ?? x.Band ?? "").Trim();
                     double? val = ParseDouble(rawVal);
                     outOfRangeRows.Add((x, val, rawVal, colorHex));
                 }
@@ -4284,6 +4297,9 @@ namespace SignalTracker.Controllers
                             .Where(s => !string.IsNullOrWhiteSpace(s))
                             .Distinct(StringComparer.OrdinalIgnoreCase)
                             .ToList();
+
+                        if (distinctStrings.Count == 0)
+                            continue;
 
                         string display = distinctStrings.Count == 1
                             ? distinctStrings[0]
@@ -5002,7 +5018,19 @@ namespace SignalTracker.Controllers
                     lines.Add((lineLabel, new Rgba32(r, g, b)));
                 }
 
-                var unmatchedCoveredRows = coveredRows.Where(r => !matchedRowIds.Contains(r.Id)).ToList();
+                var unmatchedCoveredRows = coveredRows
+                    .Where(r => !matchedRowIds.Contains(r.Id))
+                    .Where(r => {
+                        var v = headerUpper switch
+                        {
+                            "PCI" => r.Pci,
+                            "NODEB_ID" => r.NodeBId,
+                            "EARFCN" => r.Earfcn,
+                            _ => r.CellId
+                        };
+                        return !string.IsNullOrWhiteSpace(v);
+                    })
+                    .ToList();
                 if (unmatchedCoveredRows.Count > 0)
                 {
                     var groups = unmatchedCoveredRows.GroupBy(r =>
