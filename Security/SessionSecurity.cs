@@ -1,4 +1,4 @@
-﻿using System.Globalization;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.AspNetCore.Authentication;
@@ -13,7 +13,7 @@ public static class SessionSecurity
 {
     public const string StartedProperty = "st.sessionStarted";
     public static int IdleSeconds(IConfiguration configuration) =>
-        Math.Clamp(configuration.GetValue("Security:SessionIdleMinutes", 30), 5, 120) * 60;
+        Math.Clamp(configuration.GetValue("Security:SessionIdleMinutes", 360), 5, 720) * 60;
     public static string LockKey(int userId, string? region) =>
         $"auth:login-lock:v2:{RegionAccess.Normalize(region) ?? throw new InvalidOperationException("A trusted region is required.")}:{userId}";
     public static string CredentialVersion(string? passwordHash) =>
@@ -103,7 +103,15 @@ public static class SessionSecurity
             }
             var key = LockKey(userId, region);
             var currentLock = await redis.GetStringAsync(key);
-            if (string.IsNullOrWhiteSpace(currentLock) || !string.Equals(currentLock, lockValue, StringComparison.Ordinal))
+            if (string.IsNullOrWhiteSpace(currentLock))
+            {
+                await redis.SetStringAsync(key, lockValue, idleSeconds);
+                context.HttpContext.RequestServices.GetRequiredService<ILoggerFactory>()
+                    .CreateLogger("SessionSecurity").LogInformation("Session login lock restored after Redis TTL expired for a still-valid authenticated cookie.");
+                return;
+            }
+
+            if (!string.Equals(currentLock, lockValue, StringComparison.Ordinal))
             {
                 await RejectAsync(context, "login-lock-mismatch");
                 return;

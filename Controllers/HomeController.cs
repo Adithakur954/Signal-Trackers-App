@@ -8,6 +8,7 @@ using System.Text;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Diagnostics;
 using System.Security.Claims;
 using SignalTracker.Helper;
@@ -576,6 +577,42 @@ namespace SignalTracker.Controllers
             return Json(ret);
         }
 
+        [Authorize]
+        [HttpGet("KeepAlive")]
+        [HttpPost("KeepAlive")]
+        public async Task<IActionResult> KeepAlive()
+        {
+            if (_cf?.SessionCheck() != true)
+            {
+                return Unauthorized(new { success = false, message = "Session is not active." });
+            }
+
+            HttpContext.Session.SetString("st.keepalive", DateTimeOffset.UtcNow.ToString("O"));
+
+            if (_redis.IsConnected)
+            {
+                var claimUserId = User?.FindFirst("UserId")?.Value;
+                var region = User?.FindFirst("country_code")?.Value;
+                if (int.TryParse(claimUserId, out var parsedUserId) && parsedUserId > 0 && !string.IsNullOrWhiteSpace(region))
+                {
+                    try
+                    {
+                        await _redis.ExtendTtlAsync(SessionSecurity.LockKey(parsedUserId, region), UserLoginLockTtlSeconds);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "KeepAlive could not refresh Redis login lock TTL.");
+                    }
+                }
+            }
+
+            return Ok(new
+            {
+                success = true,
+                authenticated = true,
+                utc = DateTimeOffset.UtcNow
+            });
+        }
         [HttpGet("Logout")]
         public async Task<IActionResult> Logout(string IP)
         {
