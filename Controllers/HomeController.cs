@@ -33,6 +33,7 @@ namespace SignalTracker.Controllers
         private readonly IHttpContextAccessor _httpContextAccessor;
         private readonly LicenseFeatureService _licenseFeatureService;
         private readonly RedisService _redis;
+        private readonly LoginLockFallbackService _loginLocks;
 
         public HomeController(
             ApplicationDbContext context,
@@ -40,7 +41,8 @@ namespace SignalTracker.Controllers
             ILogger<HomeController> logger,
             IConfiguration configuration,
             LicenseFeatureService licenseFeatureService,
-            RedisService redis)
+            RedisService redis,
+            LoginLockFallbackService loginLocks)
         {
             _db = context;
             _cf = new CommonFunction(context, httpContextAccessor);
@@ -49,6 +51,7 @@ namespace SignalTracker.Controllers
             _httpContextAccessor = httpContextAccessor;
             _licenseFeatureService = licenseFeatureService;
             _redis = redis;
+            _loginLocks = loginLocks;
         }
 
         [HttpGet("")]
@@ -315,58 +318,66 @@ namespace SignalTracker.Controllers
                 var lockValue = $"{user!.id}:{user.email}:{DateTimeOffset.UtcNow:O}";
                 userLockKey = SessionSecurity.LockKey(user.id, loginSource);
 
-                if (_redis.IsConnected)
+                if (obj.ForceLogin == true)
                 {
-                    if (obj.ForceLogin == true)
-                    {
-                        // Backward compatibility: clear old single global lock key as well.
-                        await _redis.DeleteAsync(LegacyGlobalLoginLockKey);
-                        lockAcquired = await _redis.SetStringAsync(userLockKey, lockValue, UserLoginLockTtlSeconds);
-                        if (!lockAcquired)
-                        {
-                            if (RequireRedisLoginLock)
-                            {
-                                return Json(new { success = false, message = "Login service is temporarily unavailable. Please try again." });
-                            }
+                    // Backward compatibility: clear old single global lock key as well.
+                    await _redis.DeleteAsync(LegacyGlobalLoginLockKey);
+                    await _redis.DeleteAsync(userLockKey);
+                    await _loginLocks.DeleteAsync(userLockKey, HttpContext.RequestAborted);
 
-                            _logger.LogWarning("Redis force login lock unavailable for {Email}; allowing login because RequireRedisLoginLock is false.", user.email);
-                        }
+                    var redisSet = _redis.IsConnected && await _redis.SetStringAsync(userLockKey, lockValue, UserLoginLockTtlSeconds);
+                    var dbSet = await _loginLocks.SetStringAsync(userLockKey, lockValue, UserLoginLockTtlSeconds, HttpContext.RequestAborted);
+                    lockAcquired = redisSet || dbSet;
+                    if (!lockAcquired)
+                    {
+                        return Json(new { success = false, message = "Login service is temporarily unavailable. Please try again." });
+                    }
+                }
+                else
+                {
+                    RedisSetWhenNotExistsResult lockResult;
+                    string? existingLockValue = null;
+
+                    if (_redis.IsConnected)
+                    {
+                        lockResult = await _redis.TrySetStringWhenNotExistsAsync(userLockKey, lockValue, UserLoginLockTtlSeconds);
+                        if (lockResult == RedisSetWhenNotExistsResult.Set)
+                            await _loginLocks.SetStringAsync(userLockKey, lockValue, UserLoginLockTtlSeconds, HttpContext.RequestAborted);
+                        else if (lockResult == RedisSetWhenNotExistsResult.AlreadyExists)
+                            existingLockValue = await _redis.GetStringAsync(userLockKey);
                     }
                     else
                     {
-                        var lockResult = await _redis.TrySetStringWhenNotExistsAsync(userLockKey, lockValue, UserLoginLockTtlSeconds);
-                        if (lockResult == RedisSetWhenNotExistsResult.AlreadyExists)
-                        {
-                            var activeLogin = ParseLoginLockValue(await _redis.GetStringAsync(userLockKey));
-                            return Json(new
-                            {
-                                success = false,
-                                message = "Sorry, someone is already logged in. Please logout from old devices.",
-                                already_logged_in = true,
-                                can_force_logout = true,
-                                active_login = activeLogin
-                            });
-                        }
-                        if (lockResult == RedisSetWhenNotExistsResult.Unavailable)
-                        {
-                            if (RequireRedisLoginLock)
-                            {
-                                return Json(new { success = false, message = "Login service is temporarily unavailable. Please try again." });
-                            }
-
-                            _logger.LogWarning("Redis login lock unavailable for {Email}; allowing login because RequireRedisLoginLock is false.", user.email);
-                        }
-                        else
-                        {
-                            lockAcquired = true;
-                        }
+                        lockResult = RedisSetWhenNotExistsResult.Unavailable;
                     }
-                }
-                else if (RequireRedisLoginLock)
-                {
-                    return Json(new { success = false, message = "Login service is temporarily unavailable. Please try again." });
-                }
 
+                    if (lockResult == RedisSetWhenNotExistsResult.Unavailable)
+                    {
+                        lockResult = await _loginLocks.TrySetStringWhenNotExistsAsync(userLockKey, lockValue, UserLoginLockTtlSeconds, HttpContext.RequestAborted);
+                        if (lockResult == RedisSetWhenNotExistsResult.AlreadyExists)
+                            existingLockValue = await _loginLocks.GetStringAsync(userLockKey, HttpContext.RequestAborted);
+                    }
+
+                    if (lockResult == RedisSetWhenNotExistsResult.AlreadyExists)
+                    {
+                        var activeLogin = ParseLoginLockValue(existingLockValue);
+                        return Json(new
+                        {
+                            success = false,
+                            message = "Sorry, someone is already logged in. Please logout from old devices.",
+                            already_logged_in = true,
+                            can_force_logout = true,
+                            active_login = activeLogin
+                        });
+                    }
+
+                    if (lockResult == RedisSetWhenNotExistsResult.Unavailable)
+                    {
+                        return Json(new { success = false, message = "Login service is temporarily unavailable. Please try again." });
+                    }
+
+                    lockAcquired = true;
+                }
                 var resolvedCountryCode = RegionAccess.Normalize(loginSource)!;
                 await UpgradePasswordHashIfNeededAsync(user, loginSource, obj.Password);
 
@@ -597,7 +608,9 @@ namespace SignalTracker.Controllers
                 {
                     try
                     {
-                        await _redis.ExtendTtlAsync(SessionSecurity.LockKey(parsedUserId, region), UserLoginLockTtlSeconds);
+                        var keepAliveKey = SessionSecurity.LockKey(parsedUserId, region);
+                        await _redis.ExtendTtlAsync(keepAliveKey, UserLoginLockTtlSeconds);
+                        await _loginLocks.ExtendTtlAsync(keepAliveKey, UserLoginLockTtlSeconds, HttpContext.RequestAborted);
                     }
                     catch (Exception ex)
                     {
@@ -640,7 +653,9 @@ namespace SignalTracker.Controllers
 
                     if (int.TryParse(userIdValue, out var parsedUserId) && parsedUserId > 0)
                     {
-                        await _redis.DeleteAsync(SessionSecurity.LockKey(parsedUserId, User?.FindFirst("country_code")?.Value));
+                        var logoutLockKey = SessionSecurity.LockKey(parsedUserId, User?.FindFirst("country_code")?.Value);
+                        await _redis.DeleteAsync(logoutLockKey);
+                        await _loginLocks.DeleteAsync(logoutLockKey, HttpContext.RequestAborted);
                     }
 
                     // Backward compatibility: clear old single global lock key.

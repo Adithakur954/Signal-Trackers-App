@@ -257,6 +257,7 @@ internal class Program
      
         builder.Services.AddScoped<UserScopeService>();
         builder.Services.AddScoped<LicenseFeatureService>();
+        builder.Services.AddScoped<LoginLockFallbackService>();
         builder.Services.AddScoped<PythonBridgeService>();
         builder.Services.AddScoped<SitePredictionService>();
         builder.Services.AddScoped<NetworkLogDataService>();

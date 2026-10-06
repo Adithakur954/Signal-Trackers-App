@@ -96,18 +96,48 @@ public static class SessionSecurity
             }
 
             var redis = context.HttpContext.RequestServices.GetService<RedisService>();
+            var dbLocks = context.HttpContext.RequestServices.GetService<LoginLockFallbackService>();
+            var key = LockKey(userId, region);
             if (redis?.IsConnected != true)
             {
-                if (requireRedis) await RejectAsync(context, "redis-unavailable");
+                if (dbLocks == null)
+                {
+                    if (requireRedis) await RejectAsync(context, "redis-unavailable");
+                    return;
+                }
+
+                var dbLock = await dbLocks.GetStringAsync(key, context.HttpContext.RequestAborted);
+                if (string.IsNullOrWhiteSpace(dbLock))
+                {
+                    await RejectAsync(context, "db-login-lock-missing");
+                    return;
+                }
+
+                if (!string.Equals(dbLock, lockValue, StringComparison.Ordinal))
+                {
+                    await RejectAsync(context, "db-login-lock-mismatch");
+                    return;
+                }
+
+                await dbLocks.ExtendTtlAsync(key, idleSeconds, context.HttpContext.RequestAborted);
                 return;
             }
-            var key = LockKey(userId, region);
+
             var currentLock = await redis.GetStringAsync(key);
             if (string.IsNullOrWhiteSpace(currentLock))
             {
+                if (dbLocks != null)
+                {
+                    var dbLock = await dbLocks.GetStringAsync(key, context.HttpContext.RequestAborted);
+                    if (!string.Equals(dbLock, lockValue, StringComparison.Ordinal))
+                    {
+                        await RejectAsync(context, "db-login-lock-mismatch");
+                        return;
+                    }
+                }
                 await redis.SetStringAsync(key, lockValue, idleSeconds);
                 context.HttpContext.RequestServices.GetRequiredService<ILoggerFactory>()
-                    .CreateLogger("SessionSecurity").LogInformation("Session login lock restored after Redis TTL expired for a still-valid authenticated cookie.");
+                    .CreateLogger("SessionSecurity").LogInformation("Session login lock restored from DB fallback after Redis TTL expired.");
                 return;
             }
 
@@ -116,7 +146,10 @@ public static class SessionSecurity
                 await RejectAsync(context, "login-lock-mismatch");
                 return;
             }
-            if (!await redis.ExtendTtlAsync(key, idleSeconds) && requireRedis)
+            var redisExtended = await redis.ExtendTtlAsync(key, idleSeconds);
+            if (dbLocks != null)
+                await dbLocks.ExtendTtlAsync(key, idleSeconds, context.HttpContext.RequestAborted);
+            if (!redisExtended && requireRedis)
                 await RejectAsync(context, "login-lock-ttl-refresh-failed");
         }
         catch (OperationCanceledException) when (context.HttpContext.RequestAborted.IsCancellationRequested)
