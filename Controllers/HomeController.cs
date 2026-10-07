@@ -213,23 +213,36 @@ namespace SignalTracker.Controllers
             if (user.id <= 0)
                 return false;
 
-            if (string.Equals(sourceDb, "TW", StringComparison.OrdinalIgnoreCase))
+            var sourceConnectionName = string.Equals(sourceDb, "TW", StringComparison.OrdinalIgnoreCase)
+                ? "MySqlConnection2"
+                : "MySqlConnection";
+            var alternateConnectionName = string.Equals(sourceConnectionName, "MySqlConnection2", StringComparison.OrdinalIgnoreCase)
+                ? "MySqlConnection"
+                : "MySqlConnection2";
+
+            if (await HasActivePortalLicenseInConnectionAsync(sourceConnectionName, user.id, ct))
+                return true;
+
+            if (await HasActivePortalLicenseInConnectionAsync(alternateConnectionName, user.id, ct))
             {
-                var twConnectionString = MySqlConnectionStringHelper.EnsureZeroDateTimeHandling(_configuration.GetConnectionString("MySqlConnection2"));
-                if (string.IsNullOrWhiteSpace(twConnectionString))
-                    return false;
-
-                var optionsBuilder = new DbContextOptionsBuilder<ApplicationDbContext>();
-                optionsBuilder.UseMySql(twConnectionString, new MySqlServerVersion(new Version(8, 0, 29)), mysqlOptions =>
-                {
-                    mysqlOptions.EnableRetryOnFailure(3, TimeSpan.FromSeconds(5), null);
-                });
-
-                await using var twDb = new ApplicationDbContext(optionsBuilder.Options);
-                return await HasActivePortalLicenseInDbAsync(twDb, user.id, ct);
+                _logger.LogWarning(
+                    "Portal license for user {UserId} was found in fallback DB {FallbackConnectionName}, not source DB {SourceConnectionName}.",
+                    user.id, alternateConnectionName, sourceConnectionName);
+                return true;
             }
 
-            return await HasActivePortalLicenseInDbAsync(_db, user.id, ct);
+            var latest = await GetLatestPortalLicenseSnapshotAsync(sourceConnectionName, user.id, ct)
+                ?? await GetLatestPortalLicenseSnapshotAsync(alternateConnectionName, user.id, ct);
+            _logger.LogWarning(
+                "Portal license check failed for user {UserId}, email {Email}, source {SourceDb}. Latest license: {LicenseSummary}",
+                user.id,
+                user.email,
+                sourceDb,
+                latest == null
+                    ? "none"
+                    : $"id={latest.Id}, db={latest.ConnectionName}, status={latest.Status}, valid_till={latest.ValidTill:O}");
+
+            return false;
         }
 
         private static Task<bool> HasActivePortalLicenseInDbAsync(ApplicationDbContext db, int userId, CancellationToken ct)
@@ -241,6 +254,52 @@ namespace SignalTracker.Controllers
                     && lic.status == 1
                     && lic.valid_till.Date >= today, ct);
         }
+
+        private async Task<bool> HasActivePortalLicenseInConnectionAsync(string connectionName, int userId, CancellationToken ct)
+        {
+            var db = CreateDbContext(connectionName);
+            if (db == null)
+                return false;
+
+            await using (db)
+            {
+                return await HasActivePortalLicenseInDbAsync(db, userId, ct);
+            }
+        }
+
+        private async Task<LicenseSnapshot?> GetLatestPortalLicenseSnapshotAsync(string connectionName, int userId, CancellationToken ct)
+        {
+            var db = CreateDbContext(connectionName);
+            if (db == null)
+                return null;
+
+            await using (db)
+            {
+                return await db.tbl_company_user_license_issued
+                    .AsNoTracking()
+                    .Where(lic => lic.tbl_user_id == userId)
+                    .OrderByDescending(lic => lic.valid_till)
+                    .ThenByDescending(lic => lic.id)
+                    .Select(lic => new LicenseSnapshot(connectionName, lic.id, lic.status, lic.valid_till))
+                    .FirstOrDefaultAsync(ct);
+            }
+        }
+
+        private ApplicationDbContext? CreateDbContext(string connectionName)
+        {
+            var connectionString = MySqlConnectionStringHelper.EnsureZeroDateTimeHandling(_configuration.GetConnectionString(connectionName));
+            if (string.IsNullOrWhiteSpace(connectionString))
+                return null;
+
+            var optionsBuilder = new DbContextOptionsBuilder<ApplicationDbContext>();
+            optionsBuilder.UseMySql(connectionString, new MySqlServerVersion(new Version(8, 0, 29)), mysqlOptions =>
+            {
+                mysqlOptions.EnableRetryOnFailure(3, TimeSpan.FromSeconds(5), null);
+            });
+            return new ApplicationDbContext(optionsBuilder.Options);
+        }
+
+        private sealed record LicenseSnapshot(string ConnectionName, int Id, int Status, DateTime ValidTill);
 
         [HttpPost("UserLogin")]
         [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("Auth")]
