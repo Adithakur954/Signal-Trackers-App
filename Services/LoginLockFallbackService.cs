@@ -1,19 +1,26 @@
+using System.Collections.Concurrent;
 using System.Data;
 using Microsoft.EntityFrameworkCore;
 using SignalTracker.Models;
+using SignalTracker.Security;
 
 namespace SignalTracker.Services;
 
 public sealed class LoginLockFallbackService
 {
     private readonly ApplicationDbContext _db;
+    private readonly IConfiguration _configuration;
     private readonly ILogger<LoginLockFallbackService> _logger;
-    private static bool _tableChecked;
+    private static readonly ConcurrentDictionary<string, bool> CheckedTables = new(StringComparer.OrdinalIgnoreCase);
     private static readonly SemaphoreSlim TableLock = new(1, 1);
 
-    public LoginLockFallbackService(ApplicationDbContext db, ILogger<LoginLockFallbackService> logger)
+    public LoginLockFallbackService(
+        ApplicationDbContext db,
+        IConfiguration configuration,
+        ILogger<LoginLockFallbackService> logger)
     {
         _db = db;
+        _configuration = configuration;
         _logger = logger;
     }
 
@@ -21,10 +28,12 @@ public sealed class LoginLockFallbackService
     {
         try
         {
-            await EnsureTableAsync(ct);
-            await DeleteExpiredAsync(key, ct);
+            await using var lease = CreateDbForKey(key);
+            var db = lease.Db;
+            await EnsureTableAsync(db, ct);
+            await DeleteExpiredAsync(db, key, ct);
 
-            var conn = _db.Database.GetDbConnection();
+            var conn = db.Database.GetDbConnection();
             var close = conn.State != ConnectionState.Open;
             if (close) await conn.OpenAsync(ct);
             try
@@ -46,6 +55,9 @@ public sealed class LoginLockFallbackService
         }
         catch (Exception ex)
         {
+            if (ex is OperationCanceledException && ct.IsCancellationRequested)
+                throw;
+
             _logger.LogWarning(ex, "DB login lock read failed for {Key}.", key);
             return null;
         }
@@ -55,10 +67,12 @@ public sealed class LoginLockFallbackService
     {
         try
         {
-            await EnsureTableAsync(ct);
+            await using var lease = CreateDbForKey(key);
+            var db = lease.Db;
+            await EnsureTableAsync(db, ct);
             var expiresAt = DateTime.UtcNow.AddSeconds(Math.Max(ttlSeconds, 60));
 
-            var conn = _db.Database.GetDbConnection();
+            var conn = db.Database.GetDbConnection();
             var close = conn.State != ConnectionState.Open;
             if (close) await conn.OpenAsync(ct);
             try
@@ -83,6 +97,9 @@ public sealed class LoginLockFallbackService
         }
         catch (Exception ex)
         {
+            if (ex is OperationCanceledException && ct.IsCancellationRequested)
+                throw;
+
             _logger.LogWarning(ex, "DB login lock write failed for {Key}.", key);
             return false;
         }
@@ -92,8 +109,11 @@ public sealed class LoginLockFallbackService
     {
         try
         {
-            await EnsureTableAsync(ct);
-            await DeleteExpiredAsync(key, ct);
+            await using var lease = CreateDbForKey(key);
+            var db = lease.Db;
+            await EnsureTableAsync(db, ct);
+            await DeleteExpiredAsync(db, key, ct);
+
             var existing = await GetStringAsync(key, ct);
             if (!string.IsNullOrWhiteSpace(existing))
                 return RedisSetWhenNotExistsResult.AlreadyExists;
@@ -104,6 +124,9 @@ public sealed class LoginLockFallbackService
         }
         catch (Exception ex)
         {
+            if (ex is OperationCanceledException && ct.IsCancellationRequested)
+                throw;
+
             _logger.LogWarning(ex, "DB login lock acquire failed for {Key}.", key);
             return RedisSetWhenNotExistsResult.Unavailable;
         }
@@ -113,10 +136,12 @@ public sealed class LoginLockFallbackService
     {
         try
         {
-            await EnsureTableAsync(ct);
+            await using var lease = CreateDbForKey(key);
+            var db = lease.Db;
+            await EnsureTableAsync(db, ct);
             var expiresAt = DateTime.UtcNow.AddSeconds(Math.Max(ttlSeconds, 60));
 
-            var conn = _db.Database.GetDbConnection();
+            var conn = db.Database.GetDbConnection();
             var close = conn.State != ConnectionState.Open;
             if (close) await conn.OpenAsync(ct);
             try
@@ -137,6 +162,9 @@ public sealed class LoginLockFallbackService
         }
         catch (Exception ex)
         {
+            if (ex is OperationCanceledException && ct.IsCancellationRequested)
+                throw;
+
             _logger.LogWarning(ex, "DB login lock TTL refresh failed for {Key}.", key);
             return false;
         }
@@ -146,8 +174,10 @@ public sealed class LoginLockFallbackService
     {
         try
         {
-            await EnsureTableAsync(ct);
-            var conn = _db.Database.GetDbConnection();
+            await using var lease = CreateDbForKey(key);
+            var db = lease.Db;
+            await EnsureTableAsync(db, ct);
+            var conn = db.Database.GetDbConnection();
             var close = conn.State != ConnectionState.Open;
             if (close) await conn.OpenAsync(ct);
             try
@@ -165,14 +195,17 @@ public sealed class LoginLockFallbackService
         }
         catch (Exception ex)
         {
+            if (ex is OperationCanceledException && ct.IsCancellationRequested)
+                throw;
+
             _logger.LogWarning(ex, "DB login lock delete failed for {Key}.", key);
             return false;
         }
     }
 
-    private async Task DeleteExpiredAsync(string key, CancellationToken ct)
+    private async Task DeleteExpiredAsync(ApplicationDbContext db, string key, CancellationToken ct)
     {
-        var conn = _db.Database.GetDbConnection();
+        var conn = db.Database.GetDbConnection();
         var close = conn.State != ConnectionState.Open;
         if (close) await conn.OpenAsync(ct);
         try
@@ -188,16 +221,17 @@ public sealed class LoginLockFallbackService
         }
     }
 
-    private async Task EnsureTableAsync(CancellationToken ct)
+    private async Task EnsureTableAsync(ApplicationDbContext db, CancellationToken ct)
     {
-        if (_tableChecked) return;
+        var tableScope = db.Database.GetConnectionString() ?? db.Database.GetDbConnection().ConnectionString;
+        if (CheckedTables.ContainsKey(tableScope)) return;
 
         await TableLock.WaitAsync(ct);
         try
         {
-            if (_tableChecked) return;
+            if (CheckedTables.ContainsKey(tableScope)) return;
 
-            await _db.Database.ExecuteSqlRawAsync(@"
+            await db.Database.ExecuteSqlRawAsync(@"
                 CREATE TABLE IF NOT EXISTS tbl_login_lock (
                     lock_key VARCHAR(191) NOT NULL PRIMARY KEY,
                     lock_value LONGTEXT NOT NULL,
@@ -205,12 +239,40 @@ public sealed class LoginLockFallbackService
                     updated_at_utc DATETIME(6) NOT NULL,
                     INDEX ix_tbl_login_lock_expires (expires_at_utc)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;", ct);
-            _tableChecked = true;
+            CheckedTables[tableScope] = true;
         }
         finally
         {
             TableLock.Release();
         }
+    }
+
+    private DbLease CreateDbForKey(string key)
+    {
+        var region = ExtractRegion(key);
+        var connectionName = string.Equals(region, "TW", StringComparison.OrdinalIgnoreCase)
+            ? "MySqlConnection2"
+            : "MySqlConnection";
+        var connectionString = MySqlConnectionStringHelper.EnsureZeroDateTimeHandling(
+            _configuration.GetConnectionString(connectionName));
+
+        if (string.IsNullOrWhiteSpace(connectionString))
+            return new DbLease(_db, ownsDb: false);
+
+        var currentConnection = _db.Database.GetConnectionString() ?? _db.Database.GetDbConnection().ConnectionString;
+        if (string.Equals(currentConnection, connectionString, StringComparison.Ordinal))
+            return new DbLease(_db, ownsDb: false);
+
+        var options = new DbContextOptionsBuilder<ApplicationDbContext>()
+            .UseMySql(connectionString, new MySqlServerVersion(new Version(8, 0, 29)))
+            .Options;
+        return new DbLease(new ApplicationDbContext(options), ownsDb: true);
+    }
+
+    private static string? ExtractRegion(string key)
+    {
+        var parts = key.Split(':', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return parts.Length >= 4 ? RegionAccess.Normalize(parts[3]) : null;
     }
 
     private static void Add(System.Data.Common.DbCommand cmd, string name, object? value)
@@ -219,5 +281,24 @@ public sealed class LoginLockFallbackService
         p.ParameterName = name;
         p.Value = value ?? DBNull.Value;
         cmd.Parameters.Add(p);
+    }
+
+    private sealed class DbLease : IAsyncDisposable
+    {
+        private readonly bool _ownsDb;
+
+        public DbLease(ApplicationDbContext db, bool ownsDb)
+        {
+            Db = db;
+            _ownsDb = ownsDb;
+        }
+
+        public ApplicationDbContext Db { get; }
+
+        public async ValueTask DisposeAsync()
+        {
+            if (_ownsDb)
+                await Db.DisposeAsync();
+        }
     }
 }

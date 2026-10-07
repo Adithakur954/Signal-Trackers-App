@@ -98,6 +98,7 @@ public static class SessionSecurity
             var redis = context.HttpContext.RequestServices.GetService<RedisService>();
             var dbLocks = context.HttpContext.RequestServices.GetService<LoginLockFallbackService>();
             var key = LockKey(userId, region);
+            var lockCancellation = CancellationToken.None;
             if (redis?.IsConnected != true)
             {
                 if (dbLocks == null)
@@ -106,7 +107,7 @@ public static class SessionSecurity
                     return;
                 }
 
-                var dbLock = await dbLocks.GetStringAsync(key, context.HttpContext.RequestAborted);
+                var dbLock = await dbLocks.GetStringAsync(key, lockCancellation);
                 if (string.IsNullOrWhiteSpace(dbLock))
                 {
                     await RejectAsync(context, "db-login-lock-missing");
@@ -119,7 +120,7 @@ public static class SessionSecurity
                     return;
                 }
 
-                await dbLocks.ExtendTtlAsync(key, idleSeconds, context.HttpContext.RequestAborted);
+                await dbLocks.ExtendTtlAsync(key, idleSeconds, lockCancellation);
                 return;
             }
 
@@ -128,7 +129,7 @@ public static class SessionSecurity
             {
                 if (dbLocks != null)
                 {
-                    var dbLock = await dbLocks.GetStringAsync(key, context.HttpContext.RequestAborted);
+                    var dbLock = await dbLocks.GetStringAsync(key, lockCancellation);
                     if (!string.Equals(dbLock, lockValue, StringComparison.Ordinal))
                     {
                         await RejectAsync(context, "db-login-lock-mismatch");
@@ -148,7 +149,7 @@ public static class SessionSecurity
             }
             var redisExtended = await redis.ExtendTtlAsync(key, idleSeconds);
             if (dbLocks != null)
-                await dbLocks.ExtendTtlAsync(key, idleSeconds, context.HttpContext.RequestAborted);
+                await dbLocks.ExtendTtlAsync(key, idleSeconds, lockCancellation);
             if (!redisExtended && requireRedis)
                 await RejectAsync(context, "login-lock-ttl-refresh-failed");
         }
