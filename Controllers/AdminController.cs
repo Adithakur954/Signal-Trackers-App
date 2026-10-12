@@ -3000,6 +3000,57 @@ public async Task<IActionResult> OutdoorCount(
             return cachedData;
         }
 
+        private static async Task<bool> AdminTableExistsAsync(DbConnection conn, string tableName, CancellationToken cancellationToken)
+        {
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT COUNT(*)
+                FROM INFORMATION_SCHEMA.TABLES
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = @tableName;";
+            Add(cmd, "@tableName", tableName);
+
+            var result = await cmd.ExecuteScalarAsync(cancellationToken);
+            return Convert.ToInt64(result ?? 0, CultureInfo.InvariantCulture) > 0;
+        }
+
+        private static string BuildSessionDataExistsSql(IReadOnlyCollection<string> availableTables)
+        {
+            return availableTables.Contains("tbl_network_log")
+                ? "EXISTS (SELECT 1 FROM tbl_network_log nl WHERE nl.session_id = s.id LIMIT 1)"
+                : "1 = 0";
+        }
+
+        private static string? ReadString(DbDataReader reader, string columnName)
+        {
+            var ordinal = reader.GetOrdinal(columnName);
+            return reader.IsDBNull(ordinal) ? null : Convert.ToString(reader.GetValue(ordinal), CultureInfo.InvariantCulture);
+        }
+
+        private static DateTime? ReadDateTime(DbDataReader reader, string columnName)
+        {
+            var ordinal = reader.GetOrdinal(columnName);
+            return reader.IsDBNull(ordinal) ? null : Convert.ToDateTime(reader.GetValue(ordinal), CultureInfo.InvariantCulture);
+        }
+
+        private static int? ReadNullableInt(DbDataReader reader, string columnName)
+        {
+            var ordinal = reader.GetOrdinal(columnName);
+            return reader.IsDBNull(ordinal) ? null : Convert.ToInt32(reader.GetValue(ordinal), CultureInfo.InvariantCulture);
+        }
+
+        private static float? ReadNullableFloat(DbDataReader reader, string columnName)
+        {
+            var ordinal = reader.GetOrdinal(columnName);
+            return reader.IsDBNull(ordinal) ? null : Convert.ToSingle(reader.GetValue(ordinal), CultureInfo.InvariantCulture);
+        }
+
+        private static double? ReadNullableDouble(DbDataReader reader, string columnName)
+        {
+            var ordinal = reader.GetOrdinal(columnName);
+            return reader.IsDBNull(ordinal) ? null : Convert.ToDouble(reader.GetValue(ordinal), CultureInfo.InvariantCulture);
+        }
+
         public class SessionsPageResponse
         {
             public List<SessionListItem> Data { get; set; } = new();
@@ -3090,7 +3141,7 @@ public async Task<IActionResult> GetSessions(
     fromDate = CleanFilter(fromDate);
     toDate = CleanFilter(toDate);
 
-    var cacheKey = $"sessions:list:v3:{GetCacheCountryScope()}:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:p:{page}:ps:{pageSize}:q:{search}:type:{sessionType}:sid:{sessionId}:ud:{userDetails}:sd:{startDate}:st:{startTime}:ed:{endDate}:et:{endTime}:sl:{startLocation}:el:{endLocation}:d:{distance}:cf:{captureFrequency}:r:{sessionRemarks}:from:{fromDate}:to:{toDate}";
+    var cacheKey = $"sessions:list:v5:network-log-only:{GetCacheCountryScope()}:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:p:{page}:ps:{pageSize}:q:{search}:type:{sessionType}:sid:{sessionId}:ud:{userDetails}:sd:{startDate}:st:{startTime}:ed:{endDate}:et:{endTime}:sl:{startLocation}:el:{endLocation}:d:{distance}:cf:{captureFrequency}:r:{sessionRemarks}:from:{fromDate}:to:{toDate}";
     var cached = await TryGetCachedObjectAsync<SessionsPageResponse>(cacheKey);
     if (cached != null)
     {
@@ -3111,210 +3162,200 @@ public async Task<IActionResult> GetSessions(
     // =========================================================
     try
     {
-        var query =
-            from s in db.tbl_session.AsNoTracking()
-            join u0 in db.tbl_user.AsNoTracking() on s.user_id equals u0.id into users
-            from u in users.DefaultIfEmpty()
-            where useUserScope
-                ? s.user_id == currentUserId
-                : (targetCompanyId == 0 || (u != null && u.company_id == targetCompanyId))
-            where s.type == null || s.type != "l3_event"
-            select new
-            {
-                id = s.id,
-                session_name = "Session " + s.id,
+        var conn = db.Database.GetDbConnection();
+        if (conn.State != ConnectionState.Open)
+            await conn.OpenAsync(HttpContext.RequestAborted);
 
-                // ?? COMPANY INFO
-                company_id = u != null ? u.company_id : null,
+        var dataTables = new[] { "tbl_network_log" };
+        var availableTables = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var table in dataTables)
+        {
+            if (await AdminTableExistsAsync(conn, table, HttpContext.RequestAborted))
+                availableTables.Add(table);
+        }
 
-                start_time = s.start_time,
-                end_time = s.end_time,
-                notes = s.notes,
+        var where = new List<string>
+        {
+            "(s.type IS NULL OR s.type <> 'l3_event')",
+            BuildSessionDataExistsSql(availableTables)
+        };
+        var parameters = new List<(string Name, object? Value)>();
 
-                start_lat = s.start_lat,
-                start_lon = s.start_lon,
-                end_lat = (double?)s.end_lat,
-                end_lon = (double?)s.end_lon,
-
-                capture_frequency = (double?)s.capture_frequency,
-                distance_km = s.distance,
-
-                start_address = s.start_address,
-                end_address = s.end_address,
-                type = s.type,
-
-                CreatedBy = u != null ? u.name : null,
-                mobile = u != null ? u.mobile : null,
-                make = u != null ? u.make : null,
-                model = u != null ? u.model : null,
-                os = u != null ? u.os : null,
-                operator_name = u != null ? u.operator_name : null
-            };
+        if (useUserScope)
+        {
+            where.Add("s.user_id = @currentUserId");
+            parameters.Add(("@currentUserId", currentUserId));
+        }
+        else if (targetCompanyId > 0)
+        {
+            where.Add("u.company_id = @targetCompanyId");
+            parameters.Add(("@targetCompanyId", targetCompanyId));
+        }
 
         if (!string.IsNullOrWhiteSpace(fromDate) && DateTime.TryParse(fromDate, out var from))
         {
-            query = query.Where(s => s.start_time.HasValue && s.start_time.Value >= from.Date);
+            where.Add("s.start_time >= @fromDate");
+            parameters.Add(("@fromDate", from.Date));
         }
 
         if (!string.IsNullOrWhiteSpace(toDate) && DateTime.TryParse(toDate, out var to))
         {
-            var inclusiveTo = to.Date.AddDays(1).AddTicks(-1);
-            query = query.Where(s => s.start_time.HasValue && s.start_time.Value <= inclusiveTo);
+            where.Add("s.start_time < @toDateExclusive");
+            parameters.Add(("@toDateExclusive", to.Date.AddDays(1)));
+        }
+
+        void AddLikeFilter(string sql, string parameterName, string value)
+        {
+            where.Add(sql);
+            parameters.Add((parameterName, $"%{value}%"));
         }
 
         if (!string.IsNullOrWhiteSpace(search))
         {
-            var like = $"%{search}%";
-            query = query.Where(s =>
-                EF.Functions.Like((s.id ?? 0).ToString(), like) ||
-                (s.CreatedBy != null && EF.Functions.Like(s.CreatedBy, like)) ||
-                (s.mobile != null && EF.Functions.Like(s.mobile, like)) ||
-                (s.start_address != null && EF.Functions.Like(s.start_address, like)) ||
-                (s.end_address != null && EF.Functions.Like(s.end_address, like)));
+            AddLikeFilter(@"(
+                CAST(s.id AS CHAR) LIKE @search OR
+                u.name LIKE @search OR
+                u.mobile LIKE @search OR
+                s.start_address LIKE @search OR
+                s.end_address LIKE @search
+            )", "@search", search);
         }
 
         if (!string.IsNullOrWhiteSpace(sessionType))
-        {
-            var like = $"%{sessionType}%";
-            query = query.Where(s => s.type != null && EF.Functions.Like(s.type, like));
-        }
+            AddLikeFilter("s.type LIKE @sessionType", "@sessionType", sessionType);
 
         if (!string.IsNullOrWhiteSpace(sessionId))
-        {
-            var like = $"%{sessionId}%";
-            query = query.Where(s => EF.Functions.Like((s.id ?? 0).ToString(), like));
-        }
+            AddLikeFilter("CAST(s.id AS CHAR) LIKE @sessionId", "@sessionId", sessionId);
 
         if (!string.IsNullOrWhiteSpace(userDetails))
         {
-            var like = $"%{userDetails}%";
-            query = query.Where(s =>
-                (s.CreatedBy != null && EF.Functions.Like(s.CreatedBy, like)) ||
-                (s.mobile != null && EF.Functions.Like(s.mobile, like)) ||
-                (s.make != null && EF.Functions.Like(s.make, like)) ||
-                (s.model != null && EF.Functions.Like(s.model, like)) ||
-                (s.os != null && EF.Functions.Like(s.os, like)) ||
-                (s.operator_name != null && EF.Functions.Like(s.operator_name, like)));
+            AddLikeFilter(@"(
+                u.name LIKE @userDetails OR
+                u.mobile LIKE @userDetails OR
+                u.make LIKE @userDetails OR
+                u.model LIKE @userDetails OR
+                u.os LIKE @userDetails OR
+                u.operator_name LIKE @userDetails
+            )", "@userDetails", userDetails);
         }
 
         if (!string.IsNullOrWhiteSpace(startLocation))
-        {
-            var like = $"%{startLocation}%";
-            query = query.Where(s => s.start_address != null && EF.Functions.Like(s.start_address, like));
-        }
+            AddLikeFilter("s.start_address LIKE @startLocation", "@startLocation", startLocation);
 
         if (!string.IsNullOrWhiteSpace(endLocation))
-        {
-            var like = $"%{endLocation}%";
-            query = query.Where(s => s.end_address != null && EF.Functions.Like(s.end_address, like));
-        }
+            AddLikeFilter("s.end_address LIKE @endLocation", "@endLocation", endLocation);
 
         if (!string.IsNullOrWhiteSpace(sessionRemarks))
-        {
-            var like = $"%{sessionRemarks}%";
-            query = query.Where(s => s.notes != null && EF.Functions.Like(s.notes, like));
-        }
+            AddLikeFilter("s.notes LIKE @sessionRemarks", "@sessionRemarks", sessionRemarks);
 
         if (!string.IsNullOrWhiteSpace(distance))
-        {
-            var like = $"%{distance}%";
-            query = query.Where(s => s.distance_km.HasValue && EF.Functions.Like(s.distance_km.Value.ToString(), like));
-        }
+            AddLikeFilter("CAST(s.distance AS CHAR) LIKE @distance", "@distance", distance);
 
         if (!string.IsNullOrWhiteSpace(captureFrequency))
-        {
-            var like = $"%{captureFrequency}%";
-            query = query.Where(s => s.capture_frequency.HasValue && EF.Functions.Like(s.capture_frequency.Value.ToString(), like));
-        }
+            AddLikeFilter("CAST(s.capture_frequency AS CHAR) LIKE @captureFrequency", "@captureFrequency", captureFrequency);
 
         if (!string.IsNullOrWhiteSpace(startDate))
-        {
-            var like = $"%{startDate}%";
-            query = query.Where(s => s.start_time.HasValue && EF.Functions.Like(s.start_time.Value.ToString(), like));
-        }
+            AddLikeFilter("DATE_FORMAT(s.start_time, '%Y-%m-%d %H:%i:%s') LIKE @startDate", "@startDate", startDate);
 
         if (!string.IsNullOrWhiteSpace(startTime))
-        {
-            var like = $"%{startTime}%";
-            query = query.Where(s => s.start_time.HasValue && EF.Functions.Like(s.start_time.Value.ToString(), like));
-        }
+            AddLikeFilter("DATE_FORMAT(s.start_time, '%Y-%m-%d %H:%i:%s') LIKE @startTime", "@startTime", startTime);
 
         if (!string.IsNullOrWhiteSpace(endDate))
-        {
-            var like = $"%{endDate}%";
-            query = query.Where(s => s.end_time.HasValue && EF.Functions.Like(s.end_time.Value.ToString(), like));
-        }
+            AddLikeFilter("DATE_FORMAT(s.end_time, '%Y-%m-%d %H:%i:%s') LIKE @endDate", "@endDate", endDate);
 
         if (!string.IsNullOrWhiteSpace(endTime))
-        {
-            var like = $"%{endTime}%";
-            query = query.Where(s => s.end_time.HasValue && EF.Functions.Like(s.end_time.Value.ToString(), like));
-        }
+            AddLikeFilter("DATE_FORMAT(s.end_time, '%Y-%m-%d %H:%i:%s') LIKE @endTime", "@endTime", endTime);
 
-        var totalCount = await query.CountAsync();
+        var fromWhereSql = $@"
+            FROM tbl_session s
+            LEFT JOIN tbl_user u ON s.user_id = u.id
+            WHERE {string.Join("\n              AND ", where)}";
+
+        long totalCount;
+        await using (var countCmd = conn.CreateCommand())
+        {
+            countCmd.CommandText = "SELECT COUNT(*) " + fromWhereSql + ";";
+            countCmd.CommandTimeout = 60;
+            foreach (var parameter in parameters)
+                Add(countCmd, parameter.Name, parameter.Value);
+
+            totalCount = Convert.ToInt64(await countCmd.ExecuteScalarAsync(HttpContext.RequestAborted) ?? 0, CultureInfo.InvariantCulture);
+        }
         var totalPages = totalCount == 0 ? 0 : (int)Math.Ceiling(totalCount / (double)pageSize);
 
         if (totalPages > 0 && page > totalPages)
             page = totalPages;
 
-        var rawSessions = await query
-            .OrderByDescending(s => s.id)
-            .Skip((page - 1) * pageSize)
-            .Take(pageSize)
-            .ToListAsync();
-
-        var sessions = rawSessions.Select(s => new
+        var offset = (page - 1) * pageSize;
+        var sessions = new List<SessionListItem>();
+        await using (var cmd = conn.CreateCommand())
         {
-            s.id,
-            s.session_name,
-            s.company_id,
-            s.start_time,
-            s.end_time,
-            notes = CleanNotes(s.notes),
-            s.start_lat,
-            s.start_lon,
-            s.end_lat,
-            s.end_lon,
-            s.capture_frequency,
-            s.distance_km,
-            s.start_address,
-            s.end_address,
-            s.type,
-            s.CreatedBy,
-            s.mobile,
-            s.make,
-            s.model,
-            s.os,
-            s.operator_name
-        }).ToList();
+            cmd.CommandText = $@"
+                SELECT
+                    s.id,
+                    u.company_id,
+                    s.start_time,
+                    s.end_time,
+                    s.notes,
+                    s.start_lat,
+                    s.start_lon,
+                    s.end_lat,
+                    s.end_lon,
+                    s.capture_frequency,
+                    s.distance AS distance_km,
+                    s.start_address,
+                    s.end_address,
+                    s.type,
+                    u.name AS CreatedBy,
+                    u.mobile,
+                    u.make,
+                    u.model,
+                    u.os,
+                    u.operator_name
+                {fromWhereSql}
+                ORDER BY s.id DESC
+                LIMIT @pageSize OFFSET @offset;";
+            cmd.CommandTimeout = 60;
+            foreach (var parameter in parameters)
+                Add(cmd, parameter.Name, parameter.Value);
+            Add(cmd, "@pageSize", pageSize);
+            Add(cmd, "@offset", offset);
+
+            await using var reader = await cmd.ExecuteReaderAsync(HttpContext.RequestAborted);
+            while (await reader.ReadAsync(HttpContext.RequestAborted))
+            {
+                var id = ReadNullableInt(reader, "id");
+                sessions.Add(new SessionListItem
+                {
+                    id = id,
+                    session_name = "Session " + id,
+                    company_id = ReadNullableInt(reader, "company_id"),
+                    start_time = ReadDateTime(reader, "start_time"),
+                    end_time = ReadDateTime(reader, "end_time"),
+                    notes = CleanNotes(ReadString(reader, "notes")),
+                    start_lat = ReadNullableFloat(reader, "start_lat"),
+                    start_lon = ReadNullableFloat(reader, "start_lon"),
+                    end_lat = ReadNullableDouble(reader, "end_lat"),
+                    end_lon = ReadNullableDouble(reader, "end_lon"),
+                    capture_frequency = ReadNullableDouble(reader, "capture_frequency"),
+                    distance_km = ReadNullableFloat(reader, "distance_km"),
+                    start_address = ReadString(reader, "start_address"),
+                    end_address = ReadString(reader, "end_address"),
+                    type = ReadString(reader, "type"),
+                    CreatedBy = ReadString(reader, "CreatedBy"),
+                    mobile = ReadString(reader, "mobile"),
+                    make = ReadString(reader, "make"),
+                    model = ReadString(reader, "model"),
+                    os = ReadString(reader, "os"),
+                    operator_name = ReadString(reader, "operator_name")
+                });
+            }
+        }
 
         var pageResponse = new SessionsPageResponse
         {
-            Data = sessions.Select(s => new SessionListItem
-            {
-                id = s.id,
-                session_name = s.session_name,
-                company_id = s.company_id,
-                start_time = s.start_time,
-                end_time = s.end_time,
-                notes = s.notes,
-                start_lat = s.start_lat,
-                start_lon = s.start_lon,
-                end_lat = s.end_lat,
-                end_lon = s.end_lon,
-                capture_frequency = s.capture_frequency,
-                distance_km = s.distance_km,
-                start_address = s.start_address,
-                end_address = s.end_address,
-                type = s.type,
-                CreatedBy = s.CreatedBy,
-                mobile = s.mobile,
-                make = s.make,
-                model = s.model,
-                os = s.os,
-                operator_name = s.operator_name
-            }).ToList(),
-            TotalCount = totalCount,
+            Data = sessions,
+            TotalCount = totalCount > int.MaxValue ? int.MaxValue : (int)totalCount,
             Page = page,
             PageSize = pageSize,
             TotalPages = totalPages
