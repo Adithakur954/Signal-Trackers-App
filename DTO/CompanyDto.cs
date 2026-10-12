@@ -17,6 +17,7 @@
         public int? license_validity_in_months { get; set; }
         public int? total_granted_licenses { get; set; }
         public int? total_used_licenses { get; set; }
+        public int? admin_license_status { get; set; }
         public string? otp_phone_number { get; set; }
         public int? ask_for_otp { get; set; }
         public string? blacklisted_phone_number { get; set; }
@@ -74,6 +75,7 @@ public int total_used_licenses { get; set; }
         public string remarks { get; set; } = string.Empty;
         public string otp_phone_number { get; set; } = string.Empty;
         public int license_validity_in_months { get; set; }
+        public int? license_status { get; set; }
         public int status { get; set; }
     }
 public class GrantLicenseRequest

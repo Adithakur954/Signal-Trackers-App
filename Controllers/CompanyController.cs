@@ -88,6 +88,7 @@ namespace SignalTracker.Controllers
                             on lic.tbl_user_id equals usr.id
                         where companyIds.Contains(lic.tbl_company_id)
                               && usr.isactive != 2
+                              && lic.status != 2
                         group lic by lic.tbl_company_id into g
                         select new
                         {
@@ -96,11 +97,30 @@ namespace SignalTracker.Controllers
                         })
                         .ToDictionaryAsync(x => x.CompanyId, x => x.Count);
 
+                    var adminLicenses = await (
+                        from lic in _db.tbl_company_user_license_issued.AsNoTracking()
+                        join usr in _db.tbl_user.AsNoTracking() on lic.tbl_user_id equals usr.id
+                        join comp in _db.tbl_company.AsNoTracking() on lic.tbl_company_id equals comp.id
+                        where companyIds.Contains(lic.tbl_company_id)
+                              && usr.company_id == comp.id
+                              && usr.m_user_type_id == 2
+                              && usr.email != null
+                              && comp.email != null
+                              && usr.email.ToLower() == comp.email.ToLower()
+                        select new { lic.tbl_company_id, lic.status, lic.valid_till, lic.id })
+                        .ToListAsync();
+
                     foreach (var company in companies)
                     {
                         company.total_used_licenses = usedLicenseCounts.TryGetValue(company.id, out var count)
                             ? count
                             : 0;
+                        company.admin_license_status = adminLicenses
+                            .Where(lic => lic.tbl_company_id == company.id)
+                            .OrderByDescending(lic => lic.valid_till)
+                            .ThenByDescending(lic => lic.id)
+                            .Select(lic => (int?)lic.status)
+                            .FirstOrDefault();
                     }
                 }
 
@@ -174,6 +194,15 @@ namespace SignalTracker.Controllers
                 if (request == null)
                     return BadRequest(new { Status = 0, Message = "Invalid request data" });
 
+                if (request.license_validity_in_months <= 0)
+                    return BadRequest(new { Status = 0, Message = "License validity must be greater than zero months" });
+
+                if (request.total_granted_licenses < 1)
+                    return BadRequest(new { Status = 0, Message = "At least one granted license is required for the company admin" });
+
+                if (request.license_status is not (0 or 1 or 2))
+                    return BadRequest(new { Status = 0, Message = "License status is required (0 = inactive, 1 = active, 2 = revoked)" });
+
                 // ============================================================
                 //  CREATE NEW COMPANY
                 // ============================================================
@@ -189,6 +218,8 @@ namespace SignalTracker.Controllers
                     // B. Validate Password
                     if (string.IsNullOrEmpty(request.password))
                         return BadRequest(new { Status = 0, Message = "Password is required for new companies" });
+
+                    await using var createTransaction = await _db.Database.BeginTransactionAsync();
 
                     string hashedPassword = PasswordSecurity.HashPassword(request.password);
 
@@ -220,8 +251,8 @@ namespace SignalTracker.Controllers
                         license_validity_in_months = request.license_validity_in_months,
                         
                         // FIX 1: Accessing the property correctly now that it's in the DTO
-                        total_granted_licenses = request.total_granted_licenses > 0 ? request.total_granted_licenses : 10, 
-                        total_used_licenses = 0,
+                        total_granted_licenses = request.total_granted_licenses,
+                        total_used_licenses = request.license_status == 2 ? 0 : 1,
 
                         ask_for_otp = request.ask_for_otp, 
                         otp_phone_number = request.otp_phone_number,
@@ -261,6 +292,19 @@ namespace SignalTracker.Controllers
                     await _db.SaveChangesAsync();
                     await _thresholdDefaults.EnsureForUserAsync(user.id);
 
+                    var adminLicense = new tbl_company_user_license_issued
+                    {
+                        tbl_company_id = company.id,
+                        tbl_user_id = user.id,
+                        license_code = $"LIC-{company.id}-{user.id}-{Guid.NewGuid():N}"[..24].ToUpperInvariant(),
+                        valid_till = DateTime.UtcNow.AddMonths(request.license_validity_in_months),
+                        created_on = DateTime.UtcNow,
+                        status = request.license_status.Value
+                    };
+                    _db.tbl_company_user_license_issued.Add(adminLicense);
+                    await _db.SaveChangesAsync();
+                    await createTransaction.CommitAsync();
+
                     // ============================================================
                     //  MULTI-DATABASE SUPPORT: If TW, save to Secondary DB
                     // ============================================================
@@ -297,8 +341,8 @@ namespace SignalTracker.Controllers
                                         gst_id = request.gst_id,
                                         company_code = companyCode, // Keep same code
                                         license_validity_in_months = request.license_validity_in_months,
-                                        total_granted_licenses = request.total_granted_licenses > 0 ? request.total_granted_licenses : 10,
-                                        total_used_licenses = 0,
+                                        total_granted_licenses = request.total_granted_licenses,
+                                        total_used_licenses = request.license_status == 2 ? 0 : 1,
                                         ask_for_otp = request.ask_for_otp,
                                         otp_phone_number = request.otp_phone_number,
                                         blacklisted_phone_number = request.blacklisted_phone_number,
@@ -331,6 +375,17 @@ namespace SignalTracker.Controllers
 
                                     secondaryDb.tbl_user.Add(twUser);
                                     await secondaryDb.SaveChangesAsync();
+
+                                    secondaryDb.tbl_company_user_license_issued.Add(new tbl_company_user_license_issued
+                                    {
+                                        tbl_company_id = twCompany.id,
+                                        tbl_user_id = twUser.id,
+                                        license_code = $"LIC-{twCompany.id}-{twUser.id}-{Guid.NewGuid():N}"[..24].ToUpperInvariant(),
+                                        valid_till = DateTime.UtcNow.AddMonths(request.license_validity_in_months),
+                                        created_on = DateTime.UtcNow,
+                                        status = request.license_status.Value
+                                    });
+                                    await secondaryDb.SaveChangesAsync();
                                 }
                             }
                         }
@@ -360,6 +415,24 @@ else
     var existingCompany = await _db.tbl_company.FindAsync(request.id);
     if (existingCompany == null)
         return NotFound(new { Status = 0, Message = "Company not found" });
+
+    var adminEmail = existingCompany.email?.Trim().ToLowerInvariant();
+    var adminUser = await _db.tbl_user.FirstOrDefaultAsync(u =>
+        u.company_id == existingCompany.id && u.m_user_type_id == 2 &&
+        u.email != null && u.email.ToLower() == adminEmail && u.isactive != 2);
+    if (adminUser == null)
+        return BadRequest(new { Status = 0, Message = "The default company admin user could not be found" });
+
+    var adminLicenses = await _db.tbl_company_user_license_issued
+        .Where(l => l.tbl_company_id == existingCompany.id && l.tbl_user_id == adminUser.id)
+        .ToListAsync();
+    var otherIssuedLicenseCount = await _db.tbl_company_user_license_issued
+        .CountAsync(l => l.tbl_company_id == existingCompany.id && l.tbl_user_id != adminUser.id && l.status != 2);
+    var resultingAdminLicenseCount = request.license_status == 2 ? 0 : Math.Max(adminLicenses.Count, 1);
+    if (request.total_granted_licenses < otherIssuedLicenseCount + resultingAdminLicenseCount)
+        return BadRequest(new { Status = 0, Message = "Granted license count must cover all issued, non-revoked licenses, including the default admin" });
+
+    var validityChanged = existingCompany.license_validity_in_months != request.license_validity_in_months;
 
     // ==============================
     // BASIC COMPANY DETAILS
@@ -404,34 +477,31 @@ else
     //  LICENSE UPDATE LOGIC
     // ==============================
 
-    // 1 Update total granted licenses
-    if (request.total_granted_licenses >= 0)
-    {
-        if (request.total_granted_licenses < existingCompany.total_used_licenses)
-        {
-            return BadRequest(new
-            {
-                Status = 0,
-                Message = "Total granted licenses cannot be less than used licenses"
-            });
-        }
-
-        existingCompany.total_granted_licenses = request.total_granted_licenses;
-    }
+    existingCompany.total_granted_licenses = request.total_granted_licenses;
 
     // 2ï¸ Update total used licenses
-    if (request.total_used_licenses >= 0)
-    {
-        if (request.total_used_licenses > existingCompany.total_granted_licenses)
-        {
-            return BadRequest(new
-            {
-                Status = 0,
-                Message = "Used licenses cannot exceed granted licenses"
-            });
-        }
+    existingCompany.total_used_licenses = otherIssuedLicenseCount + resultingAdminLicenseCount;
 
-        existingCompany.total_used_licenses = request.total_used_licenses;
+    if (adminLicenses.Count == 0)
+    {
+        _db.tbl_company_user_license_issued.Add(new tbl_company_user_license_issued
+        {
+            tbl_company_id = existingCompany.id,
+            tbl_user_id = adminUser.id,
+            license_code = $"LIC-{existingCompany.id}-{adminUser.id}-{Guid.NewGuid():N}"[..24].ToUpperInvariant(),
+            valid_till = DateTime.UtcNow.AddMonths(request.license_validity_in_months),
+            created_on = DateTime.UtcNow,
+            status = request.license_status.Value
+        });
+    }
+    else
+    {
+        foreach (var adminLicense in adminLicenses)
+        {
+            adminLicense.status = request.license_status.Value;
+            if (validityChanged || (request.license_status == 1 && adminLicense.valid_till.Date < DateTime.UtcNow.Date))
+                adminLicense.valid_till = DateTime.UtcNow.AddMonths(request.license_validity_in_months);
+        }
     }
 
     _db.tbl_company.Update(existingCompany);
