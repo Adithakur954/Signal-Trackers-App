@@ -162,6 +162,7 @@ namespace SignalTracker.Models
                 e.HasKey(x => x.id);
                 e.ToTable("tbl_network_log");
                 e.Ignore(x => x.speed);
+                e.HasIndex(x => x.session_id).HasDatabaseName("idx_networklog_session_id");
 
                 // relationship configured from session side too
                 e.HasOne(n => n.session)

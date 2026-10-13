@@ -35,6 +35,7 @@ namespace SignalTracker.Controllers
         private readonly RedisService _redis;
         // Cache for index-existence check to avoid hitting INFORMATION_SCHEMA repeatedly
         private static bool? _hasSessionUserIndex;
+        private static bool? _hasNetworkLogSessionLookupIndex;
 
 private int GetTargetCompanyId(int? explicitCompanyId)
 {
@@ -260,6 +261,54 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
             {
                 if (shouldClose && conn.State == ConnectionState.Open)
                     await conn.CloseAsync();
+            }
+        }
+
+        private static async Task<bool> HasLeadingColumnIndexAsync(
+            DbConnection conn,
+            string table,
+            string column,
+            CancellationToken cancellationToken)
+        {
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT COUNT(*)
+                FROM INFORMATION_SCHEMA.STATISTICS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = @table
+                  AND COLUMN_NAME = @column
+                  AND SEQ_IN_INDEX = 1;";
+            Add(cmd, "@table", table);
+            Add(cmd, "@column", column);
+
+            var result = await cmd.ExecuteScalarAsync(cancellationToken);
+            return Convert.ToInt64(result ?? 0, CultureInfo.InvariantCulture) > 0;
+        }
+
+        private static async Task EnsureNetworkLogSessionLookupIndexAsync(
+            DbConnection conn,
+            CancellationToken cancellationToken)
+        {
+            if (_hasNetworkLogSessionLookupIndex == true)
+                return;
+
+            if (await HasLeadingColumnIndexAsync(conn, "tbl_network_log", "session_id", cancellationToken))
+            {
+                _hasNetworkLogSessionLookupIndex = true;
+                return;
+            }
+
+            try
+            {
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = "CREATE INDEX idx_networklog_session_id ON tbl_network_log (session_id);";
+                cmd.CommandTimeout = 300;
+                await cmd.ExecuteNonQueryAsync(cancellationToken);
+                _hasNetworkLogSessionLookupIndex = true;
+            }
+            catch
+            {
+                _hasNetworkLogSessionLookupIndex = null;
             }
         }
 
@@ -3017,7 +3066,33 @@ public async Task<IActionResult> OutdoorCount(
         private static string BuildSessionDataExistsSql(IReadOnlyCollection<string> availableTables)
         {
             return availableTables.Contains("tbl_network_log")
-                ? "EXISTS (SELECT 1 FROM tbl_network_log nl WHERE nl.session_id = s.id LIMIT 1)"
+                ? @"EXISTS (
+                    SELECT 1
+                    FROM tbl_network_log nl
+                    WHERE nl.session_id = s.id
+                      AND nl.lat IS NOT NULL
+                      AND nl.lon IS NOT NULL
+                      AND UPPER(TRIM(COALESCE(nl.band, ''))) <> 'UNKNOWN'
+                      AND nl.primary_cell_info_1 IS NOT NULL
+                      AND TRIM(nl.primary_cell_info_1) <> ''
+                      AND (
+                          NULLIF(TRIM(nl.band), '') IS NOT NULL
+                          OR UPPER(TRIM(COALESCE(nl.network, ''))) LIKE '%5G%'
+                      )
+                      AND (
+                          nl.primary_cell_info_1 LIKE '%mRegistered=YES%'
+                          OR nl.primary_cell_info_1 LIKE 'SSID:%'
+                          OR nl.primary_cell_info_1 LIKE '%BSSID:%'
+                          OR LOWER(COALESCE(s.type, '')) = 'wifi'
+                          OR UPPER(CONCAT_WS(' ', COALESCE(nl.network, ''), COALESCE(nl.band, ''), COALESCE(nl.primary_cell_info_1, ''), COALESCE(nl.all_neigbor_cell_info, ''))) LIKE '%5G%'
+                          OR UPPER(CONCAT_WS(' ', COALESCE(nl.network, ''), COALESCE(nl.band, ''), COALESCE(nl.primary_cell_info_1, ''), COALESCE(nl.all_neigbor_cell_info, ''))) LIKE '%NRARFCN%'
+                          OR UPPER(CONCAT_WS(' ', COALESCE(nl.network, ''), COALESCE(nl.band, ''), COALESCE(nl.primary_cell_info_1, ''), COALESCE(nl.all_neigbor_cell_info, ''))) LIKE '%MNR%'
+                          OR UPPER(CONCAT_WS(' ', COALESCE(nl.network, ''), COALESCE(nl.band, ''), COALESCE(nl.primary_cell_info_1, ''), COALESCE(nl.all_neigbor_cell_info, ''))) LIKE '%NCI%'
+                          OR UPPER(CONCAT_WS(' ', COALESCE(nl.network, ''), COALESCE(nl.band, ''), COALESCE(nl.primary_cell_info_1, ''), COALESCE(nl.all_neigbor_cell_info, ''))) REGEXP '(^|[^A-Z0-9])NR([^A-Z0-9]|$)'
+                          OR UPPER(CONCAT_WS(' ', COALESCE(nl.network, ''), COALESCE(nl.band, ''), COALESCE(nl.primary_cell_info_1, ''), COALESCE(nl.all_neigbor_cell_info, ''))) REGEXP '(^|[^A-Z0-9])N[0-9]{1,3}([^A-Z0-9]|$)'
+                      )
+                    LIMIT 1
+                )"
                 : "1 = 0";
         }
 
@@ -3141,7 +3216,7 @@ public async Task<IActionResult> GetSessions(
     fromDate = CleanFilter(fromDate);
     toDate = CleanFilter(toDate);
 
-    var cacheKey = $"sessions:list:v5:network-log-only:{GetCacheCountryScope()}:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:p:{page}:ps:{pageSize}:q:{search}:type:{sessionType}:sid:{sessionId}:ud:{userDetails}:sd:{startDate}:st:{startTime}:ed:{endDate}:et:{endTime}:sl:{startLocation}:el:{endLocation}:d:{distance}:cf:{captureFrequency}:r:{sessionRemarks}:from:{fromDate}:to:{toDate}";
+    var cacheKey = $"sessions:list:v7:map-valid-network-log-only:{GetCacheCountryScope()}:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:p:{page}:ps:{pageSize}:q:{search}:type:{sessionType}:sid:{sessionId}:ud:{userDetails}:sd:{startDate}:st:{startTime}:ed:{endDate}:et:{endTime}:sl:{startLocation}:el:{endLocation}:d:{distance}:cf:{captureFrequency}:r:{sessionRemarks}:from:{fromDate}:to:{toDate}";
     var cached = await TryGetCachedObjectAsync<SessionsPageResponse>(cacheKey);
     if (cached != null)
     {
@@ -3173,6 +3248,9 @@ public async Task<IActionResult> GetSessions(
             if (await AdminTableExistsAsync(conn, table, HttpContext.RequestAborted))
                 availableTables.Add(table);
         }
+
+        if (availableTables.Contains("tbl_network_log"))
+            await EnsureNetworkLogSessionLookupIndexAsync(conn, HttpContext.RequestAborted);
 
         var where = new List<string>
         {
@@ -3451,7 +3529,7 @@ public async Task<IActionResult> GetSessions(
                 // =========================================================
                 string fromKey = startDate.ToString("yyyyMMdd");
                 string toKey = endDate.ToString("yyyyMMdd");
-                string cacheKey = $"SessionsDateRange:{GetCacheCountryScope()}:{targetCompanyId}:{fromKey}:{toKey}";
+                string cacheKey = $"SessionsDateRange:v3:map-valid-network-log-only:{GetCacheCountryScope()}:{targetCompanyId}:{fromKey}:{toKey}";
 
                 // =========================================================
                 // 3. TRY REDIS
@@ -3472,6 +3550,10 @@ public async Task<IActionResult> GetSessions(
                        && s.start_time.HasValue
                        && s.start_time.Value >= startDate
                        && s.start_time.Value <= endDate
+                       && db.tbl_network_log.AsNoTracking().Any(n =>
+                           n.session_id == s.id &&
+                           n.lat != null &&
+                           n.lon != null)
                     orderby s.start_time descending
                     select new
                     {

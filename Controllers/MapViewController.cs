@@ -67,6 +67,8 @@ namespace SignalTracker.Controllers
             "networklog:v18:*",
             "networklog:v19:*",
             "networklog:v27:*",
+            "networklog:v28:*",
+            "networklog:v29:*",
             "latlon:dist:*",
             "n78_simple_kpi:*",
             "n78_neighbours:*",
@@ -6016,6 +6018,82 @@ public class AvailablePolygonsResponse
             public decimal SiteSize { get; set; }
         }
 
+        private async Task<List<int>> FilterSessionIdsWithMappableLogsAsync(IEnumerable<int>? sessionIds)
+        {
+            var requested = (sessionIds ?? Enumerable.Empty<int>())
+                .Where(id => id > 0)
+                .Distinct()
+                .ToList();
+
+            if (requested.Count == 0)
+                return new List<int>();
+
+            var conn = db.Database.GetDbConnection();
+            var shouldClose = false;
+            if (conn.State != ConnectionState.Open)
+            {
+                await conn.OpenAsync(HttpContext.RequestAborted);
+                shouldClose = true;
+            }
+
+            var available = new List<int>();
+            try
+            {
+                await using var cmd = conn.CreateCommand();
+                var parameterNames = new List<string>();
+                AddParams(cmd, "validSid", requested, parameterNames);
+                cmd.CommandText = $@"
+                    SELECT DISTINCT nl.session_id
+                    FROM tbl_network_log nl
+                    LEFT JOIN tbl_session s ON s.id = nl.session_id
+                    WHERE nl.session_id IN ({string.Join(",", parameterNames)})
+                      AND nl.lat IS NOT NULL
+                      AND nl.lon IS NOT NULL
+                      AND UPPER(TRIM(COALESCE(nl.band, ''))) <> 'UNKNOWN'
+                      AND nl.primary_cell_info_1 IS NOT NULL
+                      AND TRIM(nl.primary_cell_info_1) <> ''
+                      AND (
+                          NULLIF(TRIM(nl.band), '') IS NOT NULL
+                          OR UPPER(TRIM(COALESCE(nl.network, ''))) LIKE '%5G%'
+                      )
+                      AND (
+                          nl.primary_cell_info_1 LIKE '%mRegistered=YES%'
+                          OR nl.primary_cell_info_1 LIKE 'SSID:%'
+                          OR nl.primary_cell_info_1 LIKE '%BSSID:%'
+                          OR LOWER(COALESCE(s.type, '')) = 'wifi'
+                          OR UPPER(CONCAT_WS(' ', COALESCE(nl.network, ''), COALESCE(nl.band, ''), COALESCE(nl.primary_cell_info_1, ''), COALESCE(nl.all_neigbor_cell_info, ''))) LIKE '%5G%'
+                          OR UPPER(CONCAT_WS(' ', COALESCE(nl.network, ''), COALESCE(nl.band, ''), COALESCE(nl.primary_cell_info_1, ''), COALESCE(nl.all_neigbor_cell_info, ''))) LIKE '%NRARFCN%'
+                          OR UPPER(CONCAT_WS(' ', COALESCE(nl.network, ''), COALESCE(nl.band, ''), COALESCE(nl.primary_cell_info_1, ''), COALESCE(nl.all_neigbor_cell_info, ''))) LIKE '%MNR%'
+                          OR UPPER(CONCAT_WS(' ', COALESCE(nl.network, ''), COALESCE(nl.band, ''), COALESCE(nl.primary_cell_info_1, ''), COALESCE(nl.all_neigbor_cell_info, ''))) LIKE '%NCI%'
+                          OR UPPER(CONCAT_WS(' ', COALESCE(nl.network, ''), COALESCE(nl.band, ''), COALESCE(nl.primary_cell_info_1, ''), COALESCE(nl.all_neigbor_cell_info, ''))) REGEXP '(^|[^A-Z0-9])NR([^A-Z0-9]|$)'
+                          OR UPPER(CONCAT_WS(' ', COALESCE(nl.network, ''), COALESCE(nl.band, ''), COALESCE(nl.primary_cell_info_1, ''), COALESCE(nl.all_neigbor_cell_info, ''))) REGEXP '(^|[^A-Z0-9])N[0-9]{{1,3}}([^A-Z0-9]|$)'
+                      );";
+
+                await using var reader = await cmd.ExecuteReaderAsync(HttpContext.RequestAborted);
+                while (await reader.ReadAsync(HttpContext.RequestAborted))
+                {
+                    if (!reader.IsDBNull(0))
+                        available.Add(Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture));
+                }
+            }
+            finally
+            {
+                if (shouldClose && conn.State == ConnectionState.Open)
+                    await conn.CloseAsync();
+            }
+
+            var availableSet = available.ToHashSet();
+            return requested.Where(availableSet.Contains).ToList();
+        }
+
+        private async Task<string?> SanitizeProjectRefSessionIdAsync(object? refSessionId)
+        {
+            var raw = Convert.ToString(refSessionId, CultureInfo.InvariantCulture);
+            var ids = ParseCsvToIntList(raw);
+            var filtered = await FilterSessionIdsWithMappableLogsAsync(ids);
+            return filtered.Count == 0 ? null : string.Join(",", filtered);
+        }
+
         private async Task<(int? CompanyId, string? Error)> ResolveProjectCompanyIdAsync(CreateProjectModel? model)
         {
             var isSuperAdmin = _userScope.IsSuperAdmin(User);
@@ -6085,6 +6163,7 @@ public async Task<JsonResult> CreateProjectWithPolygons([FromBody] CreateProject
     {
         return Json(new { Status = 0, Message = companyResolution.Error });
     }
+    var mappableSessionIds = await FilterSessionIdsWithMappableLogsAsync(model.SessionIds);
 
     // 2. Create the Execution Strategy
     var strategy = db.Database.CreateExecutionStrategy();
@@ -6111,8 +6190,8 @@ public async Task<JsonResult> CreateProjectWithPolygons([FromBody] CreateProject
                     to_date        = model.ToDate?.ToString("yyyy-MM-dd"),
                     created_on     = DateTime.UtcNow,
                     status         = 1,
-                    ref_session_id = (model.SessionIds != null && model.SessionIds.Any())
-                                        ? string.Join(",", model.SessionIds)
+                    ref_session_id = mappableSessionIds.Any()
+                                        ? string.Join(",", mappableSessionIds)
                                         : null
                 };
 
@@ -6797,6 +6876,15 @@ private async Task<JsonResult> GetNetworkLogCore(MapFilter1 filters)
     var sessionIds = _networkLogData.ParseSessionIds(filters?.GetRawSessionIds())
         .ToList();
 
+    if (sessionIds.Count > 0)
+    {
+        var validSessionIds = await FilterSessionIdsWithMappableLogsAsync(
+            sessionIds
+                .Where(id => id <= int.MaxValue)
+                .Select(id => (int)id));
+        sessionIds = validSessionIds.Select(id => (long)id).ToList();
+    }
+
     if (filters == null || sessionIds.Count == 0)
         return Json(new { message = "No valid session IDs provided", data = new List<object>() });
 
@@ -7063,7 +7151,7 @@ private static object ToNetworkLogResponseObject(
         io_summary = cacheModel.io_summary,
         tpt_volume = cacheModel.tpt_volume,
         total_count = cacheModel.TotalCount,
-        session_count = sessionCount,
+        session_count = cacheModel.Sessions.Count,
         sessions = cacheModel.Sessions,
         cachedAt = cacheModel.CachedAt,
         cache_state = cacheState,
@@ -8036,7 +8124,7 @@ private string BuildNetworkLogCacheKey(
         : "no_project";
     string versionKey = NormalizeCacheKeyPart(dataVersion);
 
-    return $"networklog:v27:{GetProjectListCacheScope()}:{sortedSessionIds}:{providerKey}:{networkTypeKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
+    return $"networklog:v29:{GetProjectListCacheScope()}:{sortedSessionIds}:{providerKey}:{networkTypeKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
 }
 
 private static string CleanProviderDisplayName(string value)
@@ -9057,10 +9145,7 @@ public async Task<IActionResult> UpdateProjectSessions([FromBody] UpdateProjectS
             return Unauthorized(new { Status = 0, Message = "Unauthorized to update this project." });
         }
 
-        var sessionIds = (model.SessionIds ?? new List<int>())
-            .Where(id => id > 0)
-            .Distinct()
-            .ToList();
+        var sessionIds = await FilterSessionIdsWithMappableLogsAsync(model.SessionIds);
 
         project.ref_session_id = sessionIds.Any() ? string.Join(",", sessionIds) : null;
         await db.SaveChangesAsync();
@@ -16285,6 +16370,7 @@ public async Task<IActionResult> CreateSimpleProject([FromBody] CreateProjectMod
         {
             return BadRequest(new { Status = 0, Message = companyResolution.Error });
         }
+        var mappableSessionIds = await FilterSessionIdsWithMappableLogsAsync(model.SessionIds);
 
         // 3. Initialize the Project Entity
         var newProject = new tbl_project
@@ -16295,8 +16381,8 @@ public async Task<IActionResult> CreateSimpleProject([FromBody] CreateProjectMod
             company_id = companyResolution.CompanyId.Value,
             
             // Store the Session IDs as a comma-separated string
-            ref_session_id = (model.SessionIds != null && model.SessionIds.Any())
-                ? string.Join(",", model.SessionIds)
+            ref_session_id = mappableSessionIds.Any()
+                ? string.Join(",", mappableSessionIds)
                 : null,
 
             // Optional: Map other fields if they happen to be provided, else they remain null
@@ -17179,7 +17265,7 @@ public async Task<IActionResult> GetProjects([FromQuery] int? company_id = null)
             });
         }
 
-        var cacheKey = BuildMapViewCacheKey("projects", GetProjectListCacheScope(), targetCompanyId, useUserScope ? currentUserId : 0);
+        var cacheKey = BuildMapViewCacheKey("projects-v3-map-valid-sessions", GetProjectListCacheScope(), targetCompanyId, useUserScope ? currentUserId : 0);
         var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
         if (cached != null)
             return Json(cached);
@@ -17324,11 +17410,13 @@ private async Task<List<object>> GetProjectsFromRawSqlAsync(
             return value == DBNull.Value ? null : value;
         }
 
+        var sanitizedRefSessionId = await SanitizeProjectRefSessionIdAsync(ReadDb("ref_session_id"));
+
         projects.Add(new
         {
             id = ReadDb("id"),
             project_name = ReadDb("project_name"),
-            ref_session_id = ReadDb("ref_session_id"),
+            ref_session_id = sanitizedRefSessionId,
             from_date = ReadDb("from_date"),
             to_date = ReadDb("to_date"),
             provider = ReadDb("provider"),
@@ -17427,11 +17515,13 @@ private async Task<List<object>> GetProjectsFallbackAsync(
             return value == DBNull.Value ? null : value;
         }
 
+        var sanitizedRefSessionId = await SanitizeProjectRefSessionIdAsync(ReadDb("ref_session_id"));
+
         projects.Add(new
         {
             id = ReadDb("id"),
             project_name = ReadDb("project_name"),
-            ref_session_id = ReadDb("ref_session_id"),
+            ref_session_id = sanitizedRefSessionId,
             from_date = ReadDb("from_date"),
             to_date = ReadDb("to_date"),
             provider = ReadDb("provider"),
