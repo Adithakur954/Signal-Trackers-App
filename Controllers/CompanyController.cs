@@ -7,6 +7,7 @@ using SignalTracker.Security;
 using SignalTracker.Services;
 using SignalTracker.DTOs;
 using Microsoft.Extensions.Configuration;
+using System.Data;
 
 namespace SignalTracker.Controllers
 {
@@ -850,6 +851,102 @@ public async Task<IActionResult> GetUsedLicenses(
         {
             Status = 0,
             Message = "Error fetching used licenses",
+            Error = SafeException.Get(ex?.InnerException) ?? SafeException.Get(ex)
+        });
+    }
+}
+
+// ======================================================
+// ACTIVE WEB PORTAL USERS BY COMPANY
+// Counts users with a non-expired login lock for the company scope.
+// ======================================================
+[HttpGet("portalUsage")]
+public async Task<IActionResult> GetPortalUsage([FromQuery] int? companyId = null)
+{
+    try
+    {
+        var targetCompanyId = _userScope.GetTargetCompanyId(User, companyId);
+        if (!_userScope.IsSuperAdmin(User) && targetCompanyId <= 0)
+            return StatusCode(403, new { Status = 0, Message = "Company scope not found" });
+
+        var rows = new List<object>();
+        var totalActiveUsers = 0;
+
+        var conn = _db.Database.GetDbConnection();
+        var closeConnection = conn.State != ConnectionState.Open;
+        if (closeConnection)
+            await conn.OpenAsync(HttpContext.RequestAborted);
+
+        try
+        {
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+SELECT
+    u.company_id,
+    c.company_name,
+    u.id AS user_id,
+    u.name AS user_name,
+    u.email AS user_email,
+    u.mobile AS user_mobile,
+    u.m_user_type_id,
+    l.lock_key,
+    l.expires_at_utc,
+    TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(6), l.expires_at_utc) AS expires_in_seconds
+FROM tbl_login_lock l
+JOIN tbl_user u
+  ON u.id = CAST(SUBSTRING_INDEX(l.lock_key, ':', -1) AS UNSIGNED)
+LEFT JOIN tbl_company c
+  ON c.id = u.company_id
+WHERE l.lock_key LIKE 'auth:login-lock:v2:%'
+  AND l.expires_at_utc > UTC_TIMESTAMP(6)
+  AND u.isactive = 1
+  AND (@companyId = 0 OR u.company_id = @companyId)
+ORDER BY c.company_name, u.name, u.email;";
+
+            var companyParam = cmd.CreateParameter();
+            companyParam.ParameterName = "@companyId";
+            companyParam.Value = targetCompanyId;
+            cmd.Parameters.Add(companyParam);
+
+            await using var reader = await cmd.ExecuteReaderAsync(HttpContext.RequestAborted);
+            while (await reader.ReadAsync(HttpContext.RequestAborted))
+            {
+                totalActiveUsers++;
+                rows.Add(new
+                {
+                    company_id = reader["company_id"] == DBNull.Value ? null : reader["company_id"],
+                    company_name = reader["company_name"] == DBNull.Value ? null : reader["company_name"],
+                    user_id = reader["user_id"],
+                    user_name = reader["user_name"] == DBNull.Value ? null : reader["user_name"],
+                    user_email = reader["user_email"] == DBNull.Value ? null : reader["user_email"],
+                    user_mobile = reader["user_mobile"] == DBNull.Value ? null : reader["user_mobile"],
+                    m_user_type_id = reader["m_user_type_id"],
+                    lock_key = reader["lock_key"],
+                    expires_at_utc = reader["expires_at_utc"],
+                    expires_in_seconds = reader["expires_in_seconds"]
+                });
+            }
+        }
+        finally
+        {
+            if (closeConnection)
+                await conn.CloseAsync();
+        }
+
+        return Ok(new
+        {
+            Status = 1,
+            company_id = targetCompanyId == 0 ? (int?)null : targetCompanyId,
+            total_active_portal_users = totalActiveUsers,
+            active_users = rows
+        });
+    }
+    catch (Exception ex)
+    {
+        return StatusCode(500, new
+        {
+            Status = 0,
+            Message = "Error fetching portal usage",
             Error = SafeException.Get(ex?.InnerException) ?? SafeException.Get(ex)
         });
     }
