@@ -81,6 +81,7 @@ namespace SignalTracker.Models
                 e.HasKey(x => x.id);
                 e.ToTable("tbl_user");
                 e.HasIndex(x => x.mobile).HasDatabaseName("ix_tbl_user_mobile");
+                e.HasIndex(x => new { x.company_id, x.id }).HasDatabaseName("idx_user_company_id_id");
                 e.HasIndex(x => new { x.is_deleted, x.deletion_requested_at }).HasDatabaseName("ix_tbl_user_deletion_due");
             });
 
@@ -163,6 +164,7 @@ namespace SignalTracker.Models
                 e.ToTable("tbl_network_log");
                 e.Ignore(x => x.speed);
                 e.HasIndex(x => x.session_id).HasDatabaseName("idx_networklog_session_id");
+                e.HasIndex(x => new { x.session_id, x.lat, x.lon }).HasDatabaseName("idx_networklog_session_lat_lon");
 
                 // relationship configured from session side too
                 e.HasOne(n => n.session)
