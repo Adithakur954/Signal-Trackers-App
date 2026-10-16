@@ -6043,10 +6043,13 @@ public class AvailablePolygonsResponse
                 var parameterNames = new List<string>();
                 AddParams(cmd, "validSid", requested, parameterNames);
                 cmd.CommandText = $@"
-                    SELECT DISTINCT nl.session_id
-                    FROM tbl_network_log nl
-                    LEFT JOIN tbl_session s ON s.id = nl.session_id
-                    WHERE nl.session_id IN ({string.Join(",", parameterNames)})
+                    SELECT s.id
+                    FROM tbl_session s
+                    WHERE s.id IN ({string.Join(",", parameterNames)})
+                      AND EXISTS (
+                        SELECT 1
+                        FROM tbl_network_log nl
+                        WHERE nl.session_id = s.id
                       AND nl.lat IS NOT NULL
                       AND nl.lon IS NOT NULL
                       AND UPPER(TRIM(COALESCE(nl.band, ''))) <> 'UNKNOWN'
@@ -6067,7 +6070,9 @@ public class AvailablePolygonsResponse
                           OR UPPER(CONCAT_WS(' ', COALESCE(nl.network, ''), COALESCE(nl.band, ''), COALESCE(nl.primary_cell_info_1, ''), COALESCE(nl.all_neigbor_cell_info, ''))) LIKE '%NCI%'
                           OR UPPER(CONCAT_WS(' ', COALESCE(nl.network, ''), COALESCE(nl.band, ''), COALESCE(nl.primary_cell_info_1, ''), COALESCE(nl.all_neigbor_cell_info, ''))) REGEXP '(^|[^A-Z0-9])NR([^A-Z0-9]|$)'
                           OR UPPER(CONCAT_WS(' ', COALESCE(nl.network, ''), COALESCE(nl.band, ''), COALESCE(nl.primary_cell_info_1, ''), COALESCE(nl.all_neigbor_cell_info, ''))) REGEXP '(^|[^A-Z0-9])N[0-9]{{1,3}}([^A-Z0-9]|$)'
-                      );";
+                      )
+                      LIMIT 1
+                    );";
 
                 await using var reader = await cmd.ExecuteReaderAsync(HttpContext.RequestAborted);
                 while (await reader.ReadAsync(HttpContext.RequestAborted))
@@ -6086,12 +6091,39 @@ public class AvailablePolygonsResponse
             return requested.Where(availableSet.Contains).ToList();
         }
 
-        private async Task<string?> SanitizeProjectRefSessionIdAsync(object? refSessionId)
+        private async Task SanitizeProjectListSessionsAsync(List<object> projects)
         {
-            var raw = Convert.ToString(refSessionId, CultureInfo.InvariantCulture);
-            var ids = ParseCsvToIntList(raw);
-            var filtered = await FilterSessionIdsWithMappableLogsAsync(ids);
-            return filtered.Count == 0 ? null : string.Join(",", filtered);
+            var rows = projects.Cast<Dictionary<string, object?>>().ToList();
+            var sessionIdsByProject = rows.Select(row => ParseCsvToIntList(
+                Convert.ToString(row["ref_session_id"], CultureInfo.InvariantCulture))).ToList();
+            var available = (await FilterSessionIdsWithMappableLogsAsync(
+                sessionIdsByProject.SelectMany(ids => ids))).ToHashSet();
+
+            for (var i = 0; i < rows.Count; i++)
+            {
+                var filtered = sessionIdsByProject[i].Where(available.Contains).Distinct().ToList();
+                rows[i]["ref_session_id"] = filtered.Count == 0 ? null : string.Join(",", filtered);
+            }
+        }
+
+        private static Dictionary<string, object?> ReadProjectListRow(DbDataReader reader, bool includeGeometry)
+        {
+            var row = new Dictionary<string, object?>();
+            foreach (var name in new[]
+            {
+                "id", "project_name", "ref_session_id", "from_date", "to_date", "provider",
+                "tech", "band", "earfcn", "apps", "grid_size", "log_grid", "sitesize",
+                "l3", "event", "created_on", "Download_path"
+            })
+                row[name] = reader[name] == DBNull.Value ? null : reader[name];
+
+            row["l3"] = Convert.ToBoolean(row["l3"] ?? false, CultureInfo.InvariantCulture);
+            row["event"] = Convert.ToBoolean(row["event"] ?? false, CultureInfo.InvariantCulture);
+            foreach (var name in new[] { "project_polygon_wkt", "region_wkt", "region_blob_b64", "geometry_wkt" })
+            {
+                row[name] = includeGeometry && reader[name] != DBNull.Value ? reader[name] : null;
+            }
+            return row;
         }
 
         private async Task<(int? CompanyId, string? Error)> ResolveProjectCompanyIdAsync(CreateProjectModel? model)
@@ -8151,9 +8183,6 @@ private static void NormalizeNetworkLogRows(List<NetworkLogCacheRow> rows)
         row.band = NormalizeNetworkLogBand(row.band);
         row.technology = NormalizeNetworkLogTechnology(row.network, row.band);
         row.networkType = row.technology;
-        row.lng = row.lon;
-        row.longitude = row.lon;
-        row.latitude = row.lat;
         row.is_wifi = string.Equals(row.connection_type, "wifi", StringComparison.OrdinalIgnoreCase);
         row.log_type = row.is_wifi ? "wifi" : "network";
     }
@@ -8953,9 +8982,6 @@ public class NetworkLogCacheRow
     public DateTime? timestamp { get; set; }
     public float? lat { get; set; }
     public float? lon { get; set; }
-    public float? lng { get; set; }
-    public float? latitude { get; set; }
-    public float? longitude { get; set; }
     public int? battery { get; set; }
     public float? Speed { get; set; }
     public int? level { get; set; }
@@ -17280,6 +17306,10 @@ public async Task<IActionResult> GetProjects([FromQuery] int? company_id = null)
                 useUserScope,
                 currentUserId);
         }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
             // Defensive fallback for schema/driver/cache inconsistencies across DBs (main/TW).
@@ -17290,6 +17320,10 @@ public async Task<IActionResult> GetProjects([FromQuery] int? company_id = null)
         message.Status = 1;
         message.Data = projects;
         await SetMapViewCacheAsync(cacheKey, message);
+    }
+    catch (OperationCanceledException)
+    {
+        throw;
     }
     catch (Exception ex)
     {
@@ -17304,7 +17338,7 @@ public async Task<IActionResult> GetProjects([FromQuery] int? company_id = null)
                 message.Message = "Project list returned with fallback.";
                 return Json(message);
             }
-            catch (Exception fallbackEx)
+            catch (Exception fallbackEx) when (fallbackEx is not OperationCanceledException)
             {
                 Console.WriteLine($"[GetProjects] Outer fallback failed: {fallbackEx}");
             }
@@ -17327,7 +17361,7 @@ private async Task<List<object>> GetProjectsFromRawSqlAsync(
     string connString = db.Database.GetConnectionString() ?? throw new InvalidOperationException("Database connection is not configured.");
 
     using var conn = new MySqlConnection(connString);
-    await conn.OpenAsync();
+    await conn.OpenAsync(HttpContext.RequestAborted);
     var projectColumns = await GetTableColumnSetAsync(conn, "tbl_project");
     var gridSizeSelect = projectColumns.Contains("grid_size")
         ? "p.grid_size"
@@ -17401,43 +17435,13 @@ private async Task<List<object>> GetProjectsFromRawSqlAsync(
     cmd.Parameters.AddWithValue("@cid", targetCompanyId);
     cmd.Parameters.AddWithValue("@uid", useUserScope ? currentUserId : 0);
 
-    using var reader = await cmd.ExecuteReaderAsync();
-    while (await reader.ReadAsync())
+    using (var reader = await cmd.ExecuteReaderAsync(HttpContext.RequestAborted))
     {
-        object? ReadDb(string name)
-        {
-            var value = reader[name];
-            return value == DBNull.Value ? null : value;
-        }
-
-        var sanitizedRefSessionId = await SanitizeProjectRefSessionIdAsync(ReadDb("ref_session_id"));
-
-        projects.Add(new
-        {
-            id = ReadDb("id"),
-            project_name = ReadDb("project_name"),
-            ref_session_id = sanitizedRefSessionId,
-            from_date = ReadDb("from_date"),
-            to_date = ReadDb("to_date"),
-            provider = ReadDb("provider"),
-            tech = ReadDb("tech"),
-            band = ReadDb("band"),
-            earfcn = ReadDb("earfcn"),
-            apps = ReadDb("apps"),
-            grid_size = ReadDb("grid_size"),
-            log_grid = ReadDb("log_grid"),
-            sitesize = ReadDb("sitesize"),
-            l3 = Convert.ToBoolean(ReadDb("l3") ?? false, CultureInfo.InvariantCulture),
-            @event = Convert.ToBoolean(ReadDb("event") ?? false, CultureInfo.InvariantCulture),
-            created_on = ReadDb("created_on"),
-            Download_path = ReadDb("Download_path"),
-            project_polygon_wkt = ReadDb("project_polygon_wkt"),
-            region_wkt = ReadDb("region_wkt"),
-            region_blob_b64 = ReadDb("region_blob_b64"),
-            geometry_wkt = ReadDb("geometry_wkt"),
-        });
+        while (await reader.ReadAsync(HttpContext.RequestAborted))
+            projects.Add(ReadProjectListRow(reader, includeGeometry: true));
     }
 
+    await SanitizeProjectListSessionsAsync(projects);
     return projects;
 }
 
@@ -17451,7 +17455,7 @@ private async Task<List<object>> GetProjectsFallbackAsync(
     string connString = db.Database.GetConnectionString() ?? throw new InvalidOperationException("Database connection is not configured.");
 
     using var conn = new MySqlConnection(connString);
-    await conn.OpenAsync();
+    await conn.OpenAsync(HttpContext.RequestAborted);
 
     var projectColumns = await GetTableColumnSetAsync(conn, "tbl_project");
     var gridSizeSelect = projectColumns.Contains("grid_size")
@@ -17506,43 +17510,13 @@ private async Task<List<object>> GetProjectsFallbackAsync(
     cmd.Parameters.AddWithValue("@cid", targetCompanyId);
     cmd.Parameters.AddWithValue("@uid", useUserScope ? currentUserId : 0);
 
-    using var reader = await cmd.ExecuteReaderAsync();
-    while (await reader.ReadAsync())
+    using (var reader = await cmd.ExecuteReaderAsync(HttpContext.RequestAborted))
     {
-        object? ReadDb(string name)
-        {
-            var value = reader[name];
-            return value == DBNull.Value ? null : value;
-        }
-
-        var sanitizedRefSessionId = await SanitizeProjectRefSessionIdAsync(ReadDb("ref_session_id"));
-
-        projects.Add(new
-        {
-            id = ReadDb("id"),
-            project_name = ReadDb("project_name"),
-            ref_session_id = sanitizedRefSessionId,
-            from_date = ReadDb("from_date"),
-            to_date = ReadDb("to_date"),
-            provider = ReadDb("provider"),
-            tech = ReadDb("tech"),
-            band = ReadDb("band"),
-            earfcn = ReadDb("earfcn"),
-            apps = ReadDb("apps"),
-            grid_size = ReadDb("grid_size"),
-            log_grid = ReadDb("log_grid"),
-            sitesize = ReadDb("sitesize"),
-            l3 = Convert.ToBoolean(ReadDb("l3") ?? false, CultureInfo.InvariantCulture),
-            @event = Convert.ToBoolean(ReadDb("event") ?? false, CultureInfo.InvariantCulture),
-            created_on = ReadDb("created_on"),
-            Download_path = ReadDb("Download_path"),
-            project_polygon_wkt = (object?)null,
-            region_wkt = (object?)null,
-            region_blob_b64 = (object?)null,
-            geometry_wkt = (object?)null
-        });
+        while (await reader.ReadAsync(HttpContext.RequestAborted))
+            projects.Add(ReadProjectListRow(reader, includeGeometry: false));
     }
 
+    await SanitizeProjectListSessionsAsync(projects);
     return projects;
 }
 
