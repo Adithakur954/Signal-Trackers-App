@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Data.Common;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Text;
@@ -18,6 +19,7 @@ using System.Threading.Tasks;
 using Microsoft.AspNetCore.Authorization;
 using System.Web;
 using System.Security.Claims;
+using System.Security.Cryptography;
 using SignalTracker.Security;
 using SignalTracker.Services;
 
@@ -35,10 +37,9 @@ namespace SignalTracker.Controllers
         private readonly RedisService _redis;
         // Cache for index-existence check to avoid hitting INFORMATION_SCHEMA repeatedly
         private static bool? _hasSessionUserIndex;
-        private static bool? _hasNetworkLogSessionLookupIndex;
-        private static bool? _hasNetworkLogSessionLatLonIndex;
-        private static bool? _hasSessionUserIdIndex;
-        private static bool? _hasUserCompanyIdIndex;
+        private static readonly SemaphoreSlim[] SessionIndexGates = Enumerable.Range(0, 128)
+            .Select(_ => new SemaphoreSlim(1, 1)).ToArray();
+        private static long _sessionCacheGeneration;
 
 private int GetTargetCompanyId(int? explicitCompanyId)
 {
@@ -265,136 +266,6 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
                 if (shouldClose && conn.State == ConnectionState.Open)
                     await conn.CloseAsync();
             }
-        }
-
-        private static async Task<bool> HasLeadingColumnIndexAsync(
-            DbConnection conn,
-            string table,
-            string column,
-            CancellationToken cancellationToken)
-        {
-            await using var cmd = conn.CreateCommand();
-            cmd.CommandText = @"
-                SELECT COUNT(*)
-                FROM INFORMATION_SCHEMA.STATISTICS
-                WHERE TABLE_SCHEMA = DATABASE()
-                  AND TABLE_NAME = @table
-                  AND COLUMN_NAME = @column
-                  AND SEQ_IN_INDEX = 1;";
-            Add(cmd, "@table", table);
-            Add(cmd, "@column", column);
-
-            var result = await cmd.ExecuteScalarAsync(cancellationToken);
-            return Convert.ToInt64(result ?? 0, CultureInfo.InvariantCulture) > 0;
-        }
-
-        private static async Task<bool> MySqlIndexExistsOnOpenConnectionAsync(
-            DbConnection conn,
-            string table,
-            string indexName,
-            CancellationToken cancellationToken)
-        {
-            await using var cmd = conn.CreateCommand();
-            cmd.CommandText = @"
-                SELECT COUNT(*)
-                FROM INFORMATION_SCHEMA.STATISTICS
-                WHERE TABLE_SCHEMA = DATABASE()
-                  AND TABLE_NAME = @table
-                  AND INDEX_NAME = @indexName;";
-            Add(cmd, "@table", table);
-            Add(cmd, "@indexName", indexName);
-
-            var result = await cmd.ExecuteScalarAsync(cancellationToken);
-            return Convert.ToInt64(result ?? 0, CultureInfo.InvariantCulture) > 0;
-        }
-
-        private static async Task<bool> EnsureIndexOnOpenConnectionAsync(
-            DbConnection conn,
-            string table,
-            string indexName,
-            string createSql,
-            CancellationToken cancellationToken)
-        {
-            try
-            {
-                if (await MySqlIndexExistsOnOpenConnectionAsync(conn, table, indexName, cancellationToken))
-                    return true;
-
-                await using var cmd = conn.CreateCommand();
-                cmd.CommandText = createSql;
-                cmd.CommandTimeout = 300;
-                await cmd.ExecuteNonQueryAsync(cancellationToken);
-                return true;
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
-        private static async Task<bool> EnsureNetworkLogSessionLookupIndexesAsync(
-            DbConnection conn,
-            CancellationToken cancellationToken)
-        {
-            if (_hasNetworkLogSessionLookupIndex != true)
-            {
-                try
-                {
-                    _hasNetworkLogSessionLookupIndex = await HasLeadingColumnIndexAsync(conn, "tbl_network_log", "session_id", cancellationToken)
-                        || await EnsureIndexOnOpenConnectionAsync(
-                            conn,
-                            "tbl_network_log",
-                            "idx_networklog_session_id",
-                            "CREATE INDEX idx_networklog_session_id ON tbl_network_log (session_id);",
-                            cancellationToken);
-                }
-                catch
-                {
-                    _hasNetworkLogSessionLookupIndex = false;
-                }
-            }
-
-            if (_hasNetworkLogSessionLatLonIndex != true)
-            {
-                _hasNetworkLogSessionLatLonIndex = await EnsureIndexOnOpenConnectionAsync(
-                    conn,
-                    "tbl_network_log",
-                    "idx_networklog_session_lat_lon",
-                    "CREATE INDEX idx_networklog_session_lat_lon ON tbl_network_log (session_id, lat, lon);",
-                    cancellationToken);
-            }
-
-            return _hasNetworkLogSessionLatLonIndex == true;
-        }
-
-        private static async Task EnsureSessionUserIdIndexAsync(
-            DbConnection conn,
-            CancellationToken cancellationToken)
-        {
-            if (_hasSessionUserIdIndex == true)
-                return;
-
-            _hasSessionUserIdIndex = await EnsureIndexOnOpenConnectionAsync(
-                conn,
-                "tbl_session",
-                "idx_session_user_id_id",
-                "CREATE INDEX idx_session_user_id_id ON tbl_session (user_id, id);",
-                cancellationToken);
-        }
-
-        private static async Task EnsureUserCompanyIdIndexAsync(
-            DbConnection conn,
-            CancellationToken cancellationToken)
-        {
-            if (_hasUserCompanyIdIndex == true)
-                return;
-
-            _hasUserCompanyIdIndex = await EnsureIndexOnOpenConnectionAsync(
-                conn,
-                "tbl_user",
-                "idx_user_company_id_id",
-                "CREATE INDEX idx_user_company_id_id ON tbl_user (company_id, id);",
-                cancellationToken);
         }
 
         private async Task<int> CountDistinctUsersWithIndexHintIfAvailableAsync()
@@ -665,6 +536,7 @@ private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
 
         private async Task InvalidateCalculatedCachesAsync()
         {
+            Interlocked.Increment(ref _sessionCacheGeneration);
             if (!IsRedisReady)
                 return;
 
@@ -3148,16 +3020,12 @@ public async Task<IActionResult> OutdoorCount(
             return Convert.ToInt64(result ?? 0, CultureInfo.InvariantCulture) > 0;
         }
 
-        private static string BuildSessionDataExistsSql(IReadOnlyCollection<string> availableTables, bool useNetworkLogLatLonIndex)
+        private static string BuildSessionDataExistsSql(IReadOnlyCollection<string> availableTables)
         {
-            var networkLogIndexHint = useNetworkLogLatLonIndex
-                ? " FORCE INDEX (idx_networklog_session_lat_lon)"
-                : string.Empty;
-
             return availableTables.Contains("tbl_network_log")
                 ? @"EXISTS (
                     SELECT 1
-                    FROM tbl_network_log nl" + networkLogIndexHint + @"
+                    FROM tbl_network_log nl
                     WHERE nl.session_id = s.id
                       AND nl.lat IS NOT NULL
                       AND nl.lon IS NOT NULL
@@ -3215,18 +3083,56 @@ public async Task<IActionResult> OutdoorCount(
             return reader.IsDBNull(ordinal) ? null : Convert.ToDouble(reader.GetValue(ordinal), CultureInfo.InvariantCulture);
         }
 
-        public class SessionsPageResponse
+        public abstract class SessionCacheEntry
         {
-            public List<SessionListItem> Data { get; set; } = new();
-            public int TotalCount { get; set; }
-            public int Page { get; set; }
-            public int PageSize { get; set; }
-            public int TotalPages { get; set; }
+            public DateTime ExpiresAtUtc { get; set; }
         }
 
-        public class SessionsCountCache
+        private async Task<(T? Value, string Source)> TryGetSessionCacheAsync<T>(string key, long generation)
+            where T : SessionCacheEntry
         {
-            public long TotalCount { get; set; }
+            var memoryKey = $"{key}:local:{generation}";
+            if (!IsRedisReady && _cache.TryGetValue<T>(memoryKey, out var local) && local!.ExpiresAtUtc > DateTime.UtcNow)
+                return (local, "MEMORY");
+
+            var cached = await TryGetCachedObjectAsync<T>(key);
+            if (cached != null && cached.ExpiresAtUtc > DateTime.UtcNow)
+            {
+                _cache.Set(memoryKey, cached, new DateTimeOffset(cached.ExpiresAtUtc));
+                return (cached, "REDIS");
+            }
+            if (IsRedisReady)
+            {
+                // A Redis miss may be a cross-instance invalidation; do not resurrect the local copy.
+                _cache.Remove(memoryKey);
+                return (null, "MISS");
+            }
+            return _cache.TryGetValue<T>(memoryKey, out local) && local!.ExpiresAtUtc > DateTime.UtcNow
+                ? (local, "MEMORY") : (null, "MISS");
+        }
+
+        private async Task CacheSessionEntryAsync<T>(string key, T value, long generation) where T : SessionCacheEntry
+        {
+            var ttl = (int)(value.ExpiresAtUtc - DateTime.UtcNow).TotalSeconds;
+            if (ttl <= 0) return;
+            _cache.Set($"{key}:local:{generation}", value, new DateTimeOffset(value.ExpiresAtUtc));
+            await CacheObjectAsync(key, value, ttl);
+        }
+
+        public class SessionsPageResponse : SessionCacheEntry
+        {
+            public List<SessionListItem> Data { get; set; } = new();
+            public int? TotalCount { get; set; }
+            public int Page { get; set; }
+            public int PageSize { get; set; }
+            public int? TotalPages { get; set; }
+            public bool HasMore { get; set; }
+            public bool IsTotalCountExact { get; set; }
+        }
+
+        public class SessionsIndexCache : SessionCacheEntry
+        {
+            public List<int> Ids { get; set; } = new();
         }
 
         public class SessionListItem
@@ -3273,9 +3179,11 @@ public async Task<IActionResult> GetSessions(
     [FromQuery] string? captureFrequency = null,
     [FromQuery] string? sessionRemarks = null,
     [FromQuery] string? fromDate = null,
-    [FromQuery] string? toDate = null)
+    [FromQuery] string? toDate = null,
+    [FromQuery] bool includeTotalCount = true)
 {
-    
+    var totalWatch = Stopwatch.StartNew();
+    var cacheGeneration = Volatile.Read(ref _sessionCacheGeneration);
     int targetCompanyId = GetTargetCompanyId(company_id);
     int currentUserId = _userScope.GetCurrentUserId(User);
     bool useUserScope = !_userScope.IsSuperAdmin(User) && targetCompanyId == 0 && currentUserId > 0;
@@ -3310,19 +3218,35 @@ public async Task<IActionResult> GetSessions(
     fromDate = CleanFilter(fromDate);
     toDate = CleanFilter(toDate);
 
-    var cacheKey = $"sessions:list:v7:map-valid-network-log-only:{GetCacheCountryScope()}:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:p:{page}:ps:{pageSize}:q:{search}:type:{sessionType}:sid:{sessionId}:ud:{userDetails}:sd:{startDate}:st:{startTime}:ed:{endDate}:et:{endTime}:sl:{startLocation}:el:{endLocation}:d:{distance}:cf:{captureFrequency}:r:{sessionRemarks}:from:{fromDate}:to:{toDate}";
-    var cached = await TryGetCachedObjectAsync<SessionsPageResponse>(cacheKey);
+    var filterIdentity = JsonSerializer.Serialize(new
+    {
+        Database = db.Database.GetConnectionString(), Country = GetCacheCountryScope(),
+        Company = targetCompanyId, User = useUserScope ? currentUserId : 0,
+        search, sessionType, sessionId, userDetails, startDate, startTime, endDate, endTime,
+        startLocation, endLocation, distance, captureFrequency, sessionRemarks, fromDate, toDate, includeTotalCount
+    });
+    var filterKey = "sessions:list:v9:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(filterIdentity)));
+    var indexCacheKey = includeTotalCount ? filterKey + ":index" : $"{filterKey}:window:{page}:size:{pageSize}";
+    var cacheKey = $"{filterKey}:page:{page}:size:{pageSize}";
+    var (cached, cacheSource) = await TryGetSessionCacheAsync<SessionsPageResponse>(cacheKey, cacheGeneration);
     if (cached != null)
     {
+        foreach (var session in cached.Data)
+            session.notes = CleanNotes(session.notes);
+        Response.Headers["X-Cache"] = "HIT";
+        Response.Headers["X-Cache-Store"] = cacheSource;
+        Response.Headers["Server-Timing"] = $"total;dur={totalWatch.Elapsed.TotalMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}";
         return Ok(new
         {
             Status = 1,
-            Source = "REDIS",
-            Data = CleanCachedSessions(cached.Data.Select(x => (object)x).ToList()),
+            Source = cacheSource,
+            cached.Data,
             cached.TotalCount,
             cached.Page,
             cached.PageSize,
-            cached.TotalPages
+            cached.TotalPages,
+            cached.HasMore,
+            cached.IsTotalCountExact
         });
     }
 
@@ -3331,30 +3255,11 @@ public async Task<IActionResult> GetSessions(
     // =========================================================
     try
     {
+        Response.Headers["X-Cache"] = IsRedisReady ? "MISS" : "UNAVAILABLE";
         var conn = db.Database.GetDbConnection();
-        if (conn.State != ConnectionState.Open)
-            await conn.OpenAsync(HttpContext.RequestAborted);
-
-        var dataTables = new[] { "tbl_network_log" };
-        var availableTables = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var table in dataTables)
-        {
-            if (await AdminTableExistsAsync(conn, table, HttpContext.RequestAborted))
-                availableTables.Add(table);
-        }
-
-        var useNetworkLogLatLonIndex = false;
-        if (availableTables.Contains("tbl_network_log"))
-            useNetworkLogLatLonIndex = await EnsureNetworkLogSessionLookupIndexesAsync(conn, HttpContext.RequestAborted);
-
-        await EnsureSessionUserIdIndexAsync(conn, HttpContext.RequestAborted);
-        if (targetCompanyId > 0)
-            await EnsureUserCompanyIdIndexAsync(conn, HttpContext.RequestAborted);
-
         var where = new List<string>
         {
-            "(s.type IS NULL OR s.type <> 'l3_event')",
-            BuildSessionDataExistsSql(availableTables, useNetworkLogLatLonIndex)
+            "(s.type IS NULL OR s.type <> 'l3_event')"
         };
         var parameters = new List<(string Name, object? Value)>();
 
@@ -3443,37 +3348,78 @@ public async Task<IActionResult> GetSessions(
         if (!string.IsNullOrWhiteSpace(endTime))
             AddLikeFilter("DATE_FORMAT(s.end_time, '%Y-%m-%d %H:%i:%s') LIKE @endTime", "@endTime", endTime);
 
-        var fromWhereSql = $@"
-            FROM tbl_session s
-            LEFT JOIN tbl_user u ON s.user_id = u.id
-            WHERE {string.Join("\n              AND ", where)}";
-
-        var countCacheKey = $"sessions:count:v7:map-valid-network-log-only:{GetCacheCountryScope()}:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:q:{search}:type:{sessionType}:sid:{sessionId}:ud:{userDetails}:sd:{startDate}:st:{startTime}:ed:{endDate}:et:{endTime}:sl:{startLocation}:el:{endLocation}:d:{distance}:cf:{captureFrequency}:r:{sessionRemarks}:from:{fromDate}:to:{toDate}";
-        var cachedCount = await TryGetCachedObjectAsync<SessionsCountCache>(countCacheKey);
-        long totalCount;
-        if (cachedCount != null)
+        var indexWatch = Stopwatch.StartNew();
+        var (sessionIndex, indexSource) = await TryGetSessionCacheAsync<SessionsIndexCache>(indexCacheKey, cacheGeneration);
+        var indexCacheHit = sessionIndex != null && sessionIndex.ExpiresAtUtc > DateTime.UtcNow;
+        if (!indexCacheHit)
         {
-            totalCount = cachedCount.TotalCount;
-        }
-        else await using (var countCmd = conn.CreateCommand())
-        {
-            countCmd.CommandText = "SELECT COUNT(*) " + fromWhereSql + ";";
-            countCmd.CommandTimeout = 60;
-            foreach (var parameter in parameters)
-                Add(countCmd, parameter.Name, parameter.Value);
+            // Bound concurrent builds without retaining a lock for every filter combination.
+            var gate = SessionIndexGates[(indexCacheKey.GetHashCode() & int.MaxValue) % SessionIndexGates.Length];
+            await gate.WaitAsync(HttpContext.RequestAborted);
+            try
+            {
+                (sessionIndex, indexSource) = await TryGetSessionCacheAsync<SessionsIndexCache>(indexCacheKey, cacheGeneration);
+                indexCacheHit = sessionIndex != null && sessionIndex.ExpiresAtUtc > DateTime.UtcNow;
+                if (!indexCacheHit)
+                {
+                    if (conn.State != ConnectionState.Open)
+                        await conn.OpenAsync(HttpContext.RequestAborted);
 
-            totalCount = Convert.ToInt64(await countCmd.ExecuteScalarAsync(HttpContext.RequestAborted) ?? 0, CultureInfo.InvariantCulture);
-            await CacheObjectAsync(countCacheKey, new SessionsCountCache { TotalCount = totalCount }, 600);
+                    var availableTables = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    if (await AdminTableExistsAsync(conn, "tbl_network_log", HttpContext.RequestAborted))
+                        availableTables.Add("tbl_network_log");
+                    var validitySql = BuildSessionDataExistsSql(availableTables);
+
+                    sessionIndex = new SessionsIndexCache();
+                    await using (var indexCmd = conn.CreateCommand())
+                    {
+                        indexCmd.CommandText = $@"
+                            SELECT s.id
+                            FROM tbl_session s
+                            LEFT JOIN tbl_user u ON s.user_id = u.id
+                            WHERE {string.Join(" AND ", where)} AND {validitySql}
+                            ORDER BY s.id DESC
+                            {(includeTotalCount ? "" : "LIMIT @fetchCount OFFSET @pageOffset")};";
+                        indexCmd.CommandTimeout = 60;
+                        foreach (var parameter in parameters)
+                            Add(indexCmd, parameter.Name, parameter.Value);
+                        if (!includeTotalCount)
+                        {
+                            Add(indexCmd, "@fetchCount", pageSize + 1);
+                            Add(indexCmd, "@pageOffset", ((long)page - 1) * pageSize);
+                        }
+                        await using var reader = await indexCmd.ExecuteReaderAsync(HttpContext.RequestAborted);
+                        while (await reader.ReadAsync(HttpContext.RequestAborted))
+                            sessionIndex.Ids.Add(Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture));
+                    }
+                    sessionIndex.ExpiresAtUtc = DateTime.UtcNow.AddSeconds(300);
+                    await CacheSessionEntryAsync(indexCacheKey, sessionIndex, cacheGeneration);
+                }
+            }
+            finally
+            {
+                gate.Release();
+            }
         }
-        var totalPages = totalCount == 0 ? 0 : (int)Math.Ceiling(totalCount / (double)pageSize);
+        indexWatch.Stop();
+        Response.Headers["X-Session-Index-Cache"] = indexCacheHit ? "HIT" : "MISS";
+        Response.Headers["X-Session-Index-Store"] = indexCacheHit ? indexSource : "DATABASE";
+        int? totalCount = includeTotalCount ? sessionIndex!.Ids.Count : null;
+        int? totalPages = includeTotalCount ? (int)Math.Ceiling(totalCount!.Value / (double)pageSize) : null;
 
         if (totalPages > 0 && page > totalPages)
-            page = totalPages;
+            page = totalPages.Value;
 
-        var offset = (page - 1) * pageSize;
+        var offset = includeTotalCount ? ((long)page - 1) * pageSize : 0;
+        var pageIds = sessionIndex!.Ids.Skip((int)Math.Min(offset, int.MaxValue)).Take(pageSize).ToList();
+        var hasMore = includeTotalCount ? page < totalPages : sessionIndex.Ids.Count > pageSize;
         var sessions = new List<SessionListItem>();
-        await using (var cmd = conn.CreateCommand())
+        var pageWatch = Stopwatch.StartNew();
+        if (pageIds.Count > 0)
         {
+            if (conn.State != ConnectionState.Open)
+                await conn.OpenAsync(HttpContext.RequestAborted);
+            await using var cmd = conn.CreateCommand();
             cmd.CommandText = $@"
                 SELECT
                     s.id,
@@ -3496,14 +3442,17 @@ public async Task<IActionResult> GetSessions(
                     u.model,
                     u.os,
                     u.operator_name
-                {fromWhereSql}
-                ORDER BY s.id DESC
-                LIMIT @pageSize OFFSET @offset;";
+                FROM tbl_session s
+                LEFT JOIN tbl_user u ON s.user_id = u.id
+                WHERE s.id IN ({string.Join(",", pageIds.Select((_, i) => "@pageId" + i))})
+                  AND {string.Join(" AND ", where)}
+                  AND {BuildSessionDataExistsSql(new[] { "tbl_network_log" })}
+                ORDER BY s.id DESC;";
             cmd.CommandTimeout = 60;
             foreach (var parameter in parameters)
                 Add(cmd, parameter.Name, parameter.Value);
-            Add(cmd, "@pageSize", pageSize);
-            Add(cmd, "@offset", offset);
+            for (var i = 0; i < pageIds.Count; i++)
+                Add(cmd, "@pageId" + i, pageIds[i]);
 
             await using var reader = await cmd.ExecuteReaderAsync(HttpContext.RequestAborted);
             while (await reader.ReadAsync(HttpContext.RequestAborted))
@@ -3535,17 +3484,23 @@ public async Task<IActionResult> GetSessions(
                 });
             }
         }
+        pageWatch.Stop();
 
         var pageResponse = new SessionsPageResponse
         {
             Data = sessions,
-            TotalCount = totalCount > int.MaxValue ? int.MaxValue : (int)totalCount,
+            TotalCount = totalCount,
             Page = page,
             PageSize = pageSize,
-            TotalPages = totalPages
+            TotalPages = totalPages,
+            HasMore = hasMore,
+            IsTotalCountExact = includeTotalCount,
+            ExpiresAtUtc = sessionIndex.ExpiresAtUtc
         };
 
-        await CacheObjectAsync(cacheKey, pageResponse, 300);
+        await CacheSessionEntryAsync(cacheKey, pageResponse, cacheGeneration);
+        Response.Headers["Server-Timing"] = FormattableString.Invariant(
+            $"session_index;dur={indexWatch.Elapsed.TotalMilliseconds:F1}, session_page;dur={pageWatch.Elapsed.TotalMilliseconds:F1}, total;dur={totalWatch.Elapsed.TotalMilliseconds:F1}");
 
         return Ok(new
         {
@@ -3555,8 +3510,14 @@ public async Task<IActionResult> GetSessions(
             pageResponse.TotalCount,
             pageResponse.Page,
             pageResponse.PageSize,
-            pageResponse.TotalPages
+            pageResponse.TotalPages,
+            pageResponse.HasMore,
+            pageResponse.IsTotalCountExact
         });
+    }
+    catch (OperationCanceledException) when (HttpContext.RequestAborted.IsCancellationRequested)
+    {
+        throw;
     }
     catch (Exception ex)
     {
