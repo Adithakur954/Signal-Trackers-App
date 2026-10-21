@@ -162,6 +162,7 @@ namespace SignalTracker.Models
             {
                 e.HasKey(x => x.id);
                 e.ToTable("tbl_network_log");
+                e.Property(x => x.mci).HasColumnType("text");
                 e.Ignore(x => x.speed);
                 e.HasIndex(x => x.session_id).HasDatabaseName("idx_networklog_session_id");
                 e.HasIndex(x => new { x.session_id, x.lat, x.lon }).HasDatabaseName("idx_networklog_session_lat_lon");
@@ -176,6 +177,7 @@ namespace SignalTracker.Models
             {
                 e.HasKey(x => x.id);
                 e.ToTable("tbl_network_log_neighbour");
+                e.Property(x => x.mci).HasColumnType("text");
                 e.Ignore(x => x.speed);
             });
 

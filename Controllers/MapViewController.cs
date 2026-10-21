@@ -44,13 +44,10 @@ namespace SignalTracker.Controllers
         private readonly NetworkLogDataService _networkLogData;
         private readonly IConfiguration _configuration;
         private const int MapViewCacheTtlSeconds = 300;
-        private static volatile bool NetworkLogUpdatedAtColumnEnsured;
-        private static volatile bool NetworkLogHotspotColumnsEnsured;
         private static volatile bool SessionHotspotTableEnsured;
         private static volatile bool HotspotTableEnsured;
-        private static volatile bool NetworkLogMapIndexesEnsured;
-        private static volatile bool ObsoleteNetworkLogCachesInvalidated;
-        private static readonly ConcurrentDictionary<string, Lazy<Task<NetworkLogFullResponse>>> NetworkLogPageBuilds = new();
+        private static readonly VersionedNetworkLogCache NetworkLogPages = new(100000);
+        private static readonly VersionedNetworkLogCache NetworkLogSummaries = new(256);
         private static readonly string[] MapViewCacheInvalidationPatterns =
         {
             "mapview:*",
@@ -69,6 +66,8 @@ namespace SignalTracker.Controllers
             "networklog:v27:*",
             "networklog:v28:*",
             "networklog:v29:*",
+            "networklog:v30:*",
+            "networklog:v31:*",
             "latlon:dist:*",
             "n78_simple_kpi:*",
             "n78_neighbours:*",
@@ -234,6 +233,8 @@ namespace SignalTracker.Controllers
 
         private async Task InvalidateMapViewCachesAsync()
         {
+            NetworkLogPages.Invalidate();
+            NetworkLogSummaries.Invalidate();
             if (_redis?.IsConnected != true)
                 return;
 
@@ -262,33 +263,6 @@ namespace SignalTracker.Controllers
             catch
             {
                 // Best effort only.
-            }
-        }
-
-        private async Task InvalidateObsoleteNetworkLogCachesAsync()
-        {
-            if (ObsoleteNetworkLogCachesInvalidated || _redis?.IsConnected != true)
-                return;
-
-            try
-            {
-                await _redis.DeleteByPatternAsync("networklog:v8:*");
-                await _redis.DeleteByPatternAsync("networklog:v15:*");
-                await _redis.DeleteByPatternAsync("networklog:v16:*");
-                await _redis.DeleteByPatternAsync("networklog:v17:*");
-                await _redis.DeleteByPatternAsync("networklog:v19:*");
-                await _redis.DeleteByPatternAsync("networklog:v20:*");
-                await _redis.DeleteByPatternAsync("networklog:v21:*");
-                await _redis.DeleteByPatternAsync("networklog:v22:*");
-                await _redis.DeleteByPatternAsync("networklog:v23:*");
-                await _redis.DeleteByPatternAsync("networklog:v24:*");
-                await _redis.DeleteByPatternAsync("networklog:v25:*");
-                await _redis.DeleteByPatternAsync("networklog:v26:*");
-                ObsoleteNetworkLogCachesInvalidated = true;
-            }
-            catch
-            {
-                // Best effort only. The versioned key still prevents stale reads.
             }
         }
 
@@ -6905,6 +6879,7 @@ private static string? NormalizeHotspotLineJson(UpdateNetworkLogHotspotRequest r
 private async Task<JsonResult> GetNetworkLogCore(MapFilter1 filters)
 {
     var totalStopwatch = Stopwatch.StartNew();
+    var validationWatch = Stopwatch.StartNew();
     var sessionIds = _networkLogData.ParseSessionIds(filters?.GetRawSessionIds())
         .ToList();
 
@@ -6916,6 +6891,7 @@ private async Task<JsonResult> GetNetworkLogCore(MapFilter1 filters)
                 .Select(id => (int)id));
         sessionIds = validSessionIds.Select(id => (long)id).ToList();
     }
+    Response.Headers["X-Session-Validation-Ms"] = validationWatch.ElapsedMilliseconds.ToString(CultureInfo.InvariantCulture);
 
     if (filters == null || sessionIds.Count == 0)
         return Json(new { message = "No valid session IDs provided", data = new List<object>() });
@@ -6932,32 +6908,23 @@ private async Task<JsonResult> GetNetworkLogCore(MapFilter1 filters)
         var summaryKey = filters.include_summary ? ":summary:1" : ":summary:0";
         string connString = db.Database.GetConnectionString() ?? throw new InvalidOperationException("Database connection is not configured.");
         string? providerNormalized = null;
-        await InvalidateObsoleteNetworkLogCachesAsync();
-        await EnsureNetworkLogUpdatedAtColumnAsync(connString);
-        await EnsureNetworkLogHotspotColumnsAsync(connString);
-        await EnsureNetworkLogMapIndexesAsync(connString);
-
-        // Keep the latest key only as a write-through convenience. Reads must use
-        // the data-versioned key below; otherwise a newly inserted log can leave
-        // the map showing the previous count until a second request is made.
-        string latestCacheKey = BuildNetworkLogCacheKey(
-            sessionIds,
-            providerNormalized,
-            filters.NetworkType,
-            filters.StartDate,
-            filters.EndDate,
-            filters.project_id,
-            "latest"
-        );
-        string latestPageCacheKey = $"{latestCacheKey}:page:{page}:limit:{limit}{cursorKey}{summaryKey}";
         Response.Headers["X-Cache"] = forceRefresh ? "BYPASS" : "MISS";
 
+        await using var readConnection = new MySqlConnection(connString);
+        await readConnection.OpenAsync(HttpContext.RequestAborted);
+        await using var readTransaction = await readConnection.BeginTransactionAsync(
+            IsolationLevel.RepeatableRead, HttpContext.RequestAborted);
+        // Retain the authoritative version read: inserts must be visible immediately.
+        var versionWatch = Stopwatch.StartNew();
         string dataVersion = await GetNetworkLogDataVersionAsync(
             connString,
             sessionIds,
             providerNormalized,
-            filters
+            filters,
+            readConnection,
+            readTransaction
         );
+        Response.Headers["X-Data-Version-Ms"] = versionWatch.ElapsedMilliseconds.ToString(CultureInfo.InvariantCulture);
 
         string cacheKey = BuildNetworkLogCacheKey(
             sessionIds,
@@ -6968,134 +6935,35 @@ private async Task<JsonResult> GetNetworkLogCore(MapFilter1 filters)
             filters.project_id,
             dataVersion
         );
-        string pageCacheKey = $"{cacheKey}:page:{page}:limit:{limit}{cursorKey}{summaryKey}";
-
-        // A cache hit is valid only when its key contains the current DB version.
-        // This makes inserts visible on the first request after they are committed.
-        if (_redis != null && _redis.IsConnected && !forceRefresh)
+        var databaseScope = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(connString)));
+        string pageCacheKey = $"{cacheKey}:db:{databaseScope}:page:{page}:limit:{limit}{cursorKey}{summaryKey}";
+        var cacheWatch = Stopwatch.StartNew();
+        var cached = await NetworkLogPages.GetOrCreateAsync(pageCacheKey, _redis,
+            () => BuildNetworkLogPageCacheAsync(connString, sessionIds, providerNormalized,
+                filters, limit, pageOffset, dataVersion, readConnection, readTransaction),
+            model => model.data.Count, forceRefresh);
+        await readTransaction.CommitAsync(HttpContext.RequestAborted);
+        Response.Headers["X-Read-Isolation"] = "REPEATABLE-READ";
+        var cacheState = forceRefresh ? "BYPASS" : cached.Hit ? "HIT" : "MISS";
+        Response.Headers["X-Cache"] = cacheState;
+        Response.Headers["X-Cache-Store"] = cached.Store;
+        Response.Headers["X-Page-Load-Ms"] = cacheWatch.ElapsedMilliseconds.ToString(CultureInfo.InvariantCulture);
+        if (cached.Hit)
         {
-            var cacheWatch = Stopwatch.StartNew();
-            try
-            {
-                var cachedPage = await _redis.GetObjectAsync<NetworkLogFullResponse>(pageCacheKey);
-                cacheWatch.Stop();
-                Response.Headers["X-Cache-Lookup-Ms"] = cacheWatch.ElapsedMilliseconds.ToString();
-                if (cachedPage != null)
-                {
-                    const string cacheState = "HIT";
-                    Response.Headers["X-Cache"] = cacheState;
-                    Response.Headers["X-Cached-Version"] = cachedPage.DataVersion ?? "unknown";
-                    Response.Headers["X-Data-Version"] = dataVersion;
-                    totalStopwatch.Stop();
-                    Response.Headers["X-Total-Ms"] = totalStopwatch.ElapsedMilliseconds.ToString();
-                    return Json(ToNetworkLogResponseObject(cachedPage, sessionIds.Count, cacheState));
-                }
-            }
-            catch
-            {
-                cacheWatch.Stop();
-                Response.Headers["X-Cache-Lookup-Ms"] = cacheWatch.ElapsedMilliseconds.ToString();
-            }
-        }
-
-        var buildLazy = forceRefresh
-            ? null
-            : NetworkLogPageBuilds.GetOrAdd(pageCacheKey, _ => new Lazy<Task<NetworkLogFullResponse>>(
-                () => BuildNetworkLogPageCacheAsync(
-                    connString,
-                    sessionIds,
-                    providerNormalized,
-                    filters,
-                    limit,
-                    pageOffset,
-                    dataVersion),
-                LazyThreadSafetyMode.ExecutionAndPublication));
-
-        NetworkLogFullResponse cacheModel;
-        try
-        {
-            cacheModel = buildLazy == null
-                ? await BuildNetworkLogPageCacheAsync(
-                    connString,
-                    sessionIds,
-                    providerNormalized,
-                    filters,
-                    limit,
-                    pageOffset,
-                    dataVersion)
-                : await buildLazy.Value;
-        }
-        finally
-        {
-            if (buildLazy != null)
-            {
-                NetworkLogPageBuilds.TryRemove(pageCacheKey, out _);
-            }
-        }
-
-        var responseObj = ToNetworkLogResponseObject(cacheModel, sessionIds.Count, forceRefresh ? "BYPASS" : "MISS");
-
-        // Cache Logic
-        if (_redis != null && _redis.IsConnected)
-        {
-             await _redis.SetObjectAsync(pageCacheKey, cacheModel, ttlSeconds: 300);
-             await _redis.SetObjectAsync(latestPageCacheKey, cacheModel, ttlSeconds: 300);
+            Response.Headers["X-Cache-Lookup-Ms"] = cacheWatch.ElapsedMilliseconds.ToString(CultureInfo.InvariantCulture);
+            Response.Headers["X-Cached-Version"] = cached.Value.DataVersion ?? "unknown";
         }
 
         totalStopwatch.Stop();
         Response.Headers["X-Total-Ms"] = totalStopwatch.ElapsedMilliseconds.ToString();
         Response.Headers["X-Data-Version"] = dataVersion;
 
-        return Json(responseObj);
+        return Json(ToNetworkLogResponseObject(cached.Value, sessionIds.Count, cacheState));
     }
     catch (Exception ex)
     {
         return Json(new { message = "Server Error", details = SafeException.Get(ex) });
     }
-}
-
-private async Task RefreshNetworkLogLatestPageCacheAsync(
-    string connString,
-    List<long> sessionIds,
-    string? provider,
-    MapFilter1 filters,
-    int limit,
-    int pageOffset,
-    string latestPageCacheKey)
-{
-    if (_redis?.IsConnected != true)
-        return;
-
-    var dataVersion = await GetNetworkLogDataVersionAsync(
-        connString,
-        sessionIds,
-        provider,
-        filters
-    );
-
-    var cacheKey = BuildNetworkLogCacheKey(
-        sessionIds,
-        provider,
-        filters.NetworkType,
-        filters.StartDate,
-        filters.EndDate,
-        filters.project_id,
-        dataVersion
-    );
-    var page = filters.page <= 0 ? 1 : filters.page;
-    var pageCacheKey = $"{cacheKey}:page:{page}:limit:{limit}";
-
-    var cacheModel = await BuildNetworkLogPageCacheAsync(
-        connString,
-        sessionIds,
-        provider,
-        filters,
-        limit,
-        pageOffset,
-        dataVersion);
-
-    await _redis.SetObjectAsync(pageCacheKey, cacheModel, ttlSeconds: 300);
-    await _redis.SetObjectAsync(latestPageCacheKey, cacheModel, ttlSeconds: 300);
 }
 
 private async Task<NetworkLogFullResponse> BuildNetworkLogPageCacheAsync(
@@ -7105,7 +6973,9 @@ private async Task<NetworkLogFullResponse> BuildNetworkLogPageCacheAsync(
     MapFilter1 filters,
     int limit,
     int pageOffset,
-    string dataVersion)
+    string dataVersion,
+    MySqlConnection readConnection,
+    MySqlTransaction readTransaction)
 {
     var includeSummary = filters.include_summary && filters.page <= 1;
 
@@ -7117,7 +6987,7 @@ private async Task<NetworkLogFullResponse> BuildNetworkLogPageCacheAsync(
         {
             return new NetworkLogFullResponse
             {
-                data = await GetMainDataOnlyRaw(connString, activeFilters, limit, pageOffset, whereClause, parameters),
+                data = await GetMainDataOnlyRaw(readConnection, readTransaction, activeFilters, limit, pageOffset, whereClause, parameters),
                 app_summary = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase),
                 io_summary = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase),
                 tpt_volume = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase),
@@ -7128,20 +6998,42 @@ private async Task<NetworkLogFullResponse> BuildNetworkLogPageCacheAsync(
             };
         }
 
-        var taskData = GetMainDataOnlyRaw(connString, activeFilters, limit, pageOffset, whereClause, parameters);
-        var taskApps = GetAppSummaryRaw(connString, whereClause, parameters);
-        var taskStats = GetCombinedStatsRaw(connString, whereClause, parameters);
-        await Task.WhenAll(taskData, taskApps, taskStats);
-        var stats = taskStats.Result;
+        var summaryIdentity = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            connString, whereClause, dataVersion,
+            parameters = parameters.OrderBy(pair => pair.Key, StringComparer.Ordinal)
+        });
+        var summaryCacheKey = "networklog:v31:summary:" +
+            Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(summaryIdentity)));
+        var cachedSummary = await NetworkLogSummaries.GetOrCreateAsync(summaryCacheKey, _redis, async () =>
+        {
+            // One connection/transaction is deliberate: concurrent connections can
+            // observe different commits (or dirty rows during a failed import).
+            var apps = await GetAppSummaryRaw(readConnection, readTransaction, whereClause, parameters);
+            var stats = await GetCombinedStatsRaw(readConnection, readTransaction, whereClause, parameters);
+            return new NetworkLogFullResponse
+            {
+                app_summary = apps,
+                io_summary = stats.IoSummary,
+                tpt_volume = stats.Volume,
+                TotalCount = (int)stats.Sessions.Sum(x => x.Count),
+                Sessions = stats.Sessions,
+                CachedAt = DateTime.UtcNow,
+                DataVersion = dataVersion
+            };
+        }, _ => 1, filters.force_refresh || filters.ForceRefresh);
+        var summary = cachedSummary.Value;
+        var data = await GetMainDataOnlyRaw(readConnection, readTransaction,
+            activeFilters, limit, pageOffset, whereClause, parameters);
 
         return new NetworkLogFullResponse
         {
-            data = taskData.Result,
-            app_summary = taskApps.Result,
-            io_summary = stats.IoSummary,
-            tpt_volume = stats.Volume,
-            TotalCount = (int)stats.Sessions.Sum(x => x.Count),
-            Sessions = stats.Sessions,
+            data = data,
+            app_summary = summary.app_summary,
+            io_summary = summary.io_summary,
+            tpt_volume = summary.tpt_volume,
+            TotalCount = summary.TotalCount,
+            Sessions = summary.Sessions,
             CachedAt = DateTime.UtcNow,
             DataVersion = dataVersion
         };
@@ -7376,19 +7268,14 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyEF(
 }
 
 private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
-    string connString,
+    MySqlConnection conn,
+    MySqlTransaction transaction,
     MapFilter1 filters,
     int limit,
     int offset,
     string baseWhereClause,
     IReadOnlyDictionary<string, object> baseParameters)
 {
-    using var conn = new MySqlConnection(connString);
-    await conn.OpenAsync();
-
-    using var cmdConfig = new MySqlCommand("SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;", conn);
-    await cmdConfig.ExecuteNonQueryAsync();
-
     var whereClause = baseWhereClause;
     var parameters = new Dictionary<string, object>(baseParameters);
     const string cleanedShortTemplate = "NULLIF(TRIM(BOTH CHAR(39) FROM TRIM(BOTH '\"\"' FROM TRIM({0}.m_alpha_short))), '')";
@@ -7509,7 +7396,7 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
         ORDER BY bp.timestamp, bp.id;";
 
     var rows = new List<NetworkLogCacheRow>();
-    using var cmd = new MySqlCommand(sql, conn);
+    using var cmd = new MySqlCommand(sql, conn, transaction);
     cmd.CommandTimeout = 180;
     foreach (var p in parameters) cmd.Parameters.AddWithValue(p.Key, p.Value);
     cmd.Parameters.AddWithValue("@limit", limit);
@@ -7573,17 +7460,11 @@ private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyRaw(
 //  APP SUMMARY (Fixed: Shows Multiple Operators)
 // ---------------------------------------------------------
 private async Task<Dictionary<string, object>> GetAppSummaryRaw(
-    string connString,
+    MySqlConnection conn,
+    MySqlTransaction transaction,
     string whereClause,
     IReadOnlyDictionary<string, object> baseParameters)
 {
-    using var conn = new MySqlConnection(connString);
-    await conn.OpenAsync();
-    
-    // Performance: Dirty reads are faster for analytics
-    using var cmdConfig = new MySqlCommand("SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;", conn);
-    await cmdConfig.ExecuteNonQueryAsync();
-
     var parameters = new Dictionary<string, object>(baseParameters);
 
     // List of apps to track
@@ -7635,7 +7516,7 @@ private async Task<Dictionary<string, object>> GetAppSummaryRaw(
 
     var result = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
     
-    using var cmd = new MySqlCommand(sql, conn);
+    using var cmd = new MySqlCommand(sql, conn, transaction);
     cmd.CommandTimeout = 180;
     foreach(var p in parameters) cmd.Parameters.AddWithValue(p.Key, p.Value);
 
@@ -7680,17 +7561,11 @@ private async Task<Dictionary<string, object>> GetAppSummaryRaw(
 // 3Ã¯Â¸ÂÃ¢Æ’Â£ COMBINED STATS (Volume + IO + Sessions in ONE Query)
 // ---------------------------------------------------------
 private async Task<CombinedStatsDto> GetCombinedStatsRaw(
-    string connString,
+    MySqlConnection conn,
+    MySqlTransaction transaction,
     string whereClause,
     IReadOnlyDictionary<string, object> baseParameters)
 {
-    using var conn = new MySqlConnection(connString);
-    await conn.OpenAsync();
-    
-    // Performance: Dirty reads are faster
-    using var cmdConfig = new MySqlCommand("SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;", conn);
-    await cmdConfig.ExecuteNonQueryAsync();
-
     var parameters = new Dictionary<string, object>(baseParameters);
 
     // Multi-Statement Query
@@ -7709,7 +7584,7 @@ private async Task<CombinedStatsDto> GetCombinedStatsRaw(
 
     var stats = new CombinedStatsDto();
     
-    using var cmd = new MySqlCommand(sql, conn);
+    using var cmd = new MySqlCommand(sql, conn, transaction);
     cmd.CommandTimeout = 180;
     foreach(var p in parameters) cmd.Parameters.AddWithValue(p.Key, p.Value);
 
@@ -7839,90 +7714,6 @@ public class SessionCountDto
     public int Count { get; set; }
 }
 
-private async Task EnsureNetworkLogUpdatedAtColumnAsync(string connString)
-{
-    if (NetworkLogUpdatedAtColumnEnsured || string.IsNullOrWhiteSpace(connString))
-        return;
-
-    try
-    {
-        using var conn = new MySqlConnection(connString);
-        await conn.OpenAsync();
-
-        using (var checkCmd = conn.CreateCommand())
-        {
-            checkCmd.CommandText = @"
-                SELECT COUNT(*)
-                FROM information_schema.columns
-                WHERE table_schema = DATABASE()
-                  AND table_name = 'tbl_network_log'
-                  AND column_name = 'updated_at';";
-
-            var exists = Convert.ToInt32(await checkCmd.ExecuteScalarAsync(), CultureInfo.InvariantCulture) > 0;
-            if (!exists)
-            {
-                using var alterCmd = conn.CreateCommand();
-                alterCmd.CommandText = @"
-                    ALTER TABLE tbl_network_log
-                    ADD COLUMN updated_at DATETIME NOT NULL
-                    DEFAULT CURRENT_TIMESTAMP
-                    ON UPDATE CURRENT_TIMESTAMP;";
-                await alterCmd.ExecuteNonQueryAsync();
-            }
-        }
-
-        NetworkLogUpdatedAtColumnEnsured = true;
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine($" Network log updated_at ensure skipped: {SafeException.Get(ex)}");
-    }
-}
-
-private async Task EnsureNetworkLogHotspotColumnsAsync(string connString)
-{
-    if (NetworkLogHotspotColumnsEnsured || string.IsNullOrWhiteSpace(connString))
-        return;
-
-    try
-    {
-        using var conn = new MySqlConnection(connString);
-        await conn.OpenAsync();
-
-        async Task EnsureColumnAsync(string columnName, string definition)
-        {
-            using (var checkCmd = conn.CreateCommand())
-            {
-                checkCmd.CommandText = @"
-                    SELECT COUNT(*)
-                    FROM information_schema.columns
-                    WHERE table_schema = DATABASE()
-                      AND table_name = 'tbl_network_log'
-                      AND column_name = @columnName;";
-                checkCmd.Parameters.AddWithValue("@columnName", columnName);
-
-                var exists = Convert.ToInt32(await checkCmd.ExecuteScalarAsync(), CultureInfo.InvariantCulture) > 0;
-                if (exists)
-                    return;
-            }
-
-            using var alterCmd = conn.CreateCommand();
-            alterCmd.CommandText = $"ALTER TABLE tbl_network_log ADD COLUMN `{columnName}` {definition};";
-            await alterCmd.ExecuteNonQueryAsync();
-        }
-
-        await EnsureColumnAsync("hotspot", "LONGTEXT NULL");
-        await EnsureColumnAsync("hotspot_symbol", "VARCHAR(100) NULL");
-        await EnsureColumnAsync("hotspot_line_json", "LONGTEXT NULL");
-
-        NetworkLogHotspotColumnsEnsured = true;
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine($" Network log hotspot columns ensure skipped: {SafeException.Get(ex)}");
-    }
-}
-
 private async Task EnsureSessionHotspotTableAsync(string connString)
 {
     if (SessionHotspotTableEnsured || string.IsNullOrWhiteSpace(connString))
@@ -8024,64 +7815,13 @@ private async Task EnsureHotspotTableAsync(string connString)
     }
 }
 
-private async Task EnsureNetworkLogMapIndexesAsync(string connString)
-{
-    if (NetworkLogMapIndexesEnsured || string.IsNullOrWhiteSpace(connString))
-        return;
-
-    try
-    {
-        using var conn = new MySqlConnection(connString);
-        await conn.OpenAsync();
-
-        async Task EnsureIndexAsync(string indexName, string createSql)
-        {
-            using (var checkCmd = conn.CreateCommand())
-            {
-                checkCmd.CommandText = @"
-                    SELECT COUNT(*)
-                    FROM information_schema.statistics
-                    WHERE table_schema = DATABASE()
-                      AND table_name = 'tbl_network_log'
-                      AND index_name = @indexName;";
-                checkCmd.Parameters.AddWithValue("@indexName", indexName);
-
-                var exists = Convert.ToInt32(await checkCmd.ExecuteScalarAsync(), CultureInfo.InvariantCulture) > 0;
-                if (exists)
-                    return;
-            }
-
-            using var createCmd = conn.CreateCommand();
-            createCmd.CommandText = createSql;
-            createCmd.CommandTimeout = 300;
-            await createCmd.ExecuteNonQueryAsync();
-        }
-
-        await EnsureIndexAsync(
-            "idx_networklog_session_timestamp_id",
-            "CREATE INDEX idx_networklog_session_timestamp_id ON tbl_network_log (session_id, timestamp, id);");
-
-        await EnsureIndexAsync(
-            "idx_networklog_session_network_timestamp_id",
-            "CREATE INDEX idx_networklog_session_network_timestamp_id ON tbl_network_log (session_id, network, timestamp, id);");
-
-        await EnsureIndexAsync(
-            "idx_networklog_session_lat_lon",
-            "CREATE INDEX idx_networklog_session_lat_lon ON tbl_network_log (session_id, lat, lon);");
-
-        NetworkLogMapIndexesEnsured = true;
-    }
-    catch (Exception ex)
-    {
-        NetworkLogMapIndexesEnsured = true;
-        Console.WriteLine($" Network log map index ensure skipped: {SafeException.Get(ex)}");
-    }
-}
 private async Task<string> GetNetworkLogDataVersionAsync(
     string connString,
     List<long> sessionIds,
     string? provider,
-    MapFilter1 filters)
+    MapFilter1 filters,
+    MySqlConnection conn,
+    MySqlTransaction transaction)
 {
     if (sessionIds == null || sessionIds.Count == 0 || string.IsNullOrWhiteSpace(connString))
         return "empty";
@@ -8090,10 +7830,8 @@ private async Task<string> GetNetworkLogDataVersionAsync(
 
     async Task<string> ReadVersionAsync(bool includeUpdatedAt)
     {
-        using var conn = new MySqlConnection(connString);
-        await conn.OpenAsync();
-
         using var cmd = conn.CreateCommand();
+        cmd.Transaction = transaction;
         cmd.CommandText = includeUpdatedAt
             ? $@"
                 SELECT
@@ -8149,14 +7887,14 @@ private string BuildNetworkLogCacheKey(
     var sortedSessionIds = _networkLogData.BuildSessionIdsCachePart(sessionIds);
     string providerKey = provider ?? "all";
     string networkTypeKey = NormalizeCacheKeyPart(string.IsNullOrWhiteSpace(networkType) ? "all" : networkType);
-    string fromKey = from?.ToString("yyyyMMdd") ?? "null";
-    string toKey = to?.ToString("yyyyMMdd") ?? "null";
+    string fromKey = from?.Ticks.ToString(CultureInfo.InvariantCulture) ?? "null";
+    string toKey = to?.Ticks.ToString(CultureInfo.InvariantCulture) ?? "null";
     string projectKey = projectId.HasValue && projectId.Value > 0
         ? projectId.Value.ToString(CultureInfo.InvariantCulture)
         : "no_project";
     string versionKey = NormalizeCacheKeyPart(dataVersion);
 
-    return $"networklog:v29:{GetProjectListCacheScope()}:{sortedSessionIds}:{providerKey}:{networkTypeKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
+    return $"networklog:v31:{GetProjectListCacheScope()}:{sortedSessionIds}:{providerKey}:{networkTypeKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
 }
 
 private static string CleanProviderDisplayName(string value)
@@ -8205,13 +7943,15 @@ private static void ApplyNetworkLogDownloadSize(NetworkLogCacheRow row)
 
 private static void ApplyNetworkLogExtraJsonFallbacks(NetworkLogCacheRow row)
 {
-    row.extra_json_data = ParseExtraJsonData(row.extra_json);
-    if (row.extra_json_data.Count == 0 || !TryParseJsonObject(row.extra_json, out var doc))
+    row.extra_json_data = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+    if (!TryParseJsonObject(row.extra_json, out var doc))
         return;
 
     using (doc)
     {
         var root = doc.RootElement;
+        foreach (var property in root.EnumerateObject())
+            row.extra_json_data[property.Name] = JsonElementToPlainValue(property.Value);
         row.dl_tpt = PreferExistingOrJson(row.dl_tpt, root, "ps_app_dl_mbps", "wire_dl_mbps", "pdcp_dl_mbps", "lte_mac_dl_mbps", "lte_mac_dl_delivered_mbps");
         row.ul_tpt = PreferExistingOrJson(row.ul_tpt, root, "ps_app_ul_mbps", "wire_ul_mbps", "lte_mac_ul_mbps", "lte_mac_ul_delivered_mbps");
         row.rsrp ??= ToFloat(FirstJsonNumber(root, default, "disp_rsrp_dbm", "disp_dbm"));
@@ -8280,21 +8020,6 @@ private static string? ConvertBsicToDecimal(string raw)
 private static bool IsWholeNumber(float value)
 {
     return Math.Abs(value - MathF.Round(value)) < 0.0001f;
-}
-
-private static Dictionary<string, object?> ParseExtraJsonData(string? raw)
-{
-    var values = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-    if (!TryParseJsonObject(raw, out var doc))
-        return values;
-
-    using (doc)
-    {
-        foreach (var property in doc.RootElement.EnumerateObject())
-            values[property.Name] = JsonElementToPlainValue(property.Value);
-    }
-
-    return values;
 }
 
 private static object? JsonElementToPlainValue(JsonElement value)

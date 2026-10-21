@@ -4,6 +4,12 @@ using CsvHelper;
 using CsvHelper.Configuration;
 using SignalTracker.Controllers;
 
+if (args.FirstOrDefault() == "--network-log-cache")
+{
+    await NetworkLogCacheRegression.RunAsync();
+    return;
+}
+
 if (args.FirstOrDefault() == "--session-continuity")
 {
     await SessionContinuityRegression.RunAsync();
