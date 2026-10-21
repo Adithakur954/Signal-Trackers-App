@@ -3095,20 +3095,21 @@ public async Task<IActionResult> OutdoorCount(
             if (!IsRedisReady && _cache.TryGetValue<T>(memoryKey, out var local) && local!.ExpiresAtUtc > DateTime.UtcNow)
                 return (local, "MEMORY");
 
-            var cached = await TryGetCachedObjectAsync<T>(key);
+            var read = await _redis.GetObjectWithStatusAsync<T>(key);
+            var cached = read.Value;
             if (cached != null && cached.ExpiresAtUtc > DateTime.UtcNow)
             {
                 _cache.Set(memoryKey, cached, new DateTimeOffset(cached.ExpiresAtUtc));
                 return (cached, "REDIS");
             }
-            if (IsRedisReady)
+            if (read.Status != RedisCacheReadStatus.Unavailable)
             {
                 // A Redis miss may be a cross-instance invalidation; do not resurrect the local copy.
                 _cache.Remove(memoryKey);
                 return (null, "MISS");
             }
             return _cache.TryGetValue<T>(memoryKey, out local) && local!.ExpiresAtUtc > DateTime.UtcNow
-                ? (local, "MEMORY") : (null, "MISS");
+                ? (local, "MEMORY") : (null, "UNAVAILABLE");
         }
 
         private async Task CacheSessionEntryAsync<T>(string key, T value, long generation) where T : SessionCacheEntry
@@ -3255,7 +3256,7 @@ public async Task<IActionResult> GetSessions(
     // =========================================================
     try
     {
-        Response.Headers["X-Cache"] = IsRedisReady ? "MISS" : "UNAVAILABLE";
+        Response.Headers["X-Cache"] = cacheSource == "UNAVAILABLE" ? "UNAVAILABLE" : "MISS";
         var conn = db.Database.GetDbConnection();
         var where = new List<string>
         {

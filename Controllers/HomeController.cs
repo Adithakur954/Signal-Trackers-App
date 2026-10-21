@@ -309,6 +309,7 @@ namespace SignalTracker.Controllers
             bool lockAcquired = false;
             bool loginCompleted = false;
             string? userLockKey = null;
+            string? acquiredLockValue = null;
             try
             {
                 if (obj == null || string.IsNullOrWhiteSpace(obj.Email) || string.IsNullOrWhiteSpace(obj.Password))
@@ -375,47 +376,30 @@ namespace SignalTracker.Controllers
                 }
 
                 var lockValue = $"{user!.id}:{user.email}:{DateTimeOffset.UtcNow:O}";
+                acquiredLockValue = lockValue;
                 userLockKey = SessionSecurity.LockKey(user.id, loginSource);
 
                 if (obj.ForceLogin == true)
                 {
                     // Backward compatibility: clear old single global lock key as well.
                     await _redis.DeleteAsync(LegacyGlobalLoginLockKey);
-                    await _redis.DeleteAsync(userLockKey);
-                    await _loginLocks.DeleteAsync(userLockKey, HttpContext.RequestAborted);
-
-                    var redisSet = _redis.IsConnected && await _redis.SetStringAsync(userLockKey, lockValue, UserLoginLockTtlSeconds);
                     var dbSet = await _loginLocks.SetStringAsync(userLockKey, lockValue, UserLoginLockTtlSeconds, HttpContext.RequestAborted);
-                    lockAcquired = redisSet || dbSet;
+                    lockAcquired = dbSet;
                     if (!lockAcquired)
                     {
                         return Json(new { success = false, message = "Login service is temporarily unavailable. Please try again." });
                     }
+                    if (_redis.IsConnected)
+                        await _redis.SetStringAsync(userLockKey, lockValue, UserLoginLockTtlSeconds);
                 }
                 else
                 {
                     RedisSetWhenNotExistsResult lockResult;
                     string? existingLockValue = null;
 
-                    if (_redis.IsConnected)
-                    {
-                        lockResult = await _redis.TrySetStringWhenNotExistsAsync(userLockKey, lockValue, UserLoginLockTtlSeconds);
-                        if (lockResult == RedisSetWhenNotExistsResult.Set)
-                            await _loginLocks.SetStringAsync(userLockKey, lockValue, UserLoginLockTtlSeconds, HttpContext.RequestAborted);
-                        else if (lockResult == RedisSetWhenNotExistsResult.AlreadyExists)
-                            existingLockValue = await _redis.GetStringAsync(userLockKey);
-                    }
-                    else
-                    {
-                        lockResult = RedisSetWhenNotExistsResult.Unavailable;
-                    }
-
-                    if (lockResult == RedisSetWhenNotExistsResult.Unavailable)
-                    {
-                        lockResult = await _loginLocks.TrySetStringWhenNotExistsAsync(userLockKey, lockValue, UserLoginLockTtlSeconds, HttpContext.RequestAborted);
-                        if (lockResult == RedisSetWhenNotExistsResult.AlreadyExists)
-                            existingLockValue = await _loginLocks.GetStringAsync(userLockKey, HttpContext.RequestAborted);
-                    }
+                    lockResult = await _loginLocks.TrySetStringWhenNotExistsAsync(userLockKey, lockValue, UserLoginLockTtlSeconds, HttpContext.RequestAborted);
+                    if (lockResult == RedisSetWhenNotExistsResult.AlreadyExists)
+                        existingLockValue = await _loginLocks.GetStringAsync(userLockKey, HttpContext.RequestAborted);
 
                     if (lockResult == RedisSetWhenNotExistsResult.AlreadyExists)
                     {
@@ -436,6 +420,8 @@ namespace SignalTracker.Controllers
                     }
 
                     lockAcquired = true;
+                    if (_redis.IsConnected)
+                        await _redis.SetStringAsync(userLockKey, lockValue, UserLoginLockTtlSeconds);
                 }
                 var resolvedCountryCode = RegionAccess.Normalize(loginSource)!;
                 await UpgradePasswordHashIfNeededAsync(user, loginSource, obj.Password);
@@ -503,6 +489,8 @@ namespace SignalTracker.Controllers
                 {
                     try
                     {
+                        if (userLockKey != null && acquiredLockValue != null)
+                            await _loginLocks.DeleteIfMatchesAsync(userLockKey, acquiredLockValue, CancellationToken.None);
                         if (_redis.IsConnected && !string.IsNullOrWhiteSpace(userLockKey))
                             await _redis.DeleteAsync(userLockKey);
                     }
@@ -650,33 +638,14 @@ namespace SignalTracker.Controllers
         [Authorize]
         [HttpGet("KeepAlive")]
         [HttpPost("KeepAlive")]
-        public async Task<IActionResult> KeepAlive()
+        public IActionResult KeepAlive()
         {
-            if (_cf?.SessionCheck() != true)
+            if (User?.Identity?.IsAuthenticated != true)
             {
                 return Unauthorized(new { success = false, message = "Session is not active." });
             }
 
             HttpContext.Session.SetString("st.keepalive", DateTimeOffset.UtcNow.ToString("O"));
-
-            if (_redis.IsConnected)
-            {
-                var claimUserId = User?.FindFirst("UserId")?.Value;
-                var region = User?.FindFirst("country_code")?.Value;
-                if (int.TryParse(claimUserId, out var parsedUserId) && parsedUserId > 0 && !string.IsNullOrWhiteSpace(region))
-                {
-                    try
-                    {
-                        var keepAliveKey = SessionSecurity.LockKey(parsedUserId, region);
-                        await _redis.ExtendTtlAsync(keepAliveKey, UserLoginLockTtlSeconds);
-                        await _loginLocks.ExtendTtlAsync(keepAliveKey, UserLoginLockTtlSeconds, HttpContext.RequestAborted);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "KeepAlive could not refresh Redis login lock TTL.");
-                    }
-                }
-            }
 
             return Ok(new
             {
@@ -704,26 +673,20 @@ namespace SignalTracker.Controllers
                     await _db.SaveChangesAsync();
                 }
 
-                if (_redis.IsConnected)
-                {
-                    var claimUserId = User?.FindFirst("UserId")?.Value;
-                    var sessionUserId = HttpContext.Session.GetInt32("UserID")?.ToString();
-                    var userIdValue = !string.IsNullOrWhiteSpace(claimUserId) ? claimUserId : sessionUserId;
-
-                    if (int.TryParse(userIdValue, out var parsedUserId) && parsedUserId > 0)
-                    {
-                        var logoutLockKey = SessionSecurity.LockKey(parsedUserId, User?.FindFirst("country_code")?.Value);
-                        await _redis.DeleteAsync(logoutLockKey);
-                        await _loginLocks.DeleteAsync(logoutLockKey, HttpContext.RequestAborted);
-                    }
-
-                    // Backward compatibility: clear old single global lock key.
-                    await _redis.DeleteAsync(LegacyGlobalLoginLockKey);
-                }
-
             }
             catch { /* Log error */ }
 
+            var userIdValue = User?.FindFirst("UserId")?.Value;
+            if (int.TryParse(userIdValue, out var parsedUserId) && parsedUserId > 0)
+            {
+                var key = SessionSecurity.LockKey(parsedUserId, User?.FindFirst("country_code")?.Value);
+                var expected = User?.FindFirst("LoginLockValue")?.Value;
+                if (string.IsNullOrWhiteSpace(expected)
+                    || !await _loginLocks.DeleteIfMatchesAsync(key, expected, HttpContext.RequestAborted))
+                    return StatusCode(503, new { success = false, message = "Logout service is temporarily unavailable. Please retry." });
+                await _redis.DeleteAsync(key);
+            }
+            await _redis.DeleteAsync(LegacyGlobalLoginLockKey);
             await HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
             HttpContext.Session.Clear();
 

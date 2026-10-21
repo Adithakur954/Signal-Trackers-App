@@ -22,10 +22,16 @@ internal static class SessionsPaginationRegression
         var scenario = new Scenario();
         var database = Proxy<IDatabase>((method, args) => method.Name switch
         {
-            "StringGetAsync" => Task.FromResult(scenario.Cache.GetValueOrDefault((RedisKey)args![0]!, RedisValue.Null)),
+            "StringGetAsync" => Read(args!),
             "StringSetAsync" => Store(args!),
             _ => throw new NotSupportedException(method.Name)
         });
+        Task<RedisValue> Read(object?[] args)
+        {
+            scenario.RedisReads++;
+            return scenario.StallRedis ? scenario.PendingRead.Task :
+                Task.FromResult(scenario.Cache.GetValueOrDefault((RedisKey)args[0]!, RedisValue.Null));
+        }
         Task<bool> Store(object?[] args)
         {
             scenario.Cache[(RedisKey)args[0]!] = (RedisValue)args[1]!;
@@ -139,6 +145,18 @@ internal static class SessionsPaginationRegression
         Check(scenario.IndexBuilds == builds, "Memory fallback rebuilt matching IDs on next page");
         await Fetch(1, company: 49, invalidate: true);
         Check(scenario.IndexBuilds == builds + 1, "Mutation did not invalidate memory caches while Redis was unavailable");
+
+        scenario.Connected = true;
+        await Fetch(1, company: 51);
+        builds = scenario.IndexBuilds;
+        scenario.StallRedis = true;
+        var timedOut = await Fetch(1, company: 51);
+        Check(timedOut.GetProperty("Source").GetString() == "MEMORY", "A Redis timeout discarded valid local page data");
+        var redisReads = scenario.RedisReads;
+        await Fetch(2, company: 51);
+        Check(scenario.IndexBuilds == builds && scenario.RedisReads == redisReads,
+            "Repeated Redis timeouts triggered a matching-ID rebuild or repeated network waits");
+        scenario.PendingRead.TrySetResult(RedisValue.Null);
         Console.WriteLine("Sessions pagination: cache reuse, scope isolation, expiry, concurrency and response checks passed.");
     }
 
@@ -167,6 +185,9 @@ internal static class SessionsPaginationRegression
         public int PageReads;
         public int IndexRowsRead;
         public bool Connected = true;
+        public bool StallRedis;
+        public int RedisReads;
+        public TaskCompletionSource<RedisValue> PendingRead { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
     private sealed class TestConnection(Scenario scenario, string schema) : DbConnection

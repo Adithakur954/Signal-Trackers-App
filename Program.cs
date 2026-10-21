@@ -534,6 +534,7 @@ internal class Program
         app.UseCors(SecurityServiceExtensions.CorsPolicyName);
         app.UseWebSockets();
         app.UseCookiePolicy();
+        app.UseMiddleware<SessionValidationUnavailableMiddleware>();
         app.UseSession();
 
         // Keep session alive while authenticated pages are in active use.

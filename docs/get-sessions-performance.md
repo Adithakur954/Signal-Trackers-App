@@ -16,16 +16,21 @@ It returns `TotalCount: null`, `TotalPages: null`, `IsTotalCountExact: false`
 and `HasMore`. It does not clamp out-of-range pages to the last page.
 Exact-count mode remains the default; existing callers retain numeric totals.
 
-Redis is authoritative when connected. When it is disconnected, the same app
+Redis misses remain authoritative for invalidation. When Redis is disconnected
+or its object-cache reads time out, the same app
 instance uses an in-memory cache instead. `Source` is `DATABASE`, `REDIS`, or
 `MEMORY`. Memory caching does not remove the first cold database scan.
 Admin cache invalidation clears the local generation even when Redis is offline.
 Local entries retain the original absolute expiry and never extend freshness.
+After an object-cache timeout, Redis object-cache operations pause for five
+seconds to avoid repeating the same network delay on every page. Login ownership
+and string operations are not governed by this cache-only retry delay.
 
 Inspect `Server-Timing`, `X-Cache`, `X-Cache-Store`,
 `X-Session-Index-Cache`, and `X-Session-Index-Store` to distinguish
-query time from cache misses. These timings cover controller execution,
-not authentication middleware, response transfer, or browser rendering.
+query time from cache misses. `Server-Timing` also includes `authentication` and
+`request` durations, recorded outside the controller. They exclude response
+transfer and browser rendering. The `total` duration is controller execution.
 
 Apply `Database/get_sessions_indexes.sql` separately during database maintenance
 where its indexes are missing. The endpoint never creates indexes at runtime.

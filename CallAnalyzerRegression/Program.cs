@@ -4,6 +4,12 @@ using CsvHelper;
 using CsvHelper.Configuration;
 using SignalTracker.Controllers;
 
+if (args.FirstOrDefault() == "--session-continuity")
+{
+    await SessionContinuityRegression.RunAsync();
+    return;
+}
+
 if (args.FirstOrDefault() == "--sessions-pagination")
 {
     await SessionsPaginationRegression.RunAsync();

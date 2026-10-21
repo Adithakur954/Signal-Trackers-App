@@ -77,7 +77,7 @@ public static class SecurityServiceExtensions
                 options.Cookie.SameSite = cookieSameSite;
                 options.Cookie.SecurePolicy = cookieSecurePolicy;
                 options.Cookie.IsEssential = true;
-                options.ExpireTimeSpan = TimeSpan.FromSeconds(idleSeconds);
+                options.ExpireTimeSpan = SessionSecurity.CookieLifetime(configuration);
                 options.SlidingExpiration = true;
 
                 options.Events.OnRedirectToLogin = ctx =>
@@ -89,12 +89,18 @@ public static class SecurityServiceExtensions
                 options.Events.OnRedirectToAccessDenied = ctx =>
                 {
                     ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
-                    return Task.CompletedTask;
+                    return ctx.Response.WriteAsJsonAsync(new { message = "Forbidden. You do not have permission to access this resource." });
                 };
 
                 options.Events.OnSigningIn = ctx =>
                 {
                     ctx.Properties.Items[SessionSecurity.StartedProperty] = DateTimeOffset.UtcNow.ToString("O");
+                    if (SessionSecurity.KeepSignedIn(configuration))
+                    {
+                        ctx.Properties.IsPersistent = true;
+                        ctx.Properties.AllowRefresh = true;
+                        ctx.Properties.ExpiresUtc = DateTimeOffset.UtcNow.Add(SessionSecurity.CookieLifetime(configuration));
+                    }
                     RequestSecurity.ApplyPerRequestCookieSettings(ctx.HttpContext, ctx.CookieOptions);
                     return Task.CompletedTask;
                 };

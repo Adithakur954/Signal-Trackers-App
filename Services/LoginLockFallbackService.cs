@@ -6,7 +6,7 @@ using SignalTracker.Security;
 
 namespace SignalTracker.Services;
 
-public sealed class LoginLockFallbackService
+public sealed class LoginLockFallbackService : ILoginSessionStore
 {
     private readonly ApplicationDbContext _db;
     private readonly IConfiguration _configuration;
@@ -112,15 +112,29 @@ public sealed class LoginLockFallbackService
             await using var lease = CreateDbForKey(key);
             var db = lease.Db;
             await EnsureTableAsync(db, ct);
-            await DeleteExpiredAsync(db, key, ct);
-
-            var existing = await GetStringAsync(key, ct);
-            if (!string.IsNullOrWhiteSpace(existing))
-                return RedisSetWhenNotExistsResult.AlreadyExists;
-
-            return await SetStringAsync(key, value, ttlSeconds, ct)
-                ? RedisSetWhenNotExistsResult.Set
-                : RedisSetWhenNotExistsResult.Unavailable;
+            var conn = db.Database.GetDbConnection();
+            var close = conn.State != ConnectionState.Open;
+            if (close) await conn.OpenAsync(ct);
+            try
+            {
+                await using var transaction = await conn.BeginTransactionAsync(IsolationLevel.ReadCommitted, ct);
+                await using var cmd = conn.CreateCommand();
+                cmd.Transaction = transaction;
+                cmd.CommandText = "DELETE FROM tbl_login_lock WHERE lock_key = @key AND expires_at_utc <= UTC_TIMESTAMP(6);";
+                Add(cmd, "@key", key);
+                await cmd.ExecuteNonQueryAsync(ct);
+                cmd.CommandText = @"INSERT IGNORE INTO tbl_login_lock (lock_key, lock_value, expires_at_utc, updated_at_utc)
+                                    VALUES (@key, @value, @expires, UTC_TIMESTAMP(6));";
+                Add(cmd, "@value", value);
+                Add(cmd, "@expires", DateTime.UtcNow.AddSeconds(Math.Max(ttlSeconds, 60)));
+                var inserted = await cmd.ExecuteNonQueryAsync(ct);
+                await transaction.CommitAsync(ct);
+                return inserted > 0 ? RedisSetWhenNotExistsResult.Set : RedisSetWhenNotExistsResult.AlreadyExists;
+            }
+            finally
+            {
+                if (close) await conn.CloseAsync();
+            }
         }
         catch (Exception ex)
         {
@@ -129,6 +143,89 @@ public sealed class LoginLockFallbackService
 
             _logger.LogWarning(ex, "DB login lock acquire failed for {Key}.", key);
             return RedisSetWhenNotExistsResult.Unavailable;
+        }
+    }
+
+    public async Task<LoginSessionState> ValidateAndRenewAsync(string key, string expectedValue, int ttlSeconds,
+        bool allowExpired, CancellationToken ct = default)
+    {
+        try
+        {
+            await using var lease = CreateDbForKey(key);
+            var db = lease.Db;
+            await EnsureTableAsync(db, ct);
+            var conn = db.Database.GetDbConnection();
+            var close = conn.State != ConnectionState.Open;
+            if (close) await conn.OpenAsync(ct);
+            try
+            {
+                // Atomic owner-checked renewal avoids a transaction/read/commit round trip on every request.
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = @"UPDATE tbl_login_lock SET expires_at_utc = @expires, updated_at_utc = UTC_TIMESTAMP(6)
+                                    WHERE lock_key = @key AND BINARY lock_value = BINARY @value
+                                      AND (@allowExpired = 1 OR expires_at_utc > UTC_TIMESTAMP(6));";
+                Add(cmd, "@key", key);
+                Add(cmd, "@value", expectedValue);
+                Add(cmd, "@expires", DateTime.UtcNow.AddSeconds(Math.Max(ttlSeconds, 60)));
+                Add(cmd, "@allowExpired", allowExpired ? 1 : 0);
+                if (await cmd.ExecuteNonQueryAsync(ct) > 0) return LoginSessionState.Current;
+
+                // Only failed renewals need a read to distinguish logout, takeover, and idle expiry.
+                cmd.CommandText = @"SELECT lock_value, expires_at_utc > UTC_TIMESTAMP(6)
+                                    FROM tbl_login_lock WHERE lock_key = @key;";
+                string? currentValue;
+                bool live;
+                await using (var reader = await cmd.ExecuteReaderAsync(ct))
+                {
+                    if (!await reader.ReadAsync(ct)) return LoginSessionState.Missing;
+                    currentValue = reader.GetString(0);
+                    live = Convert.ToBoolean(reader.GetValue(1));
+                }
+                if (!string.Equals(currentValue, expectedValue, StringComparison.Ordinal)) return LoginSessionState.Replaced;
+                if (!live && !allowExpired) return LoginSessionState.Missing;
+                return LoginSessionState.Current;
+            }
+            finally
+            {
+                if (close) await conn.CloseAsync();
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Login session verification unavailable for {Key}.", key);
+            return LoginSessionState.Unavailable;
+        }
+    }
+
+    public async Task<bool> DeleteIfMatchesAsync(string key, string expectedValue, CancellationToken ct = default)
+    {
+        try
+        {
+            await using var lease = CreateDbForKey(key);
+            await EnsureTableAsync(lease.Db, ct);
+            var conn = lease.Db.Database.GetDbConnection();
+            var close = conn.State != ConnectionState.Open;
+            if (close) await conn.OpenAsync(ct);
+            try
+            {
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = "DELETE FROM tbl_login_lock WHERE lock_key = @key AND BINARY lock_value = BINARY @value;";
+                Add(cmd, "@key", key);
+                Add(cmd, "@value", expectedValue);
+                await cmd.ExecuteNonQueryAsync(ct);
+                return true;
+            }
+            finally
+            {
+                if (close) await conn.CloseAsync();
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Login session logout failed for {Key}.", key);
+            return false;
         }
     }
 

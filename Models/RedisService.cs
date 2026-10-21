@@ -8,6 +8,9 @@ using System.Text.Json;
 
 namespace SignalTracker.Models
 {
+    public enum RedisCacheReadStatus { Hit, Miss, Unavailable }
+    public sealed record RedisCacheReadResult<T>(T? Value, RedisCacheReadStatus Status) where T : class;
+
     public enum RedisSetWhenNotExistsResult
     {
         Set,
@@ -23,6 +26,7 @@ namespace SignalTracker.Models
 
         private readonly IConnectionMultiplexer? _multiplexer;
         private readonly IDatabase? _db;
+        private long _objectCacheRetryAfter;
 
         public RedisService(IConnectionMultiplexer? multiplexer)
         {
@@ -59,43 +63,56 @@ namespace SignalTracker.Models
         }
 
         public async Task<T?> GetObjectAsync<T>(string key) where T : class
+            => (await GetObjectWithStatusAsync<T>(key)).Value;
+
+        public async Task<RedisCacheReadResult<T>> GetObjectWithStatusAsync<T>(string key) where T : class
         {
-            if (_db == null) return null;
+            if (_db == null || !IsConnected || Environment.TickCount64 < Volatile.Read(ref _objectCacheRetryAfter))
+                return new(null, RedisCacheReadStatus.Unavailable);
 
             try
             {
-                var value = await WithTimeoutAsync(_db.StringGetAsync(key), RedisValue.Null);
-                if (value.IsNullOrEmpty) return null;
+                var read = _db.StringGetAsync(key);
+                if (!ReferenceEquals(await Task.WhenAny(read, Task.Delay(CacheCommandTimeout)), read))
+                {
+                    Interlocked.Exchange(ref _objectCacheRetryAfter, Environment.TickCount64 + 5000);
+                    _ = read.ContinueWith(task => { _ = task.Exception; },
+                        TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
+                    return new(null, RedisCacheReadStatus.Unavailable);
+                }
+                var value = await read;
+                if (value.IsNullOrEmpty) return new(null, RedisCacheReadStatus.Miss);
 
                 var payload = (byte[])value!;
                 if (payload.Length == 0)
-                    return null;
+                    return new(null, RedisCacheReadStatus.Miss);
 
                 if (payload[0] == StoredGzipMarker)
                 {
                     var jsonBytes = DecompressPayload(payload.AsSpan(1));
-                    return JsonSerializer.Deserialize<T>(jsonBytes);
+                    return new(JsonSerializer.Deserialize<T>(jsonBytes), RedisCacheReadStatus.Hit);
                 }
 
                 if (payload[0] == StoredJsonMarker)
                 {
-                    return JsonSerializer.Deserialize<T>(payload.AsSpan(1));
+                    return new(JsonSerializer.Deserialize<T>(payload.AsSpan(1)), RedisCacheReadStatus.Hit);
                 }
 
                 // Backward compatibility: older cache entries were stored as plain JSON text.
                 var legacyJson = Encoding.UTF8.GetString(payload);
-                return JsonSerializer.Deserialize<T>(legacyJson);
+                return new(JsonSerializer.Deserialize<T>(legacyJson), RedisCacheReadStatus.Hit);
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"Redis GetObjectAsync error [{key}]: {SafeException.Get(ex)}");
-                return null;
+                Interlocked.Exchange(ref _objectCacheRetryAfter, Environment.TickCount64 + 5000);
+                return new(null, RedisCacheReadStatus.Unavailable);
             }
         }
 
         public async Task<bool> SetObjectAsync<T>(string key, T value, int ttlSeconds = 300) where T : class
         {
-            if (_db == null) return false;
+            if (_db == null || Environment.TickCount64 < Volatile.Read(ref _objectCacheRetryAfter)) return false;
 
             try
             {
