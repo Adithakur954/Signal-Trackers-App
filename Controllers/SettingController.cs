@@ -64,6 +64,7 @@ private void EnsureMacDetailThresholdColumns()
     EnsureColumn("thresholds", "mac_modulation_pct_json", "LONGTEXT NULL");
     EnsureColumn("thresholds", "c_i_json", "LONGTEXT NULL");
     EnsureColumn("thresholds", "report_acceptance_json", "LONGTEXT NULL");
+    EnsureColumn("thresholds", "ppt_report_acceptance_json", "LONGTEXT NULL");
     EnsureDefaultCiThreshold();
 }
 
@@ -290,6 +291,7 @@ public IActionResult SaveThreshold([FromBody] Thresholds? model)
                 existing.mac_grants_json = model.mac_grants_json;
                 existing.mac_tx_power_json = model.mac_tx_power_json;
                 existing.mac_modulation_pct_json = model.mac_modulation_pct_json;
+                existing.ppt_report_acceptance_json = model.ppt_report_acceptance_json;
                 ThresholdDefaultsService.CopyAcceptanceValues(existing, model);
             db.thresholds.Update(existing);
         }

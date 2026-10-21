@@ -100,6 +100,9 @@ WHERE TABLE_SCHEMA = DATABASE()
         if (!string.IsNullOrWhiteSpace(source.report_acceptance_json))
             target.report_acceptance_json = source.report_acceptance_json;
 
+        if (!string.IsNullOrWhiteSpace(source.ppt_report_acceptance_json))
+            target.ppt_report_acceptance_json = source.ppt_report_acceptance_json;
+
         ApplyAcceptanceDefaults(target);
     }
 

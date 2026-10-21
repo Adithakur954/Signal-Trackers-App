@@ -1080,6 +1080,7 @@ public string? level { get; set; }
         public string? lte_bler_json { get; set; }
         public string? mos_json { get; set; }
         public string? report_acceptance_json { get; set; }
+        public string? ppt_report_acceptance_json { get; set; }
 
 
         public int? is_default { get; set; }
