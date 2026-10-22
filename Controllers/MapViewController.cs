@@ -69,6 +69,7 @@ namespace SignalTracker.Controllers
             "networklog:v30:*",
             "networklog:v31:*",
             "networklog:v32:*",
+            "networklog:v33:*",
             "latlon:dist:*",
             "n78_simple_kpi:*",
             "n78_neighbours:*",
@@ -7004,7 +7005,7 @@ private async Task<NetworkLogFullResponse> BuildNetworkLogPageCacheAsync(
             connString, whereClause, dataVersion,
             parameters = parameters.OrderBy(pair => pair.Key, StringComparer.Ordinal)
         });
-        var summaryCacheKey = "networklog:v32:summary:" +
+        var summaryCacheKey = "networklog:v33:summary:" +
             Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(summaryIdentity)));
         var cachedSummary = await NetworkLogSummaries.GetOrCreateAsync(summaryCacheKey, _redis, async () =>
         {
@@ -7895,7 +7896,7 @@ private string BuildNetworkLogCacheKey(
         : "no_project";
     string versionKey = NormalizeCacheKeyPart(dataVersion);
 
-    return $"networklog:v32:{GetProjectListCacheScope()}:{sortedSessionIds}:{providerKey}:{networkTypeKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
+    return $"networklog:v33:{GetProjectListCacheScope()}:{sortedSessionIds}:{providerKey}:{networkTypeKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
 }
 
 private static string CleanProviderDisplayName(string value)
@@ -7945,17 +7946,21 @@ private static void ApplyNetworkLogDownloadSize(NetworkLogCacheRow row)
 private static void ApplyNetworkLogExtraJsonFallbacks(NetworkLogCacheRow row)
 {
     row.extra_json_data = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+    if (!TryParseJsonObject(row.extra_json, out var original))
+        return;
+
+    using (original)
+    {
+        foreach (var property in original.RootElement.EnumerateObject())
+            row.extra_json_data[property.Name] = JsonElementToPlainValue(property.Value);
+    }
+
     if (!TryParseNetworkLogExtraJson(row.extra_json, out var doc))
         return;
 
     using (doc)
     {
         var root = doc.RootElement;
-        if (TryGetPropertyIgnoreCase(root, "network_log_fields", out var captured)
-            && captured.ValueKind == JsonValueKind.Object)
-            row.extra_json = root.GetRawText();
-        foreach (var property in root.EnumerateObject())
-            row.extra_json_data[property.Name] = JsonElementToPlainValue(property.Value);
         row.dl_tpt = PreferExistingOrJson(row.dl_tpt, root, "ps_app_dl_mbps", "wire_dl_mbps", "pdcp_dl_mbps", "lte_mac_dl_mbps", "lte_mac_dl_delivered_mbps", "dl_tpt");
         row.ul_tpt = PreferExistingOrJson(row.ul_tpt, root, "ps_app_ul_mbps", "wire_ul_mbps", "lte_mac_ul_mbps", "lte_mac_ul_delivered_mbps", "ul_tpt");
         row.rsrp ??= ToFloat(FirstJsonNumber(root, default, "disp_rsrp_dbm", "disp_dbm"));
@@ -7967,7 +7972,8 @@ private static void ApplyNetworkLogExtraJsonFallbacks(NetworkLogCacheRow row)
 }
 
 // Older exports use flat metric keys; newer CSV imports retain their display
-// headers inside network_log_fields. Expose both through the existing contract.
+// headers inside network_log_fields. Resolve aliases only for internal calculations;
+// the original extra_json and extra_json_data response shapes stay unchanged.
 private static bool TryParseNetworkLogExtraJson(string? raw, out JsonDocument doc)
 {
     if (!TryParseJsonObject(raw, out doc))
@@ -8002,9 +8008,7 @@ private static bool TryParseNetworkLogExtraJson(string? raw, out JsonDocument do
         ("nr_mac_dl_mbps", "NR MAC Thpt DL (Mbps)"),
         ("nr_mac_ul_mbps", "NR MAC Thpt UL (Mbps)"),
         ("dl_tpt", "DL THPT"),
-        ("ul_tpt", "UL THPT"),
-        ("endc_setup", "ENDC Setup"),
-        ("pusch_tx_dbm", "PUSCH Tx (dBm)")
+        ("ul_tpt", "UL THPT")
     })
     {
         if (fields.TryGetValue(header, out var value))

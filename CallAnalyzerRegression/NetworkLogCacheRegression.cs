@@ -204,12 +204,11 @@ internal static class NetworkLogCacheRegression
             download.Invoke(null, new object[] { row });
             method.Invoke(null, new object[] { row });
             Check(row.dl_tpt == "26.45" && row.ul_tpt == "0.18", "Nested CSV throughput must use the existing response fields");
-            Check((string?)row.extra_json_data["ps_app_dl_mbps"] == "26.45"
-                && (string?)row.extra_json_data["endc_setup"] == "Yes"
-                && (string?)row.extra_json_data["pusch_tx_dbm"] == "-17 dBm"
-                && (string?)row.extra_json_data["altitude"] == "37.63", "Nested metrics or metadata were lost");
-            using var extra = JsonDocument.Parse(row.extra_json);
-            Check(extra.RootElement.GetProperty("ps_app_ul_mbps").GetString() == "0.18", "Raw extra_json must also expose flat metric keys");
+            Check(row.extra_json == (encoded ? JsonSerializer.Serialize(nested) : nested),
+                "Raw extra_json must remain exactly as received");
+            using var expected = JsonDocument.Parse(nested);
+            Check(JsonSerializer.Serialize(row.extra_json_data) == JsonSerializer.Serialize(expected.RootElement),
+                "extra_json_data must preserve the original JSON keys, values and nesting without aliases");
             Check(row.downloaded_file_size_bytes == 524292967 && row.download_direction == "Receive"
                 && row.download_result_status == "SUCCESS", "Loose PS download details changed for nested exports");
             var flat = new MapViewController.NetworkLogCacheRow
@@ -239,6 +238,7 @@ internal static class NetworkLogCacheRegression
             var row = new MapViewController.NetworkLogCacheRow { extra_json = encoded ? JsonSerializer.Serialize(raw) : raw,
                 dl_tpt = "0.00", ul_tpt = "7.00", rsrq = -12 };
             method.Invoke(null, new object[] { row });
+            Check(row.extra_json == (encoded ? JsonSerializer.Serialize(raw) : raw), "Legacy extra_json changed");
             Check(row.dl_tpt == "12.346" && row.ul_tpt == "7.00" && row.rsrp == -91 && row.level == 3 && row.rsrq == -12,
                 "JSON fallback precedence or rounding changed");
             Check(row.extra_json_data.Count == 6 && row.extra_json_data.ContainsKey("NESTED"), "Extra JSON shape or case-insensitive keys changed");
