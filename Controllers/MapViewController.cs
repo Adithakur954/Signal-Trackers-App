@@ -68,6 +68,7 @@ namespace SignalTracker.Controllers
             "networklog:v29:*",
             "networklog:v30:*",
             "networklog:v31:*",
+            "networklog:v32:*",
             "latlon:dist:*",
             "n78_simple_kpi:*",
             "n78_neighbours:*",
@@ -7003,7 +7004,7 @@ private async Task<NetworkLogFullResponse> BuildNetworkLogPageCacheAsync(
             connString, whereClause, dataVersion,
             parameters = parameters.OrderBy(pair => pair.Key, StringComparer.Ordinal)
         });
-        var summaryCacheKey = "networklog:v31:summary:" +
+        var summaryCacheKey = "networklog:v32:summary:" +
             Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(summaryIdentity)));
         var cachedSummary = await NetworkLogSummaries.GetOrCreateAsync(summaryCacheKey, _redis, async () =>
         {
@@ -7894,7 +7895,7 @@ private string BuildNetworkLogCacheKey(
         : "no_project";
     string versionKey = NormalizeCacheKeyPart(dataVersion);
 
-    return $"networklog:v31:{GetProjectListCacheScope()}:{sortedSessionIds}:{providerKey}:{networkTypeKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
+    return $"networklog:v32:{GetProjectListCacheScope()}:{sortedSessionIds}:{providerKey}:{networkTypeKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
 }
 
 private static string CleanProviderDisplayName(string value)
@@ -7944,22 +7945,74 @@ private static void ApplyNetworkLogDownloadSize(NetworkLogCacheRow row)
 private static void ApplyNetworkLogExtraJsonFallbacks(NetworkLogCacheRow row)
 {
     row.extra_json_data = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-    if (!TryParseJsonObject(row.extra_json, out var doc))
+    if (!TryParseNetworkLogExtraJson(row.extra_json, out var doc))
         return;
 
     using (doc)
     {
         var root = doc.RootElement;
+        if (TryGetPropertyIgnoreCase(root, "network_log_fields", out var captured)
+            && captured.ValueKind == JsonValueKind.Object)
+            row.extra_json = root.GetRawText();
         foreach (var property in root.EnumerateObject())
             row.extra_json_data[property.Name] = JsonElementToPlainValue(property.Value);
-        row.dl_tpt = PreferExistingOrJson(row.dl_tpt, root, "ps_app_dl_mbps", "wire_dl_mbps", "pdcp_dl_mbps", "lte_mac_dl_mbps", "lte_mac_dl_delivered_mbps");
-        row.ul_tpt = PreferExistingOrJson(row.ul_tpt, root, "ps_app_ul_mbps", "wire_ul_mbps", "lte_mac_ul_mbps", "lte_mac_ul_delivered_mbps");
+        row.dl_tpt = PreferExistingOrJson(row.dl_tpt, root, "ps_app_dl_mbps", "wire_dl_mbps", "pdcp_dl_mbps", "lte_mac_dl_mbps", "lte_mac_dl_delivered_mbps", "dl_tpt");
+        row.ul_tpt = PreferExistingOrJson(row.ul_tpt, root, "ps_app_ul_mbps", "wire_ul_mbps", "lte_mac_ul_mbps", "lte_mac_ul_delivered_mbps", "ul_tpt");
         row.rsrp ??= ToFloat(FirstJsonNumber(root, default, "disp_rsrp_dbm", "disp_dbm"));
         row.rsrq ??= ToFloat(FirstJsonNumber(root, default, "disp_rsrq_db"));
         row.rssi ??= ToFloat(FirstJsonNumber(root, default, "disp_rssi_dbm"));
         row.sinr ??= ToFloat(FirstJsonNumber(root, default, "disp_rssnr_db"));
         row.level ??= ToInt(FirstJsonNumber(root, default, "disp_level", "disp_overall_level"));
     }
+}
+
+// Older exports use flat metric keys; newer CSV imports retain their display
+// headers inside network_log_fields. Expose both through the existing contract.
+private static bool TryParseNetworkLogExtraJson(string? raw, out JsonDocument doc)
+{
+    if (!TryParseJsonObject(raw, out doc))
+        return false;
+
+    if (!TryGetPropertyIgnoreCase(doc.RootElement, "network_log_fields", out var captured)
+        || captured.ValueKind != JsonValueKind.Object)
+        return true;
+
+    using var original = doc;
+    var fields = new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase);
+    foreach (var property in original.RootElement.EnumerateObject())
+        fields[property.Name] = property.Value;
+
+    void Fill(string key, JsonElement value)
+    {
+        if (!fields.TryGetValue(key, out var current)
+            || current.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined
+            || (current.ValueKind == JsonValueKind.String && string.IsNullOrWhiteSpace(current.GetString())))
+            fields[key] = value;
+    }
+
+    foreach (var property in captured.EnumerateObject())
+        Fill(property.Name, property.Value);
+
+    foreach (var (key, header) in new[]
+    {
+        ("ps_app_dl_mbps", "PS App DL (Mbps)"),
+        ("ps_app_ul_mbps", "PS App UL (Mbps)"),
+        ("lte_mac_dl_mbps", "LTE MAC Thpt DL (Mbps)"),
+        ("lte_mac_ul_mbps", "LTE MAC Thpt UL (Mbps)"),
+        ("nr_mac_dl_mbps", "NR MAC Thpt DL (Mbps)"),
+        ("nr_mac_ul_mbps", "NR MAC Thpt UL (Mbps)"),
+        ("dl_tpt", "DL THPT"),
+        ("ul_tpt", "UL THPT"),
+        ("endc_setup", "ENDC Setup"),
+        ("pusch_tx_dbm", "PUSCH Tx (dBm)")
+    })
+    {
+        if (fields.TryGetValue(header, out var value))
+            Fill(key, value);
+    }
+
+    doc = JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(fields));
+    return true;
 }
 
 
@@ -8058,7 +8111,7 @@ private static int? ToInt(double? value)
 
 private static DownloadSizeMetrics ExtractDownloadSizeMetrics(NetworkLogCacheRow row)
 {
-    if (!TryParseJsonObject(row.extra_json, out var root))
+    if (!TryParseNetworkLogExtraJson(row.extra_json, out var root))
         return new DownloadSizeMetrics();
 
     using (root)

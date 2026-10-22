@@ -196,6 +196,43 @@ internal static class NetworkLogCacheRegression
     private static void CheckJsonFallbackCalculations()
     {
         var method = typeof(MapViewController).GetMethod("ApplyNetworkLogExtraJsonFallbacks", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var download = typeof(MapViewController).GetMethod("ApplyNetworkLogDownloadSize", BindingFlags.Static | BindingFlags.NonPublic)!;
+        const string nested = """{"altitude":"37.63","network_log_fields":{"DL THPT":"25.27","ENDC Setup":"Yes","PS App DL (Mbps)":"26.45","PS App UL (Mbps)":"0.18","PUSCH Tx (dBm)":"-17 dBm","UL THPT":"0.18"},"phone_heading":"202.0","ps":"{\u0027direction\u0027:\u0027Receive\u0027;\u0027duration_ms\u0027:56670;\u0027speed_kbps\u0027:9034.848254560393;\u0027file_size_bytes\u0027:524292967;\u0027down_bytes\u0027:524292967;\u0027up_bytes\u0027:0;\u0027result_status\u0027:\u0027SUCCESS\u0027}","sub_session_id":"20"}""";
+        foreach (var encoded in new[] { false, true })
+        {
+            var row = new MapViewController.NetworkLogCacheRow { extra_json = encoded ? JsonSerializer.Serialize(nested) : nested };
+            download.Invoke(null, new object[] { row });
+            method.Invoke(null, new object[] { row });
+            Check(row.dl_tpt == "26.45" && row.ul_tpt == "0.18", "Nested CSV throughput must use the existing response fields");
+            Check((string?)row.extra_json_data["ps_app_dl_mbps"] == "26.45"
+                && (string?)row.extra_json_data["endc_setup"] == "Yes"
+                && (string?)row.extra_json_data["pusch_tx_dbm"] == "-17 dBm"
+                && (string?)row.extra_json_data["altitude"] == "37.63", "Nested metrics or metadata were lost");
+            using var extra = JsonDocument.Parse(row.extra_json);
+            Check(extra.RootElement.GetProperty("ps_app_ul_mbps").GetString() == "0.18", "Raw extra_json must also expose flat metric keys");
+            Check(row.downloaded_file_size_bytes == 524292967 && row.download_direction == "Receive"
+                && row.download_result_status == "SUCCESS", "Loose PS download details changed for nested exports");
+            var flat = new MapViewController.NetworkLogCacheRow
+            {
+                extra_json = """{"ps_app_dl_mbps":"26.45","ps_app_ul_mbps":"0.18","ps":"{'direction':'Receive';'duration_ms':56670;'down_bytes':524292967;'result_status':'SUCCESS'}"}"""
+            };
+            download.Invoke(null, new object[] { flat });
+            method.Invoke(null, new object[] { flat });
+            Check(flat.dl_tpt == row.dl_tpt && flat.ul_tpt == row.ul_tpt
+                && flat.downloaded_file_size_4g_bytes == row.downloaded_file_size_4g_bytes,
+                "Flat and nested exports must produce identical throughput and download calculations");
+        }
+        var mixed = new MapViewController.NetworkLogCacheRow
+        {
+            dl_tpt = "25.27", extra_json = """{"ps_app_dl_mbps":10,"ps_app_ul_mbps":0,"NETWORK_LOG_FIELDS":{"PS App DL (Mbps)":"26.45","PS App UL (Mbps)":"0.18"}}"""
+        };
+        method.Invoke(null, new object[] { mixed });
+        Check(mixed.dl_tpt == "25.27" && mixed.ul_tpt == ""
+            && Convert.ToDouble(mixed.extra_json_data["ps_app_dl_mbps"]) == 10,
+            "Stored columns and explicit legacy metrics must take precedence over nested headers, including zero");
+        var generic = new MapViewController.NetworkLogCacheRow { extra_json = """{"network_log_fields":{"DL THPT":"25.27","UL THPT":"0.18"}}""" };
+        method.Invoke(null, new object[] { generic });
+        Check(generic.dl_tpt == "25.27" && generic.ul_tpt == "0.18", "Generic CSV throughput must remain available without PS App fields");
         foreach (var encoded in new[] { false, true })
         {
             const string raw = "{\"ps_app_dl_mbps\":12.34567,\"ps_app_ul_mbps\":3.25,\"disp_rsrp_dbm\":-91,\"disp_level\":2.5,\"nested\":{\"ok\":true},\"items\":[1,null,\"x\"]}";
