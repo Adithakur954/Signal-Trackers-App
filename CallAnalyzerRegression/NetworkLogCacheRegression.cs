@@ -204,11 +204,19 @@ internal static class NetworkLogCacheRegression
             download.Invoke(null, new object[] { row });
             method.Invoke(null, new object[] { row });
             Check(row.dl_tpt == "26.45" && row.ul_tpt == "0.18", "Nested CSV throughput must use the existing response fields");
-            Check(row.extra_json == (encoded ? JsonSerializer.Serialize(nested) : nested),
-                "Raw extra_json must remain exactly as received");
-            using var expected = JsonDocument.Parse(nested);
-            Check(JsonSerializer.Serialize(row.extra_json_data) == JsonSerializer.Serialize(expected.RootElement),
-                "extra_json_data must preserve the original JSON keys, values and nesting without aliases");
+            using var responseExtra = JsonDocument.Parse(row.extra_json);
+            Check(!responseExtra.RootElement.TryGetProperty("network_log_fields", out _)
+                && row.extra_json_data.Count == 10
+                && (string?)row.extra_json_data["PS App DL (Mbps)"] == "26.45"
+                && (string?)row.extra_json_data["ENDC Setup"] == "Yes"
+                && (string?)row.extra_json_data["PUSCH Tx (dBm)"] == "-17 dBm"
+                && !row.extra_json_data.ContainsKey("ps_app_dl_mbps"),
+                "New exports must expose captured fields at the top level without renaming or duplicate aliases");
+            Check(JsonSerializer.Serialize(row.extra_json_data) == JsonSerializer.Serialize(responseExtra.RootElement),
+                "extra_json and extra_json_data must expose the same flat fields");
+            var normalizedExtra = row.extra_json;
+            method.Invoke(null, new object[] { row });
+            Check(row.extra_json == normalizedExtra, "Flattening must be idempotent");
             Check(row.downloaded_file_size_bytes == 524292967 && row.download_direction == "Receive"
                 && row.download_result_status == "SUCCESS", "Loose PS download details changed for nested exports");
             var flat = new MapViewController.NetworkLogCacheRow
@@ -232,6 +240,16 @@ internal static class NetworkLogCacheRegression
         var generic = new MapViewController.NetworkLogCacheRow { extra_json = """{"network_log_fields":{"DL THPT":"25.27","UL THPT":"0.18"}}""" };
         method.Invoke(null, new object[] { generic });
         Check(generic.dl_tpt == "25.27" && generic.ul_tpt == "0.18", "Generic CSV throughput must remain available without PS App fields");
+        var collision = new MapViewController.NetworkLogCacheRow
+        {
+            extra_json = """{"ENDC Setup":"No","custom":"","network_log_fields":{"ENDC Setup":"Yes","custom":"captured","other":0},"ps":"unchanged"}"""
+        };
+        method.Invoke(null, new object[] { collision });
+        Check((string?)collision.extra_json_data["ENDC Setup"] == "No"
+            && (string?)collision.extra_json_data["custom"] == "captured"
+            && (string?)collision.extra_json_data["ps"] == "unchanged"
+            && Convert.ToInt64(collision.extra_json_data["other"]) == 0,
+            "Flattening must preserve existing values, metadata, unknown captured fields and zero values");
         foreach (var encoded in new[] { false, true })
         {
             const string raw = "{\"ps_app_dl_mbps\":12.34567,\"ps_app_ul_mbps\":3.25,\"disp_rsrp_dbm\":-91,\"disp_level\":2.5,\"nested\":{\"ok\":true},\"items\":[1,null,\"x\"]}";
