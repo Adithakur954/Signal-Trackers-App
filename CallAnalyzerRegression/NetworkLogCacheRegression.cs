@@ -207,11 +207,13 @@ internal static class NetworkLogCacheRegression
             using var responseExtra = JsonDocument.Parse(row.extra_json);
             Check(!responseExtra.RootElement.TryGetProperty("network_log_fields", out _)
                 && row.extra_json_data.Count == 10
-                && (string?)row.extra_json_data["PS App DL (Mbps)"] == "26.45"
+                && (string?)row.extra_json_data["ps_app_dl_mbps"] == "26.45"
                 && (string?)row.extra_json_data["ENDC Setup"] == "Yes"
-                && (string?)row.extra_json_data["PUSCH Tx (dBm)"] == "-17 dBm"
-                && !row.extra_json_data.ContainsKey("ps_app_dl_mbps"),
-                "New exports must expose captured fields at the top level without renaming or duplicate aliases");
+                && (string?)row.extra_json_data["pusch_tx"] == "-17 dBm"
+                && !row.extra_json_data.ContainsKey("PS App DL (Mbps)")
+                && !row.extra_json_data.ContainsKey("PS App UL (Mbps)")
+                && !row.extra_json_data.ContainsKey("PUSCH Tx (dBm)"),
+                "New exports must use legacy keys so the frontend shows one option per metric");
             Check(JsonSerializer.Serialize(row.extra_json_data) == JsonSerializer.Serialize(responseExtra.RootElement),
                 "extra_json and extra_json_data must expose the same flat fields");
             foreach (var serialized in new[] { JsonSerializer.Serialize(row), Newtonsoft.Json.JsonConvert.SerializeObject(row) })
@@ -247,6 +249,22 @@ internal static class NetworkLogCacheRegression
         var generic = new MapViewController.NetworkLogCacheRow { extra_json = """{"network_log_fields":{"DL THPT":"25.27","UL THPT":"0.18"}}""" };
         method.Invoke(null, new object[] { generic });
         Check(generic.dl_tpt == "25.27" && generic.ul_tpt == "0.18", "Generic CSV throughput must remain available without PS App fields");
+        foreach (var raw in new[]
+        {
+            """{"ps_app_dl_mbps":10,"ps_app_ul_mbps":0,"pusch_tx":"2 dBm"}""",
+            """{"PS App DL (Mbps)":10,"PS App UL (Mbps)":0,"PUSCH Tx (dBm)":"2 dBm"}""",
+            """{"ps_app_dl_mbps":10,"ps_app_ul_mbps":0,"network_log_fields":{"PS App DL (Mbps)":20,"PS App UL (Mbps)":5,"PUSCH Tx (dBm)":"2 dBm"}}"""
+        })
+        {
+            var aliasRow = new MapViewController.NetworkLogCacheRow { extra_json = raw };
+            method.Invoke(null, new object[] { aliasRow });
+            using var normalized = JsonDocument.Parse(aliasRow.extra_json);
+            Check(normalized.RootElement.EnumerateObject().Select(p => p.Name).Order().SequenceEqual(
+                    new[] { "ps_app_dl_mbps", "ps_app_ul_mbps", "pusch_tx" }.Order())
+                && normalized.RootElement.GetProperty("ps_app_dl_mbps").GetInt32() == 10
+                && normalized.RootElement.GetProperty("ps_app_ul_mbps").GetInt32() == 0,
+                "Old, flat-header and mixed exports must expose identical dropdown keys while preserving canonical values including zero");
+        }
         var collision = new MapViewController.NetworkLogCacheRow
         {
             extra_json = """{"ENDC Setup":"No","custom":"","network_log_fields":{"ENDC Setup":"Yes","custom":"captured","other":0},"ps":"unchanged"}"""
