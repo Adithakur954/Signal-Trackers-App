@@ -214,6 +214,13 @@ internal static class NetworkLogCacheRegression
                 "New exports must expose captured fields at the top level without renaming or duplicate aliases");
             Check(JsonSerializer.Serialize(row.extra_json_data) == JsonSerializer.Serialize(responseExtra.RootElement),
                 "extra_json and extra_json_data must expose the same flat fields");
+            foreach (var serialized in new[] { JsonSerializer.Serialize(row), Newtonsoft.Json.JsonConvert.SerializeObject(row) })
+            {
+                using var responseRow = JsonDocument.Parse(serialized);
+                Check(responseRow.RootElement.GetProperty("extra_json").GetString() == row.extra_json
+                    && !responseRow.RootElement.TryGetProperty("extra_json_data", out _),
+                    "API rows must return extra data only once, in the existing extra_json string");
+            }
             var normalizedExtra = row.extra_json;
             method.Invoke(null, new object[] { row });
             Check(row.extra_json == normalizedExtra, "Flattening must be idempotent");

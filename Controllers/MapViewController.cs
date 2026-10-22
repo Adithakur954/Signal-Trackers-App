@@ -71,6 +71,7 @@ namespace SignalTracker.Controllers
             "networklog:v32:*",
             "networklog:v33:*",
             "networklog:v34:*",
+            "networklog:v35:*",
             "latlon:dist:*",
             "n78_simple_kpi:*",
             "n78_neighbours:*",
@@ -7006,7 +7007,7 @@ private async Task<NetworkLogFullResponse> BuildNetworkLogPageCacheAsync(
             connString, whereClause, dataVersion,
             parameters = parameters.OrderBy(pair => pair.Key, StringComparer.Ordinal)
         });
-        var summaryCacheKey = "networklog:v34:summary:" +
+        var summaryCacheKey = "networklog:v35:summary:" +
             Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(summaryIdentity)));
         var cachedSummary = await NetworkLogSummaries.GetOrCreateAsync(summaryCacheKey, _redis, async () =>
         {
@@ -7897,7 +7898,7 @@ private string BuildNetworkLogCacheKey(
         : "no_project";
     string versionKey = NormalizeCacheKeyPart(dataVersion);
 
-    return $"networklog:v34:{GetProjectListCacheScope()}:{sortedSessionIds}:{providerKey}:{networkTypeKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
+    return $"networklog:v35:{GetProjectListCacheScope()}:{sortedSessionIds}:{providerKey}:{networkTypeKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
 }
 
 private static string CleanProviderDisplayName(string value)
@@ -8823,6 +8824,8 @@ public class NetworkLogCacheRow
     public string log_type { get; set; } = "network";
     public bool is_wifi { get; set; }
     public string extra_json { get; set; } = "";
+    [Newtonsoft.Json.JsonIgnore]
+    [System.Text.Json.Serialization.JsonIgnore]
     public Dictionary<string, object?> extra_json_data { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public long? downloaded_file_size_bytes { get; set; }
     public double? downloaded_file_size_mb { get; set; }
