@@ -22,6 +22,18 @@ internal static class NetworkDashboardFallbackRegression
         var nr2 = Sample(1, "5G", "-100");
         var invalid = Sample(1, "5G", "2147483647");
         var lte = Sample(2, "4G", "-60");
+        var rankValues = new[] { "3.700000047683716", "3.8499999", "4", "3.7000001" };
+        var rankReport = L3SummaryReportBuilder.Build("ranks", "test", rankValues.Select((value, index) =>
+            new L3ReportMessage(index.ToString(), 1, "l3", "14:17:30", "5G", "", "", "", "NR measurement", "nrRank=" + value)).ToArray(), []);
+        Check(rankReport.Kpis.Single(v => v.Parameter == "NR rank").Result == "3.70, 3.85, 4.00",
+            "decoded NR ranks show exactly two decimals and deduplicate after rounding");
+        var fallbackRanks = L3SummaryReportBuilder.Build("ranks", "test", [], []);
+        NetworkLogDashboardFallback.Apply(fallbackRanks, rankValues.Select(value => Sample(1, "5G", "-80",
+            JsonSerializer.Serialize(new { network_log_fields = new Dictionary<string, string> { ["NR DL Rank"] = value } })))
+            .Append(Sample(1, "5G", "-80", """{"network_log_fields":{"RI":"2.345","NR MCS":"18"}}"""))
+            .Append(Sample(1, "5G", "-80", """{"network_log_fields":{"NR DL Rank":"2147483647"}}""" )).ToArray());
+        Check(fallbackRanks.Kpis.Single(v => v.Parameter == "NR rank").Result == "2.35, 3.70, 3.85, 4.00",
+            "Network Log NR rank and RI fallback use two decimals and exclude invalid ranks");
         var primary = new[] { new L3ReportMessage("e1", 1, "event", "14:17:30", "5G", "", "", "", "ssRsrp", "(new) -75") };
         var report = L3SummaryReportBuilder.Build("test", "Sessions: 1,2", primary, []);
         NetworkLogDashboardFallback.Apply(report, [nr, nr2, invalid, lte]);
@@ -61,9 +73,13 @@ internal static class NetworkDashboardFallbackRegression
             "import serializer retains dashboard columns and existing extras");
         Check(NetworkLogDashboardFallback.Matches(nr, new() { Technology = " " }), "blank technology keeps all samples");
         var timelineType = typeof(MapViewController).GetNestedType("DiagnosticTimelineRow", BindingFlags.NonPublic)!;
-        var payload = typeof(MapViewController).GetMethod("BuildL3SummaryJson", flags)!.Invoke(null, [onlyNetwork, Array.CreateInstance(timelineType, 0)]);
+        var summaryMethod = typeof(MapViewController).GetMethod("BuildL3SummaryJson", flags)!;
+        var detectedServices = Activator.CreateInstance(summaryMethod.GetParameters()[2].ParameterType, nonPublic: true);
+        var payload = summaryMethod.Invoke(null, [onlyNetwork, Array.CreateInstance(timelineType, 0), detectedServices]);
         using var json = JsonDocument.Parse(JsonSerializer.Serialize(payload));
         var data = json.RootElement.GetProperty("data");
+        Check(data.GetProperty("kpis").EnumerateArray().Single(v => v.GetProperty("parameter").GetString() == "NR rank")
+            .GetProperty("result").GetString() == "2.00", "JSON NR rank uses two decimal places");
         Check(data.GetProperty("hasData").GetBoolean() && data.GetProperty("totalRows").GetInt32() == 0 && data.GetProperty("networkLogRows").GetInt32() == 3, "JSON fallback metadata");
         Check(data.GetProperty("kpis").EnumerateArray().Single(v => v.GetProperty("parameter").GetString() == "Average SS-RSRP (dBm)").GetProperty("source").GetString() == "Network Log", "JSON source attribution");
         var excel = L3SummaryReportBuilder.WriteExcel(onlyNetwork);

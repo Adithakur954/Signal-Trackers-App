@@ -291,7 +291,8 @@ public static class NetworkLogDashboardFallback
         Metric("NR Tx power", ["PUSCH Tx (dBm)"], -100, 100, " dBm", true);
         Fill(report.Kpis, "NR rank", Join(samples.Where(IsNrSample)
             .Select(r => r.Get("NR DL Rank", "RI"))
-            .Where(v => Numeric(v, 1, 8).HasValue)), "captured NR rank/RI values; source label is RI when NR DL Rank is absent.");
+            .Where(v => Numeric(v, 1, 8).HasValue)
+            .Select(v => L3SummaryReportBuilder.FormatNrRank(v!))), "captured NR rank/RI values; source label is RI when NR DL Rank is absent.");
         Fill(report.Kpis, "NR modulation", Join(samples.Where(IsNrSample)
             .Select(r => r.Get("NR DL Modulation"))), "captured NR modulation labels.");
         var endcOutcomes = samples.Select(r => r.Get("ENDC Setup"))

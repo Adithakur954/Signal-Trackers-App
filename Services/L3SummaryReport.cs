@@ -69,6 +69,11 @@ public static class L3SummaryReportBuilder
         return distinct.Length == 0 ? Missing : string.Join(", ", distinct);
     }
 
+    internal static string FormatNrRank(string value) =>
+        double.TryParse(value, NumberStyles.Float, Inv, out var rank) && double.IsFinite(rank)
+            ? Math.Round(rank, 2, MidpointRounding.AwayFromZero).ToString("0.00", Inv)
+            : value;
+
     public static L3SummaryReport Build(string source, string scope, IReadOnlyList<L3ReportMessage> messages,
         IReadOnlyList<L3ReportCall> calls)
     {
@@ -157,7 +162,8 @@ public static class L3SummaryReportBuilder
             ("NR modulation", new[] { "nrModulation" }), ("NR resource blocks", new[] { "nrResourceBlocks" }),
             ("NR slot usage", new[] { "nrSlotUsage" }), ("NR Tx power", new[] { "nrTxPower" })
         })
-            report.Kpis.Add(new(label, Join(Values(aliases)), "Explicit decoded field values only; capacity estimates are not throughput."));
+            report.Kpis.Add(new(label, Join(label == "NR rank" ? Values(aliases).Select(FormatNrRank) : Values(aliases)),
+                "Explicit decoded field values only; capacity estimates are not throughput."));
         report.Kpis.Add(new("ENDC Setup SR", Missing, "No correlated ENDC setup attempt/outcome calculation is available from this report."));
 
         var l3 = messages.Where(m => m.Source.Equals("l3", StringComparison.OrdinalIgnoreCase)).ToArray();
