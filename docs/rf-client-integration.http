@@ -1,0 +1,97 @@
+# LOCAL testing: the running backend uses this port and Development user-secrets.
+@baseUrl = http://localhost:5224
+# For deployed testing, replace baseUrl with the verified production backend origin:
+# https://s-traccceer.vinfocom.co.in
+@appEmail = REPLACE_WITH_APP_USER_EMAIL
+@appPassword = REPLACE_PRIVATELY
+@region = IN
+@authCookie = REPLACE_WITH_LOGIN_COOKIE
+@csrfToken = REPLACE_WITH_ST_CSRF_COOKIE
+@uploadId = 7d8d4442-21b3-4a60-a3dc-b7b96c9f062c
+@recipientId = REPLACE_WITH_ADDITIONAL_RECIPIENT_ID
+@deliveryId = REPLACE_WITH_DEAD_LETTER_DELIVERY_ID
+
+### Existing login. Preserve ALL returned cookies with the existing client cookie jar.
+# Confirm current release deployment at baseUrl. Examples alone do not deploy the backend.
+POST {{baseUrl}}/api/auth/login
+Content-Type: application/json
+
+{"email":"{{appEmail}}","password":"{{appPassword}}","country_code":"{{region}}"}
+
+### APP 1: after drive ends, register its final ZIP. Replace IDs and exact byte size.
+POST {{baseUrl}}/api/rf-logs/uploads
+Cookie: st.auth={{authCookie}}; st.csrf={{csrfToken}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: application/json
+
+{
+  "uploadId":"{{uploadId}}",
+  "fileName":"drive-test.zip",
+  "fileSizeBytes":524293392,
+  "sessionId":4266,
+  "subSessionId":"20",
+  "projectId":123
+}
+
+### APP 2: use a SEPARATE storage client to PUT raw ZIP bytes to returned uploadUrl.
+# PUT <exact returned uploadUrl including query>
+# Content-Type: application/zip
+# Body = raw ZIP file, not JSON/base64/multipart.
+# No backend cookies, CSRF or API keys on this storage request.
+# Wait for successful S3 2xx before APP 3.
+
+### APP 3: notify completion with original uploader cookies. Empty body.
+POST {{baseUrl}}/api/rf-logs/uploads/{{uploadId}}/complete
+Cookie: st.auth={{authCookie}}; st.csrf={{csrfToken}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+### APP / SAME UPLOADER: read PDF status.
+GET {{baseUrl}}/api/rf-logs/uploads/{{uploadId}}
+Cookie: st.auth={{authCookie}}; st.csrf={{csrfToken}}
+
+### APP / SAME UPLOADER: get temporary PDF URL after reportStatus=completed.
+# Response is JSON; open its downloadUrl without backend credentials to get PDF bytes.
+GET {{baseUrl}}/api/rf-logs/uploads/{{uploadId}}/report
+Cookie: st.auth={{authCookie}}; st.csrf={{csrfToken}}
+
+### APP / SAME UPLOADER: retry only a failed PDF job.
+POST {{baseUrl}}/api/rf-logs/uploads/{{uploadId}}/report-retry
+Cookie: st.auth={{authCookie}}; st.csrf={{csrfToken}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+### FRONTEND ADMIN: use company admin role 2/3 login cookies for all requests below.
+# Automatic companyDefault=true mailbox appears after upload registration.
+GET {{baseUrl}}/api/rf-logs/recipients
+Cookie: st.auth={{authCookie}}; st.csrf={{csrfToken}}
+
+### FRONTEND ADMIN: OPTIONAL additional recipient, registered BEFORE uploading a new drive.
+# Company profile email is automatically included; it needs no separate recipient POST.
+POST {{baseUrl}}/api/rf-logs/recipients
+Cookie: st.auth={{authCookie}}; st.csrf={{csrfToken}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: application/json
+
+{"email":"rf-team@example.com","name":"RF reporting team"}
+
+### FRONTEND ADMIN: disable an additional recipient. Enabled company defaults return 409.
+DELETE {{baseUrl}}/api/rf-logs/recipients/{{recipientId}}
+Cookie: st.auth={{authCookie}}; st.csrf={{csrfToken}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+### FRONTEND ADMIN: latest company/region email deliveries (maximum 100, no pagination).
+GET {{baseUrl}}/api/rf-logs/email-deliveries
+Cookie: st.auth={{authCookie}}; st.csrf={{csrfToken}}
+
+### FRONTEND ADMIN: delivery status for one upload.
+GET {{baseUrl}}/api/rf-logs/email-deliveries?uploadId={{uploadId}}
+Cookie: st.auth={{authCookie}}; st.csrf={{csrfToken}}
+
+### FRONTEND ADMIN: retry a dead_letter email to an active/current recipient.
+POST {{baseUrl}}/api/rf-logs/email-deliveries/{{deliveryId}}/retry
+Cookie: st.auth={{authCookie}}; st.csrf={{csrfToken}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+### Existing network API: replace session ID with a session accessible to this login.
+# wifi_* fields appear only where that row's captured scan/plot supplies them.
+GET {{baseUrl}}/api/MapView/GetNetworkLog?session_ids=4266&NetworkType=All&limit=1000
+Cookie: st.auth={{authCookie}}; st.csrf={{csrfToken}}

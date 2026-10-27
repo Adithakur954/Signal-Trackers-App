@@ -2,6 +2,8 @@
 
 Updated against the current backend source on 27 October 2026, including automatic company email. All paths below are relative to `BASE_URL`, the HTTPS origin of the backend that handles the existing login. The deployed origin and release availability must be confirmed before treating these as live endpoints. The Ace Cloud S3 endpoint is not `BASE_URL`.
 
+Role-specific handoffs: [app developer](rf-app-developer-handoff.md) and [frontend developer](rf-frontend-developer-handoff.md). The checked frontend `.env.production` configures `https://s-traccceer.vinfocom.co.in` as the backend origin; this is configuration evidence, not confirmation that the new release is deployed.
+
 ## 1. Implemented behavior and verification
 
 The app registers the final drive ZIP, uploads its raw bytes directly to a private Ace Cloud S3 URL, then confirms completion with the backend. The backend verifies the uploaded object, creates a private snapshot, queues report generation in the correct regional database, uses the existing ZIP-to-PDF engine, saves the PDF privately and queues email delivery to the registered company profile email (`tbl_company.email`) plus optional additional report recipients. The app must automate this upload sequence after drive completion. See [automatic drive report workflow](rf-drive-auto-report.md).
@@ -232,6 +234,7 @@ POST one recipient at a time:
     "email": "rf-team@example.com",
     "name": "RF reporting team",
     "enabled": true,
+    "companyDefault": false,
     "createdAtUtc": "2026-10-26T14:00:00Z"
   }
 }
