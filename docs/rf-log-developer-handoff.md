@@ -1,17 +1,18 @@
 # RF automatic reporting: app and frontend developer handoff
 
-Verified against the current backend source on 26 October 2026. All paths below are relative to `BASE_URL`, the HTTPS origin of the backend that handles the existing login. The deployed origin and release availability must be confirmed before treating these as live endpoints. The Ace Cloud S3 endpoint is not `BASE_URL`.
+Updated against the current backend source on 27 October 2026, including automatic company email. All paths below are relative to `BASE_URL`, the HTTPS origin of the backend that handles the existing login. The deployed origin and release availability must be confirmed before treating these as live endpoints. The Ace Cloud S3 endpoint is not `BASE_URL`.
 
 ## 1. Implemented behavior and verification
 
-The app registers a ZIP, uploads its raw bytes directly to a private Ace Cloud S3 URL, then confirms completion with the backend. The backend verifies the uploaded object, creates a private snapshot, queues report generation in the correct regional database, uses the existing ZIP-to-PDF engine, saves the PDF privately and queues email delivery to separately registered company report recipients.
+The app registers the final drive ZIP, uploads its raw bytes directly to a private Ace Cloud S3 URL, then confirms completion with the backend. The backend verifies the uploaded object, creates a private snapshot, queues report generation in the correct regional database, uses the existing ZIP-to-PDF engine, saves the PDF privately and queues email delivery to the registered company profile email (`tbl_company.email`) plus optional additional report recipients. The app must automate this upload sequence after drive completion. See [automatic drive report workflow](rf-drive-auto-report.md).
 
 | Item | Current state |
 | --- | --- |
 | Upload, completion, status and PDF APIs | Implemented |
 | Recipient registration, unsubscribe and delivery APIs | Implemented; company-admin login required |
 | Automatic PDF worker and per-recipient email worker | Implemented; run while the backend is running |
-| India/Taiwan storage in separate regional DBs | Implemented; both schema migrations applied to the locally configured DBs |
+| India/Taiwan storage in separate regional DBs | Implemented; migrations 003/004/005 applied and verified in both locally configured DBs |
+| Company profile email as automatic destination | Implemented; new uploads subscribe their company's valid mailbox; IN/TW isolated MySQL checks passed |
 | Real Ace Cloud S3 test | Passed ZIP PUT/HEAD/range GET/conditional copy/GET, PDF PUT/GET and cleanup |
 | Gmail configuration | Saved privately for Development, explicitly for IN and TW; `smtp.gmail.com:587`, required STARTTLS |
 | Real outbound test email | Gmail accepted one email with a real PDF generated from synthetic RF CSV data; inbox/attachment receipt still needs recipient confirmation |
@@ -236,9 +237,9 @@ POST one recipient at a time:
 }
 ```
 
-GET recipients wraps the same objects in `recipients: []` instead of `recipient`. Render the `enabled` state. DELETE takes the recipient's `id`, not the upload ID.
+GET recipients wraps the same objects in `recipients: []` instead of `recipient`. Render the `enabled` state. Each object also includes `companyDefault` (boolean). Upload registration automatically adds/reuses the valid company profile mailbox with `companyDefault: true`; no manual recipient POST is required for it. DELETE of an enabled company-managed mailbox returns 409; its destination is managed through the company profile. DELETE of an additional subscription takes the recipient's `id`, not the upload ID.
 
-Recipients must be registered before the upload registration. They receive new reports for that company and region; late registration does not send historical reports. Recipients do not need an application login. The uploader is not automatically an email recipient. Taiwan subscriptions must be managed from a Taiwan admin login, independently of India.
+Optional additional recipients must be registered before the upload registration. The company mailbox is automatically subscribed transactionally during ZIP registration. They receive new reports for that company and region; late registration or a replacement company email does not send historical reports. A changed/deleted company profile fences pending company deliveries to its former address. Missing/invalid company mailboxes allow PDF generation but create no automatic company delivery; correct the profile before the next new upload. Recipients do not need an application login. The uploader is not automatically an email recipient. Taiwan subscriptions and company email come from Taiwan DB, independently of India.
 
 GET email deliveries returns the latest 100 records, newest first. Omit `uploadId` to see the latest company/region deliveries. There is no pagination parameter currently. Example:
 
@@ -331,7 +332,7 @@ If configured, the backend POSTs upload event JSON to `ReportingWebhookUrl` over
 
 Most RF errors use `{"message":"..."}`; existing middleware/validation responses can differ. Read the status and available error fields. Store `eventKey` or `(region, uploadId)` rather than assuming UUID alone distinguishes both regional DBs.
 
-Before production acceptance, deploy the current backend, configure S3 and SMTP secrets on that server for both regions, verify SQL migrations 003/004, allow the frontend origin and any browser S3 CORS needs, and keep IIS workers running. Local user secrets are not copied into production by publishing. Then test independently with real IN and TW accounts: admin subscribes a recipient, session owner registers and uploads a valid network-log ZIP, `/complete` succeeds, status reaches completed, PDF downloads, delivery reaches sent and the recipient confirms inbox/PDF receipt. Repeat completion to verify the same event is returned.
+Before production acceptance, deploy the current backend, configure S3 and SMTP secrets on that server for both regions, verify SQL migrations 003/004/005, allow the frontend origin and any browser S3 CORS needs, and keep IIS workers running. Local user secrets are not copied into production by publishing. Then test independently with real IN and TW accounts: confirm the company profile email, optionally subscribe additional recipients, have the session owner register/upload the final drive ZIP and call `/complete` automatically, wait for completed, download the PDF, inspect delivery status and confirm company inbox/PDF receipt. Repeat completion to verify the same event is returned.
 
 Existing `RemoteLogZipUrlTemplate` / `TaiwanRemoteLogZipUrlTemplate` settings serve the existing remote-log flow. They are not replacements for the new registration/PUT/completion sequence and do not subscribe old storage uploads automatically.
 

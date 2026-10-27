@@ -28,6 +28,15 @@ public static class RfLogDatabaseSetup
                         using var reader = new StreamReader(resource);
                         await connection.ExecuteAsync(new CommandDefinition(await reader.ReadToEndAsync(ct), cancellationToken: ct));
                     }
+                    if (await connection.ExecuteScalarAsync<int>(new CommandDefinition("""
+                        SELECT COUNT(*) FROM information_schema.columns
+                        WHERE table_schema=DATABASE() AND table_name='rf_log_report_recipients' AND column_name='company_default'
+                        """, cancellationToken: ct)) == 0)
+                    {
+                        using var resource = typeof(RfLogDatabaseSetup).Assembly.GetManifestResourceStream("SignalTracker.RfLogCompanyEmailSchema.sql")!;
+                        using var reader = new StreamReader(resource);
+                        await connection.ExecuteAsync(new CommandDefinition(await reader.ReadToEndAsync(ct), cancellationToken: ct));
+                    }
                 }
                 var columns = (await connection.QueryAsync<string>(new CommandDefinition("""
                     SELECT column_name FROM information_schema.columns
@@ -39,7 +48,7 @@ public static class RfLogDatabaseSetup
                 if (missing.Length > 0) failures++;
                 foreach (var (table, requiredColumns) in new[]
                 {
-                    ("rf_log_report_recipients", new[] { "id", "region", "company_id", "email", "name", "enabled", "created_at" }),
+                    ("rf_log_report_recipients", new[] { "id", "region", "company_id", "email", "name", "enabled", "company_default", "created_at" }),
                     ("rf_log_email_deliveries", new[] { "id", "upload_id", "recipient_id", "region", "company_id", "report_reference", "status", "attempts", "next_attempt", "lease_token", "lease_until", "created_at", "sent_at", "last_error" })
                 })
                 {

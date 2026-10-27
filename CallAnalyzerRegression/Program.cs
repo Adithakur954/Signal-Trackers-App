@@ -28,6 +28,12 @@ if (args.FirstOrDefault() == "--rf-log-email-db")
     return;
 }
 
+if (args.FirstOrDefault() == "--rf-log-company-email-db")
+{
+    await RfLogCompanyEmailRegression.RunDatabaseAsync();
+    return;
+}
+
 if (args.FirstOrDefault() == "--network-log-cache")
 {
     await NetworkLogCacheRegression.RunAsync();

@@ -94,11 +94,22 @@ public sealed class RfLogUploadStore(IConfiguration configuration, IOptions<RfLo
     public async Task RegisterAsync(RfLogUpload upload, CancellationToken ct)
     {
         await using var conn = Connection(upload.Region);
-        await conn.ExecuteAsync(Sql("""
+        await conn.OpenAsync(ct);
+        await RegisterOnConnectionAsync(conn, upload, ct);
+    }
+
+    // Registration and the default company subscription commit together; a fast report
+    // worker can never complete this upload before its company's recipient exists.
+    public static async Task RegisterOnConnectionAsync(MySqlConnection conn, RfLogUpload upload, CancellationToken ct)
+    {
+        await using var transaction = await conn.BeginTransactionAsync(ct);
+        await RfLogEmailStore.EnsureCompanyRecipientAsync(conn, transaction, upload.Region, upload.CompanyId, ct);
+        await conn.ExecuteAsync(new CommandDefinition("""
             INSERT INTO rf_log_uploads(id,client_id,company_id,region,metadata,staging_key,status,created_at)
             VALUES(@Id,@ClientId,@CompanyId,@Region,@metadata,@StagingKey,'awaiting_upload',UTC_TIMESTAMP(6))
             ON DUPLICATE KEY UPDATE id=id
-            """, new { upload.Id, upload.ClientId, upload.CompanyId, upload.Region, metadata = JsonSerializer.Serialize(upload.Metadata), upload.StagingKey }, ct));
+            """, new { upload.Id, upload.ClientId, upload.CompanyId, upload.Region, metadata = JsonSerializer.Serialize(upload.Metadata), upload.StagingKey }, transaction, cancellationToken: ct));
+        await transaction.CommitAsync(ct);
     }
 
     public async Task<bool> CompleteAsync(string id, string region, string objectKey, RfLogObject file, CancellationToken ct)

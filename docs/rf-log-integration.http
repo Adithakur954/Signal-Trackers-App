@@ -10,7 +10,8 @@
 @recipientId = REPLACE_FROM_RECIPIENT_REGISTRATION
 @deliveryId = REPLACE_FROM_EMAIL_DELIVERIES
 
-### Company admin: register report recipients BEFORE registering the ZIP upload.
+### OPTIONAL company admin: register ADDITIONAL recipients BEFORE registering the ZIP upload.
+# The valid tbl_company.email is included automatically at ZIP registration; no POST is needed for it.
 # Use an existing company admin login cookie (role 2 or 3). Scope comes from that login.
 POST {{baseUrl}}/api/rf-logs/recipients
 Cookie: st.auth={{authCookie}}; st.csrf={{csrfToken}}
@@ -19,7 +20,7 @@ Content-Type: application/json
 
 {"email":"rf-team@example.com","name":"RF reporting team"}
 
-### Company admin: list separate report subscriptions.
+### Company admin: list report subscriptions, including companyDefault=true company-managed email.
 GET {{baseUrl}}/api/rf-logs/recipients
 Cookie: st.auth={{authCookie}}; st.csrf={{csrfToken}}
 
@@ -32,7 +33,8 @@ POST {{baseUrl}}/api/rf-logs/email-deliveries/{{deliveryId}}/retry
 Cookie: st.auth={{authCookie}}; st.csrf={{csrfToken}}
 X-CSRF-TOKEN: {{csrfToken}}
 
-### Company admin: unsubscribe and cancel queued emails.
+### Company admin: unsubscribe an additional recipient and cancel queued emails.
+# An enabled companyDefault=true address returns 409; its address comes from the company profile.
 DELETE {{baseUrl}}/api/rf-logs/recipients/{{recipientId}}
 Cookie: st.auth={{authCookie}}; st.csrf={{csrfToken}}
 X-CSRF-TOKEN: {{csrfToken}}

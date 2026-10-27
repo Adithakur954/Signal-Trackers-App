@@ -65,6 +65,6 @@ After deploying the updated backend, run in administrator PowerShell on the IIS 
 
 The script prompts privately for the mailbox password. Run it again with `-Region TW` to explicitly configure Taiwan. The same authorized sending mailbox may be used for both regions, while subscriptions, reports and delivery records remain in their respective regional databases. Protect the deployed web.config with administrator/app-pool permissions.
 
-Register the approved report recipients through the company-admin API before registering a drive upload. Use a real approved test recipient for the deployed acceptance test. SMTP acceptance is recorded as `sent`; inbox receipt and spam placement must also be checked by the recipient. Provider sending quotas still apply.
+The valid regional company profile email (`tbl_company.email`) is now automatically subscribed when a drive ZIP is registered. Use the company-admin recipient API only for optional additional recipients before registering the upload. Use a real approved company mailbox for the deployed acceptance test. SMTP acceptance is recorded as `sent`; inbox receipt and spam placement must also be checked by the recipient. Provider sending quotas still apply.
 
 An S3 account and an email mailbox are separate services. The S3 access/secret keys cannot be used as SMTP credentials. Live verification still requires the new mailbox, backend server access and working Ace Cloud configuration.

@@ -25,11 +25,13 @@ try {
     Copy-Item -LiteralPath (Join-Path $sourceRoot 'docs/rf-log-integration.md') -Destination (Join-Path $releaseRoot 'docs')
     Copy-Item -LiteralPath (Join-Path $sourceRoot 'docs/rf-log-integration.http') -Destination (Join-Path $releaseRoot 'docs')
     Copy-Item -LiteralPath (Join-Path $sourceRoot 'docs/rf-log-developer-handoff.md') -Destination (Join-Path $releaseRoot 'docs')
+    Copy-Item -LiteralPath (Join-Path $sourceRoot 'docs/rf-drive-auto-report.md') -Destination (Join-Path $releaseRoot 'docs')
     Copy-Item -LiteralPath (Join-Path $sourceRoot 'docs/get-network-log-wifi.md') -Destination (Join-Path $releaseRoot 'docs')
     Copy-Item -LiteralPath (Join-Path $sourceRoot 'docs/wifi-plot-import.md') -Destination (Join-Path $releaseRoot 'docs')
     Copy-Item -LiteralPath (Join-Path $sourceRoot 'docs/rf-report-mailbox-setup.md') -Destination (Join-Path $releaseRoot 'docs')
     Copy-Item -LiteralPath (Join-Path $sourceRoot 'Database/Migrations/003_rf_log_upload_events.sql') -Destination (Join-Path $releaseRoot 'database')
     Copy-Item -LiteralPath (Join-Path $sourceRoot 'Database/Migrations/004_rf_log_report_email.sql') -Destination (Join-Path $releaseRoot 'database')
+    Copy-Item -LiteralPath (Join-Path $sourceRoot 'Database/Migrations/005_rf_log_company_email.sql') -Destination (Join-Path $releaseRoot 'database')
     Copy-Item -LiteralPath (Join-Path $sourceRoot 'appsettings.Production.example.json') -Destination $releaseRoot
     Copy-Item -LiteralPath (Join-Path $sourceRoot 'docs/rf-log-release-README.txt') -Destination (Join-Path $releaseRoot 'README.txt')
     $zipPath = Join-Path $sourceRoot "artifacts/$ReleaseName.zip"

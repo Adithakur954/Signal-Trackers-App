@@ -61,6 +61,7 @@ public sealed class RfLogRecipient
     [JsonPropertyName("email")] public string Email { get; set; } = "";
     [JsonPropertyName("name")] public string Name { get; set; } = "";
     [JsonPropertyName("enabled")] public bool Enabled { get; set; }
+    [JsonPropertyName("companyDefault")] public bool CompanyDefault { get; set; }
     [JsonPropertyName("createdAtUtc")] public DateTime CreatedAtUtc { get; set; }
 }
 

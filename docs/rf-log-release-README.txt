@@ -19,7 +19,7 @@ Both regional DB connection strings must already be configured on the server:
 
 The script backs up live configuration (not old binaries), stops only the selected
 pool, copies the release, creates/grants access to writable folders, applies and
-checks the RF table in BOTH databases, checks a real S3 upload/copy/download/report
+checks RF migrations 003/004/005 in BOTH databases (CREATE/ALTER permission needed), checks a real S3 upload/copy/download/report
 round trip, then starts the pool. A failed check leaves the pool stopped; correct
 the stated issue and rerun. Check objects are created and deleted only under
 rf-logs/checks/<random-id>/; allow DeleteObject on that check prefix.
@@ -27,11 +27,14 @@ rf-logs/checks/<random-id>/; allow DeleteObject on that check prefix.
 5. Open the backend site once. Automatic PDF/email workers run independently for IN/TW.
    Set IIS Application Initialization/preload for automatic startup after server
    restart. The script disables idle timeout and sets the pool to AlwaysRunning.
-6. Before a drive upload, a company admin registers report email recipients:
+6. Confirm the company profile has the correct registered email (tbl_company.email).
+   ZIP registration automatically adds this company-managed mailbox as a report
+   recipient in that same regional DB. No separate recipient POST is needed for it.
+   A company admin may optionally register ADDITIONAL report email recipients:
      POST /api/rf-logs/recipients
      {"email":"rf-team@example.com","name":"RF reporting team"}
    Use the existing admin login cookie and CSRF header. Company/region come from
-   verified login claims. Only this explicit list receives future company reports.
+   verified login claims. Company email plus optional recipients receive new reports.
    Configure SMTP separately for IN and TW. In the extracted package:
      .\scripts\Configure-RfLogReportEmail.ps1 -BackendPath 'C:\inetpub\wwwroot\Backend' -Region IN -SmtpHost 'smtp.YOUR-PROVIDER.com' -Port 587 -FromAddress 'reports@YOUR-DOMAIN.com' -UserName 'reports@YOUR-DOMAIN.com'
    Enter the SMTP app password privately when prompted; repeat with -Region TW.
@@ -55,8 +58,9 @@ see docs/rf-log-integration.md and the configure helper's -ExternalReporting opt
 Live acceptance test: log in, register a ZIP belonging to a real session, PUT it
 using the returned URL, call complete, wait for completed and download the PDF.
 Repeat with a Taiwan login. Each event/report/subscription stays in its own regional DB.
-Verify email delivery to a recipient registered before the upload. No real test
-recipient is installed automatically and no real email is sent by the build tests.
+Verify delivery to the company profile email and any optional subscribed recipient.
+Migration does not backfill recipients or send mail; upload registration adds the
+company profile mailbox. No real email is sent by the build tests.
 Browser uploads also require bucket CORS allowing the actual frontend origin.
 
 The build's automated checks use real HTTP routes and the PDF generator with
