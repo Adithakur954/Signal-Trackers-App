@@ -182,7 +182,8 @@ internal static class RfLogIntegrationRegression
         var storage = new FakeStorage { ZipContent = zipBytes };
         var wrapped = Options.Create(options);
         var generator = new RfLogPdfGenerator(new TestEnvironment(), wrapped);
-        var processor = new RfLogReportProcessor(store, storage, generator, NullLogger<RfLogReportProcessor>.Instance);
+        var wifiPlots = new RecordingWifiPlotImporter();
+        var processor = new RfLogReportProcessor(store, storage, generator, wifiPlots, NullLogger<RfLogReportProcessor>.Instance);
         var id = Guid.NewGuid().ToString("D");
         foreach (var region in new[] { "IN", "TW" })
             await store.RegisterAsync(new RfLogUpload
@@ -200,6 +201,9 @@ internal static class RfLogIntegrationRegression
         Check(!await processor.ProcessNextAsync("IN", default), "completed automatic reports are not generated twice");
         await processor.ProcessNextAsync("TW", default);
         Check(store.Rows[("TW", id)].Status == "completed" && storage.Reports.Count == 2, "Taiwan automatic report uses its own queue/artifact");
+        Check(wifiPlots.Uploads.Count == 2 && wifiPlots.Uploads[0].Region == "IN" && wifiPlots.Uploads[1].Region == "TW"
+            && wifiPlots.Uploads.All(row => row.Metadata.SessionId == 20 && row.CompanyId == 7),
+            "Automatic cloud reports run Wi-Fi import in the same upload session/company and region");
         var service = new RfLogIntegrationService(store, storage, wrapped);
         await service.ReportDownloadAsync(india, default);
         Check(storage.LastDownloadKey == india.ReportReference, "report download returns only accepted artifact");
@@ -233,6 +237,17 @@ internal static class RfLogIntegrationRegression
             "retried report completes after the input limit is corrected");
         await RfLogEmailRegression.RunAsync(india, store.Rows[("TW", id)], storage, options);
         Console.WriteLine("Automatic RF reports passed: ZIP download -> existing PDF engine -> private artifact -> regional completion, deduplication and report download.");
+    }
+
+    private sealed class RecordingWifiPlotImporter : IRfLogWifiPlotImporter
+    {
+        public List<RfLogUpload> Uploads { get; } = new();
+        public Task ImportAsync(string zipPath, RfLogUpload upload, CancellationToken ct)
+        {
+            Check(File.Exists(zipPath), "Cloud Wi-Fi import must receive the downloaded archive");
+            Uploads.Add(upload);
+            return Task.CompletedTask;
+        }
     }
 
     private sealed class TestEnvironment : IWebHostEnvironment

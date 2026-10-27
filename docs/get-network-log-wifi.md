@@ -34,7 +34,15 @@ These properties accompany the existing row fields, including `is_wifi`, `connec
 
 Absent or unreadable values are omitted rather than invented. Captured `false`, zero, empty SSIDs and empty radio-chain arrays are retained. Distance strings, the timestamp value, the bandwidth enum and the standard text preserve the source representation; `wifi_channel_bandwidth: 3` is the captured enum, not a claim of 3 MHz bandwidth. Cellular `CellInfoNr` diagnostics do not generate Wi-Fi fields, even when the session itself is marked Wi-Fi.
 
-The page/summary cache namespace is now `networklog:v38`, so responses cached under the previous contract do not hide the new properties. No frontend or database schema changes are required for this backend addition; a frontend that explicitly selects columns can map the added keys when displaying Wi-Fi details.
+The page/summary cache namespace is now `networklog:v39`, so responses cached under the previous contract do not hide the new properties. No frontend or database schema changes are required for this backend addition; a frontend that explicitly selects columns can map the added keys when displaying Wi-Fi details.
+
+## WiFi_plot.csv imports
+
+`WiFi_plot.csv` is now recognized by manual network uploads, combined L3/Event ZIP uploads, the existing remote/cloud ZIP import path, and the built-in S3 RF report worker. See [Wi-Fi plot import](wifi-plot-import.md) for mapping, batching, regional scope and verification. The plot's readings and metadata are stored in `tbl_network_log.primary_cell_info_1`; the API uses the same parser as for captured Android scan strings.
+
+Additional plot-specific keys include `wifi_link_speed_mbps`, `wifi_rx_link_speed_mbps`, `wifi_channel`, `wifi_band`, `wifi_signal_level_0_4`, `wifi_matches_lock`, `wifi_lock`, `wifi_plot_x`, `wifi_plot_y`, `wifi_plot_timestamp`, `wifi_tap_timestamp`, `wifi_drip_timestamp`, `wifi_idle_before_s`, `wifi_interval_s`, `wifi_interpolation_on`, `wifi_zoom`, `wifi_source_session`, `wifi_pin_size` and `wifi_nodata_mode`. The source session is metadata; `session_id` remains the authorized DB session. Existing root `dl_tpt`/`ul_tpt` contain cleaned throughput values.
+
+Wi-Fi plot rows remain eligible even when band/signal readings are blank. Rows with missing GPS remain stored with null coordinates; a session still needs at least one mappable GPS row for the map endpoint. Unknown scan-only fields such as standard, capabilities or TWT are not invented when the plot CSV does not contain them.
 
 ## Mixed cellular and Wi-Fi rows in one session
 

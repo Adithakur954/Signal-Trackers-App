@@ -10,6 +10,7 @@ using System.Text.RegularExpressions;
 using CsvHelper;
 using CsvHelper.Configuration;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using SignalTracker.Models;
 using SignalTracker.Models.ZipImport;
 
@@ -80,8 +81,9 @@ namespace SignalTracker.Services.ZipImport
                     cancellationToken.ThrowIfCancellationRequested();
 
                     var isNetworkLogEntry = IsNetworkLogEntry(entry);
+                    var isWifiPlotEntry = entry.Length > 0 && WifiPlotCsv.IsFile(entry.Name);
                     var subSessionType = TryGetSubSessionTypeFromName(entry);
-                    if (!isNetworkLogEntry && !subSessionType.HasValue)
+                    if (!isNetworkLogEntry && !isWifiPlotEntry && !subSessionType.HasValue)
                     {
                         summary.FilesSkipped++;
                         continue;
@@ -89,7 +91,22 @@ namespace SignalTracker.Services.ZipImport
 
                     try
                     {
-                        if (isNetworkLogEntry)
+                        if (isWifiPlotEntry)
+                        {
+                            await using var wifiStream = entry.Open();
+                            using var wifiReader = new StreamReader(wifiStream, Encoding.UTF8, true, 65536);
+                            var wifiImport = await WifiPlotImporter.ImportAsync(_db.Database.GetDbConnection(),
+                                _db.Database.CurrentTransaction?.GetDbTransaction(), wifiReader, targetSessionId, companyId,
+                                row =>
+                                {
+                                    if (row.timestamp.HasValue && row.lat.HasValue && row.lon.HasValue)
+                                        bounds = SessionBounds.Merge(bounds, new SessionBounds(row.timestamp.Value, row.lat.Value, row.lon.Value));
+                                }, cancellationToken);
+                            summary.NetworkLogInserted += wifiImport.Inserted;
+                            summary.DuplicatesSkipped += wifiImport.Duplicates;
+                            summary.InvalidRows += wifiImport.InvalidRows;
+                        }
+                        else if (isNetworkLogEntry)
                         {
                             await ProcessNetworkLogEntryAsync(
                                 entry,

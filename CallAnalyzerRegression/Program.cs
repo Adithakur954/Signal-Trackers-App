@@ -4,6 +4,18 @@ using CsvHelper;
 using CsvHelper.Configuration;
 using SignalTracker.Controllers;
 
+if (args.FirstOrDefault() == "--wifi-plot")
+{
+    WifiPlotRegression.Run(args.ElementAtOrDefault(1));
+    return;
+}
+
+if (args.FirstOrDefault() == "--wifi-plot-db")
+{
+    await WifiPlotRegression.RunDatabaseAsync(args.ElementAtOrDefault(1));
+    return;
+}
+
 if (args.FirstOrDefault() == "--rf-log-integration")
 {
     await RfLogIntegrationRegression.RunAsync();

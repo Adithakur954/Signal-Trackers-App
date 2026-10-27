@@ -74,6 +74,7 @@ namespace SignalTracker.Controllers
             "networklog:v35:*",
             "networklog:v37:*",
             "networklog:v38:*",
+            "networklog:v39:*",
             "latlon:dist:*",
             "n78_simple_kpi:*",
             "n78_neighbours:*",
@@ -6032,12 +6033,15 @@ public class AvailablePolygonsResponse
                         WHERE nl.session_id = s.id
                       AND nl.lat IS NOT NULL
                       AND nl.lon IS NOT NULL
-                      AND UPPER(TRIM(COALESCE(nl.band, ''))) <> 'UNKNOWN'
+                      AND (nl.primary_cell_info_1 LIKE 'SSID:%' OR nl.primary_cell_info_1 LIKE '%BSSID:%'
+                           OR UPPER(TRIM(COALESCE(nl.band, ''))) <> 'UNKNOWN')
                       AND nl.primary_cell_info_1 IS NOT NULL
                       AND TRIM(nl.primary_cell_info_1) <> ''
                       AND (
                           NULLIF(TRIM(nl.band), '') IS NOT NULL
                           OR UPPER(TRIM(COALESCE(nl.network, ''))) LIKE '%5G%'
+                          OR nl.primary_cell_info_1 LIKE 'SSID:%'
+                          OR nl.primary_cell_info_1 LIKE '%BSSID:%'
                       )
                       AND (
                           nl.primary_cell_info_1 LIKE '%mRegistered=YES%'
@@ -7009,7 +7013,7 @@ private async Task<NetworkLogFullResponse> BuildNetworkLogPageCacheAsync(
             connString, whereClause, dataVersion,
             parameters = parameters.OrderBy(pair => pair.Key, StringComparer.Ordinal)
         });
-        var summaryCacheKey = "networklog:v38:summary:" +
+        var summaryCacheKey = "networklog:v39:summary:" +
             Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(summaryIdentity)));
         var cachedSummary = await NetworkLogSummaries.GetOrCreateAsync(summaryCacheKey, _redis, async () =>
         {
@@ -7900,7 +7904,7 @@ private string BuildNetworkLogCacheKey(
         : "no_project";
     string versionKey = NormalizeCacheKeyPart(dataVersion);
 
-    return $"networklog:v38:{GetProjectListCacheScope()}:{sortedSessionIds}:{providerKey}:{networkTypeKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
+    return $"networklog:v39:{GetProjectListCacheScope()}:{sortedSessionIds}:{providerKey}:{networkTypeKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
 }
 
 private static string CleanProviderDisplayName(string value)

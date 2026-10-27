@@ -933,6 +933,27 @@ public IActionResult UploadSitePrediction(
                                         continue;
                                     }
 
+                                    if (WifiPlotCsv.IsFile(uploadCsvName) || (!isZipFile && WifiPlotCsv.HasHeader(file)))
+                                    {
+                                        try
+                                        {
+                                            using var wifiReader = new StreamReader(file, Encoding.UTF8, true);
+                                            var wifiImport = WifiPlotImporter.ImportAsync(db.Database.GetDbConnection(),
+                                                outerTx?.GetDbTransaction(), wifiReader, sessionId, resolvedCompanyId)
+                                                .GetAwaiter().GetResult();
+                                            rowInserted += wifiImport.Inserted;
+                                            if (wifiImport.InvalidRows > 0)
+                                                allErrorList.Add($"{uploadCsvName}: skipped {wifiImport.InvalidRows} rows with invalid timestamps.");
+                                            UpdateSessionBoundsFromLogs(sessionId);
+                                        }
+                                        catch (Exception ex) when (!IsTransientDbException(ex))
+                                        {
+                                            IsValidSheet = false;
+                                            allErrorList.Add($"{uploadCsvName}: {SafeException.GetInnermost(ex)}");
+                                        }
+                                        continue;
+                                    }
+
 	                                if (isZipFile && IsEventDiagnosticFile(uploadCsvName))
 	                                {
 	                                    bool eventOk = ProcessEventDiagnosticFile(sessionId, excelID, file, ref rowInserted, out errorList);

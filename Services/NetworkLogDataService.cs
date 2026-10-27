@@ -83,15 +83,16 @@ namespace SignalTracker.Services
                 parameters.Add(parameterName, ids[i]);
             }
 
+            const string wifiScanPredicate = "(primary_cell_info_1 LIKE 'SSID:%' OR primary_cell_info_1 LIKE '%BSSID:%')";
             var clauses = new List<string>
             {
                 idParams.Count > 0 ? $"session_id IN ({string.Join(",", idParams)})" : "1 = 0",
-                "UPPER(TRIM(COALESCE(band, ''))) <> 'UNKNOWN'",
+                $"({wifiScanPredicate} OR UPPER(TRIM(COALESCE(band, ''))) <> 'UNKNOWN')",
                 "primary_cell_info_1 IS NOT NULL AND TRIM(primary_cell_info_1) <> ''",
-                @"(
+                $@"({wifiScanPredicate} OR (
         NULLIF(TRIM(band), '') IS NOT NULL
         OR UPPER(TRIM(COALESCE(network, ''))) LIKE '%5G%'
-    )"
+    ))"
             };
 
             if (!string.IsNullOrWhiteSpace(provider))

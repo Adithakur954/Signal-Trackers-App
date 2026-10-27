@@ -4,7 +4,7 @@ using SignalTracker.Models;
 namespace SignalTracker.Services;
 
 public sealed class RfLogReportProcessor(IRfLogUploadStore store, IRfLogStorage storage,
-    IRfLogReportGenerator generator, ILogger<RfLogReportProcessor> logger)
+    IRfLogReportGenerator generator, IRfLogWifiPlotImporter wifiPlots, ILogger<RfLogReportProcessor> logger)
 {
     public async Task<bool> ProcessNextAsync(string region, CancellationToken ct)
     {
@@ -24,6 +24,8 @@ public sealed class RfLogReportProcessor(IRfLogUploadStore store, IRfLogStorage 
             // The existing PDF renderer performs CPU work synchronously; allow
             // lease renewals and the other region to run while it builds charts.
             var pdf = await Task.Run(() => generator.GenerateAsync(temporaryZip, upload, job.Token), job.Token);
+            job.Token.ThrowIfCancellationRequested();
+            await wifiPlots.ImportAsync(temporaryZip, upload, job.Token);
             job.Token.ThrowIfCancellationRequested();
             var reportKey = $"rf-logs/reports/{region}/{upload.CompanyId}/{upload.Id}/{token}/report.pdf";
             await storage.UploadReportAsync(reportKey, pdf, job.Token);

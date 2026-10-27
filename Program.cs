@@ -297,6 +297,7 @@ internal class Program
             .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
         builder.Services.AddHostedService<RfLogNotificationWorker>();
         builder.Services.AddScoped<IRfLogReportGenerator, RfLogPdfGenerator>();
+        builder.Services.AddScoped<IRfLogWifiPlotImporter, RfLogWifiPlotImporter>();
         builder.Services.AddScoped<RfLogReportProcessor>();
         builder.Services.AddHostedService<RfLogReportWorker>();
         builder.Services.AddScoped<IRfLogEmailStore, RfLogEmailStore>();
