@@ -1,0 +1,116 @@
+using Amazon.S3;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.Filters;
+using Microsoft.Extensions.Options;
+using MySqlConnector;
+using SignalTracker.Models;
+using SignalTracker.Security;
+using SignalTracker.Services;
+
+namespace SignalTracker.Controllers;
+
+[ApiController, AllowAnonymous, Route("api/rf-logs"), ServiceFilter(typeof(RfLogErrorFilter))]
+[RequestSizeLimit(16384)]
+public sealed class RfLogIntegrationController(RfLogIntegrationService service, IRfLogUploadStore store,
+    IRfLogStorage storage, IOptions<RfLogIntegrationOptions> options) : ControllerBase
+{
+    private RfLogActor Actor => (RfLogActor)HttpContext.Items[RfLogApiKeyAttribute.ClientItem]!;
+    private string ReportingRegion => (string)HttpContext.Items[RfLogApiKeyAttribute.RegionItem]!;
+
+    [HttpPost("uploads"), RfLogApiKey]
+    public async Task<IActionResult> Create(RfLogUploadRequest request, CancellationToken ct)
+    {
+        var upload = await service.RegisterAsync(Actor, request, ct);
+        return Ok(new
+        {
+            uploadId = upload.Id, eventId = upload.Id, eventKey = $"{upload.Region}:{upload.Id}",
+            region = upload.Region, status = upload.Status, method = "PUT",
+            uploadUrl = upload.Status == "awaiting_upload" ? await storage.UploadUrlAsync(upload.StagingKey) : null,
+            requiredHeaders = new Dictionary<string, string> { ["Content-Type"] = "application/zip" },
+            expiresAtUtc = DateTime.UtcNow.AddMinutes(options.Value.UploadUrlMinutes),
+            completeEndpoint = $"/api/rf-logs/uploads/{upload.Id}/complete"
+        });
+    }
+
+    [HttpPost("uploads/{id:guid}/complete"), RfLogApiKey]
+    public async Task<IActionResult> Complete(Guid id, CancellationToken ct) =>
+        Ok(service.Event(await service.CompleteAsync(Actor, id.ToString("D"), ct)));
+
+    [HttpGet("uploads/{id:guid}"), RfLogApiKey]
+    public async Task<IActionResult> UploadStatus(Guid id, CancellationToken ct) =>
+        Ok(service.Event(await service.UploaderEventAsync(Actor, id.ToString("D"), ct)));
+
+    [HttpGet("uploads/{id:guid}/report"), RfLogApiKey]
+    public async Task<IActionResult> UserReport(Guid id, CancellationToken ct) =>
+        Ok(await service.ReportDownloadAsync(await service.UploaderEventAsync(Actor, id.ToString("D"), ct), ct));
+
+    [HttpPost("uploads/{id:guid}/report-retry"), RfLogApiKey]
+    public async Task<IActionResult> UserRetryReport(Guid id, CancellationToken ct)
+    {
+        await service.UploaderEventAsync(Actor, id.ToString("D"), ct);
+        if (!await store.RetryReportAsync(id.ToString("D"), Actor.Region, ct)) return Conflict(new { message = "Only a failed report can be retried." });
+        return Ok(service.Event(await service.UploaderEventAsync(Actor, id.ToString("D"), ct)));
+    }
+
+    [HttpGet("events"), RfLogApiKey(reporting: true)]
+    public async Task<IActionResult> Pending([FromQuery] int limit = 25, CancellationToken ct = default) =>
+        Ok(new { region = ReportingRegion, events = (await store.PendingAsync(ReportingRegion, limit, ct)).Select(service.Event) });
+
+    [HttpGet("events/{id:guid}"), RfLogApiKey(reporting: true)]
+    public async Task<IActionResult> EventStatus(Guid id, CancellationToken ct) =>
+        Ok(service.Event(await service.GetAsync(id.ToString("D"), ReportingRegion, ct)));
+
+    [HttpGet("events/{id:guid}/download"), RfLogApiKey(reporting: true)]
+    public async Task<IActionResult> Download(Guid id, CancellationToken ct) => Ok(await service.DownloadAsync(id.ToString("D"), ReportingRegion, ct));
+
+    [HttpGet("events/{id:guid}/report"), RfLogApiKey(reporting: true)]
+    public async Task<IActionResult> Report(Guid id, CancellationToken ct) =>
+        Ok(await service.ReportDownloadAsync(await service.GetAsync(id.ToString("D"), ReportingRegion, ct), ct));
+
+    [HttpPost("events/{id:guid}/claim"), RfLogApiKey(reporting: true)]
+    public async Task<IActionResult> Claim(Guid id, CancellationToken ct)
+    {
+        await service.GetAsync(id.ToString("D"), ReportingRegion, ct);
+        var token = Guid.NewGuid().ToString("N");
+        if (!await store.ClaimAsync(id.ToString("D"), ReportingRegion, token, ct)) return Conflict(new { message = "Event is already claimed or terminal." });
+        return Ok(new { eventId = id, region = ReportingRegion, leaseToken = token, leaseSeconds = 900 });
+    }
+
+    [HttpPost("events/{id:guid}/status"), RfLogApiKey(reporting: true)]
+    public async Task<IActionResult> Result(Guid id, RfLogReportResult result, CancellationToken ct)
+    {
+        var token = Request.Headers["X-RF-Lease-Token"].ToString();
+        if (!Guid.TryParseExact(token, "N", out _)) return BadRequest(new { message = "X-RF-Lease-Token is required." });
+        if (!await store.ResultAsync(id.ToString("D"), ReportingRegion, token, result, ct)) return Conflict(new { message = "Lease expired, replaced or event is terminal." });
+        return Ok(service.Event(await service.GetAsync(id.ToString("D"), ReportingRegion, ct)));
+    }
+
+    [HttpPost("events/{id:guid}/notification-retry"), RfLogApiKey(reporting: true)]
+    public async Task<IActionResult> Retry(Guid id, CancellationToken ct)
+    {
+        await service.GetAsync(id.ToString("D"), ReportingRegion, ct);
+        await store.RetryNotificationAsync(id.ToString("D"), ReportingRegion, ct);
+        return Ok(service.Event(await service.GetAsync(id.ToString("D"), ReportingRegion, ct)));
+    }
+}
+
+public sealed class RfLogErrorFilter(ILogger<RfLogErrorFilter> logger) : IExceptionFilter
+{
+    public void OnException(ExceptionContext context)
+    {
+        var (status, message) = context.Exception switch
+        {
+            RfLogRequestException ex => (ex.Status, ex.Message),
+            InvalidDataException ex => (409, ex.Message),
+            AmazonS3Exception ex when (int)ex.StatusCode == 404 => (409, "ZIP is not available in storage yet. Retry after the PUT completes."),
+            AmazonS3Exception ex when (int)ex.StatusCode == 412 => (409, "ZIP changed during verification. Retry completion."),
+            AmazonS3Exception => (503, "RF object storage is temporarily unavailable."),
+            MySqlException => (503, "RF event database is unavailable. Verify configuration and schema migration."),
+            _ => (500, "RF integration request failed.")
+        };
+        if (status >= 500) logger.LogError(context.Exception, "RF log integration request failed: {Path}", context.HttpContext.Request.Path);
+        context.Result = new ObjectResult(new { message }) { StatusCode = status };
+        context.ExceptionHandled = true;
+    }
+}

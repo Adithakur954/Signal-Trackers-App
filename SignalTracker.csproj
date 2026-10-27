@@ -35,11 +35,18 @@
   <ItemGroup>
   <Content Update="App_Data\**\*" CopyToPublishDirectory="Never" />
   <Content Update="UploadedExcels\**\*" CopyToPublishDirectory="Never" />
+  <Content Update="login.json" CopyToPublishDirectory="Never" />
 </ItemGroup>
 
-  <!-- Packages (single group) -->
-    <!-- Packages (single group) -->
+  <!-- Schema for the explicit regional migration command. -->
   <ItemGroup>
+    <EmbeddedResource Include="Database\Migrations\003_rf_log_upload_events.sql" LogicalName="SignalTracker.RfLogSchema.sql" />
+    <EmbeddedResource Include="Database\Migrations\004_rf_log_report_email.sql" LogicalName="SignalTracker.RfLogEmailSchema.sql" />
+  </ItemGroup>
+  <!-- Packages (single group) -->
+  <ItemGroup>
+    <PackageReference Include="AWSSDK.S3" Version="4.0.104.6" />
+    <PackageReference Include="MailKit" Version="4.18.2" />
     <PackageReference Include="BCrypt.Net-Next" Version="4.0.3" />
     <PackageReference Include="BuildBundlerMinifier" Version="3.2.449" />
     <PackageReference Include="CsvHelper" Version="33.1.0" />

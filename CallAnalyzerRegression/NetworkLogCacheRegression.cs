@@ -128,6 +128,7 @@ internal static class NetworkLogCacheRegression
             Check(!oversized.Hit, "Oversized page exceeded local cache size limit");
         }
         CheckJsonFallbackCalculations();
+        CheckWifiFields();
         Console.WriteLine("Network log cache: single build/write, version isolation, force refresh, expiry, invalidation, Redis fallback and JSON/calculation compatibility passed.");
     }
 
@@ -293,6 +294,83 @@ internal static class NetworkLogCacheRegression
             Check(row.dl_tpt == "0.00" && row.ul_tpt == "5.00" && row.rsrp == null && row.extra_json_data.Count == 0,
                 "Empty/malformed JSON changed fallback values");
         }
+    }
+
+    private static void CheckWifiFields()
+    {
+        const string scan = """SSID: "Airtel_Vinfocom", BSSID: 0e:36:23:c3:64:7a, capabilities: [WPA2-PSK-CCMP-128][RSN-PSK-CCMP-128][ESS], level: -35, frequency: 5240, timestamp: 5826658044, distance: ?(cm), distanceSd: ?(cm), passpoint: no, ChannelBandwidth: 3, centerFreq0: 5210, centerFreq1: 5250, standard: 11ax, 80211mcResponder: is not supported, 80211azNtbResponder: is not supported, TWT Responder: yes, Radio Chain Infos: [RadioChainInfo: id=0, level=-36, RadioChainInfo: id=1, level=-42], interface name: wlan0""";
+        var normalize = typeof(MapViewController).GetMethod("NormalizeNetworkLogRows", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var row = new MapViewController.NetworkLogCacheRow
+        {
+            connection_type = "wifi", primary_cell_info_1 = scan,
+            rssi = -50, level = 3, extra_json = """{"custom":"unchanged"}"""
+        };
+        normalize.Invoke(null, new object[] { new List<MapViewController.NetworkLogCacheRow> { row } });
+        Check(row.is_wifi && row.log_type == "wifi" && row.wifi_ssid == "Airtel_Vinfocom"
+            && row.wifi_bssid == "0e:36:23:c3:64:7a" && row.wifi_rssi_dbm == -35
+            && row.wifi_frequency_mhz == 5240 && row.wifi_timestamp == 5826658044L,
+            "Wi-Fi normalization must expose the source SSID, BSSID, signal, frequency and 64-bit timestamp");
+        Check(row.wifi_capabilities == "[WPA2-PSK-CCMP-128][RSN-PSK-CCMP-128][ESS]"
+            && row.wifi_distance == "?(cm)" && row.wifi_distance_sd == "?(cm)"
+            && row.wifi_passpoint == false && row.wifi_channel_bandwidth == 3
+            && row.wifi_center_freq0_mhz == 5210 && row.wifi_center_freq1_mhz == 5250
+            && row.wifi_standard == "11ax" && row.wifi_80211mc_responder == false
+            && row.wifi_80211az_ntb_responder == false && row.wifi_twt_responder == true
+            && row.wifi_interface_name == "wlan0", "All Wi-Fi scan details must retain their captured values");
+        Check(row.wifi_radio_chain_infos is { Count: 2 } chains
+            && chains[0].id == 0 && chains[0].level == -36 && chains[1].id == 1 && chains[1].level == -42,
+            "Radio-chain commas must not split the outer Wi-Fi fields");
+        Check(row.rssi == -50 && row.level == 3 && row.extra_json == """{"custom":"unchanged"}""",
+            "Wi-Fi extraction must not overwrite existing DB metrics or extra_json");
+        foreach (var json in new[] { JsonSerializer.Serialize(row), Newtonsoft.Json.JsonConvert.SerializeObject(row) })
+        {
+            using var response = JsonDocument.Parse(json);
+            Check(response.RootElement.EnumerateObject().Count(p => p.Name.StartsWith("wifi_", StringComparison.Ordinal)) == 18
+                && !response.RootElement.TryGetProperty("primary_cell_info_1", out _)
+                && !response.RootElement.TryGetProperty("extra_json_data", out _)
+                && !response.RootElement.GetProperty("wifi_passpoint").GetBoolean()
+                && response.RootElement.GetProperty("wifi_radio_chain_infos").GetArrayLength() == 2,
+                "Both JSON serializers must expose each Wi-Fi field once, including false booleans, without the raw diagnostic text");
+        }
+        var cached = JsonSerializer.Deserialize<MapViewController.NetworkLogCacheRow>(JsonSerializer.Serialize(row))!;
+        Check(cached.wifi_timestamp == 5826658044L && cached.wifi_radio_chain_infos?[1].level == -42
+            && cached.wifi_passpoint == false && cached.primary_cell_info_1 == "",
+            "Wi-Fi values must survive cache serialization even though raw diagnostic text is ignored");
+        var firstJson = JsonSerializer.Serialize(row);
+        normalize.Invoke(null, new object[] { new List<MapViewController.NetworkLogCacheRow> { row } });
+        Check(JsonSerializer.Serialize(row) == firstJson, "Repeated Wi-Fi normalization must be idempotent");
+
+        var quoted = new WifiNetworkLogFields();
+        WifiScanInfoParser.Apply(quoted, """SSID: "Office, \"Guest\": 5G", BSSID: aa:bb:cc:dd:ee:ff, Radio Chain Infos: [], interface name: wlan1""");
+        Check(quoted.wifi_ssid == "Office, \"Guest\": 5G" && quoted.wifi_bssid == "aa:bb:cc:dd:ee:ff"
+            && quoted.wifi_radio_chain_infos is { Count: 0 } && quoted.wifi_interface_name == "wlan1",
+            "Quoted SSIDs may contain commas, escaped quotes and colons; explicitly empty radio chains must remain empty");
+        var partial = new WifiNetworkLogFields();
+        WifiScanInfoParser.Apply(partial, "ssid: Bob's Office, FREQUENCY: NaN, timestamp: 999999999999999999999999, passpoint: unknown, ChannelBandwidth: invalid, interfaceName: wlan0");
+        Check(partial.wifi_ssid == "Bob's Office" && partial.wifi_frequency_mhz == null
+            && partial.wifi_timestamp == null && partial.wifi_passpoint == null
+            && partial.wifi_channel_bandwidth == null && partial.wifi_interface_name == "wlan0",
+            "Partial/case-insensitive scans and malformed numbers must be handled without fabricated zero/false values");
+        foreach (var json in new[] { JsonSerializer.Serialize(partial), Newtonsoft.Json.JsonConvert.SerializeObject(partial) })
+        {
+            using var response = JsonDocument.Parse(json);
+            Check(!response.RootElement.TryGetProperty("wifi_frequency_mhz", out _)
+                && !response.RootElement.TryGetProperty("wifi_passpoint", out _), "Missing Wi-Fi values must be omitted");
+        }
+
+        const string cellular = "CellInfoNr:{ mRegistered=YES CellIdentityNr:{ mPci = 40 mNrArfcn = 528750 } CellSignalStrengthNr:{ ssRsrp = -95 ssRsrq = -12 ssSinr = 9 level = 1 } }";
+        foreach (var connectionType in new[] { "network", "wifi" })
+        {
+            var cell = new MapViewController.NetworkLogCacheRow { connection_type = connectionType, primary_cell_info_1 = cellular };
+            normalize.Invoke(null, new object[] { new List<MapViewController.NetworkLogCacheRow> { cell } });
+            foreach (var json in new[] { JsonSerializer.Serialize(cell), Newtonsoft.Json.JsonConvert.SerializeObject(cell) })
+            {
+                using var response = JsonDocument.Parse(json);
+                Check(!response.RootElement.EnumerateObject().Any(p => p.Name.StartsWith("wifi_", StringComparison.Ordinal)),
+                    "Cellular diagnostics must not become Wi-Fi scan details, even inside a Wi-Fi session");
+            }
+        }
+        Console.WriteLine("Network log Wi-Fi: complete scan fields, quoted SSIDs, radio chains, unknown values, cellular exclusion and cache/JSON compatibility passed.");
     }
 
     private static void Check(bool condition, string message)

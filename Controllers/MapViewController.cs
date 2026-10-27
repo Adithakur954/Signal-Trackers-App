@@ -73,6 +73,7 @@ namespace SignalTracker.Controllers
             "networklog:v34:*",
             "networklog:v35:*",
             "networklog:v37:*",
+            "networklog:v38:*",
             "latlon:dist:*",
             "n78_simple_kpi:*",
             "n78_neighbours:*",
@@ -7008,7 +7009,7 @@ private async Task<NetworkLogFullResponse> BuildNetworkLogPageCacheAsync(
             connString, whereClause, dataVersion,
             parameters = parameters.OrderBy(pair => pair.Key, StringComparer.Ordinal)
         });
-        var summaryCacheKey = "networklog:v37:summary:" +
+        var summaryCacheKey = "networklog:v38:summary:" +
             Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(summaryIdentity)));
         var cachedSummary = await NetworkLogSummaries.GetOrCreateAsync(summaryCacheKey, _redis, async () =>
         {
@@ -7899,7 +7900,7 @@ private string BuildNetworkLogCacheKey(
         : "no_project";
     string versionKey = NormalizeCacheKeyPart(dataVersion);
 
-    return $"networklog:v37:{GetProjectListCacheScope()}:{sortedSessionIds}:{providerKey}:{networkTypeKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
+    return $"networklog:v38:{GetProjectListCacheScope()}:{sortedSessionIds}:{providerKey}:{networkTypeKey}:{fromKey}:{toKey}:{projectKey}:{versionKey}";
 }
 
 private static string CleanProviderDisplayName(string value)
@@ -7928,6 +7929,7 @@ private static void NormalizeNetworkLogRows(List<NetworkLogCacheRow> rows)
         row.networkType = row.technology;
         row.is_wifi = string.Equals(row.connection_type, "wifi", StringComparison.OrdinalIgnoreCase);
         row.log_type = row.is_wifi ? "wifi" : "network";
+        if (row.is_wifi) WifiScanInfoParser.Apply(row, row.primary_cell_info_1);
     }
 }
 
@@ -8769,7 +8771,7 @@ private sealed class HandoverPrimaryCandidate
     public double? lon { get; set; }
 }
 
-public class NetworkLogCacheRow
+public class NetworkLogCacheRow : WifiNetworkLogFields
 {
     public int id { get; set; }
     public int session_id { get; set; }

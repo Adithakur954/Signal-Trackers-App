@@ -4,6 +4,18 @@ using CsvHelper;
 using CsvHelper.Configuration;
 using SignalTracker.Controllers;
 
+if (args.FirstOrDefault() == "--rf-log-integration")
+{
+    await RfLogIntegrationRegression.RunAsync();
+    return;
+}
+
+if (args.FirstOrDefault() == "--rf-log-email-db")
+{
+    await RfLogEmailRegression.RunDatabaseAsync(args.ElementAtOrDefault(1));
+    return;
+}
+
 if (args.FirstOrDefault() == "--network-log-cache")
 {
     await NetworkLogCacheRegression.RunAsync();

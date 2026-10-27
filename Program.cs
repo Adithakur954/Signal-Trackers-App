@@ -240,7 +240,10 @@ internal class Program
 
     private static void Main(string[] args)
     {
-        var builder = WebApplication.CreateBuilder(args);
+        var rfDatabaseCheck = args.Contains("--rf-log-db-check", StringComparer.Ordinal);
+        var rfDatabaseMigrate = args.Contains("--rf-log-db-migrate", StringComparer.Ordinal);
+        var rfStorageCheck = args.Contains("--rf-log-storage-check", StringComparer.Ordinal);
+        var builder = WebApplication.CreateBuilder(args.Where(arg => arg != "--rf-log-db-check" && arg != "--rf-log-db-migrate" && arg != "--rf-log-storage-check").ToArray());
 
         if (builder.Environment.IsDevelopment())
         {
@@ -252,6 +255,18 @@ internal class Program
                 "secrets.json");
 
             builder.Configuration.AddJsonFile(userSecretsPath, optional: true, reloadOnChange: true);
+        }
+
+        if (rfDatabaseCheck || rfDatabaseMigrate)
+        {
+            Environment.ExitCode = RfLogDatabaseSetup.RunAsync(builder.Configuration, rfDatabaseMigrate).GetAwaiter().GetResult();
+            return;
+        }
+
+        if (rfStorageCheck)
+        {
+            Environment.ExitCode = RfLogStorageCheck.RunAsync(builder.Configuration).GetAwaiter().GetResult();
+            return;
         }
 
      
@@ -268,6 +283,26 @@ internal class Program
         builder.Services.AddScoped<IOtpService, OtpService>();
         builder.Services.AddScoped<IUserDeletionService, UserDeletionService>();
         builder.Services.AddHttpClient<ISmsService, SmsService>();
+        builder.Services.Configure<RfLogIntegrationOptions>(builder.Configuration.GetSection(RfLogIntegrationOptions.Section));
+        builder.Services.AddSingleton<IRfLogStorage, RfLogS3Storage>();
+        builder.Services.AddScoped<IRfLogUploadStore, RfLogUploadStore>();
+        builder.Services.AddScoped<RfLogIntegrationService>();
+        builder.Services.AddScoped<SignalTracker.Controllers.RfLogErrorFilter>();
+        builder.Services.PostConfigure<RfLogIntegrationOptions>(options =>
+        {
+            if (string.IsNullOrWhiteSpace(options.AccessKey)) options.AccessKey = Environment.GetEnvironmentVariable("AWS_ACCESS_KEY_ID") ?? "";
+            if (string.IsNullOrWhiteSpace(options.SecretKey)) options.SecretKey = Environment.GetEnvironmentVariable("AWS_SECRET_ACCESS_KEY") ?? "";
+        });
+        builder.Services.AddHttpClient("RfLogWebhook", client => client.Timeout = TimeSpan.FromSeconds(30))
+            .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
+        builder.Services.AddHostedService<RfLogNotificationWorker>();
+        builder.Services.AddScoped<IRfLogReportGenerator, RfLogPdfGenerator>();
+        builder.Services.AddScoped<RfLogReportProcessor>();
+        builder.Services.AddHostedService<RfLogReportWorker>();
+        builder.Services.AddScoped<IRfLogEmailStore, RfLogEmailStore>();
+        builder.Services.AddScoped<IRfLogEmailSender, RfLogSmtpSender>();
+        builder.Services.AddScoped<RfLogReportEmailProcessor>();
+        builder.Services.AddHostedService<RfLogReportEmailWorker>();
         builder.Services.AddSingleton<NetworkLogRealtimeNotifier>();
         builder.Services.AddHostedService<NetworkLogChangeWatcherService>();
 

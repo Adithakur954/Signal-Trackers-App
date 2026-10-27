@@ -1,0 +1,134 @@
+@baseUrl = https://YOUR-DEPLOYED-BACKEND
+@clientId = drive-app
+@uploaderKey = REPLACE_SECURELY
+@reportingKey = REPLACE_SECURELY
+@uploadId = 7d8d4442-21b3-4a60-a3dc-b7b96c9f062c
+@leaseToken = REPLACE_FROM_CLAIM_RESPONSE
+@region = IN
+@authCookie = REPLACE_WITH_EXISTING_LOGIN_AUTH_COOKIE
+@csrfToken = REPLACE_WITH_CSRF_COOKIE_VALUE
+@recipientId = REPLACE_FROM_RECIPIENT_REGISTRATION
+@deliveryId = REPLACE_FROM_EMAIL_DELIVERIES
+
+### Company admin: register report recipients BEFORE registering the ZIP upload.
+# Use an existing company admin login cookie (role 2 or 3). Scope comes from that login.
+POST {{baseUrl}}/api/rf-logs/recipients
+Cookie: st.auth={{authCookie}}; st.csrf={{csrfToken}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: application/json
+
+{"email":"rf-team@example.com","name":"RF reporting team"}
+
+### Company admin: list separate report subscriptions.
+GET {{baseUrl}}/api/rf-logs/recipients
+Cookie: st.auth={{authCookie}}; st.csrf={{csrfToken}}
+
+### Company admin: inspect email delivery status independently of report generation.
+GET {{baseUrl}}/api/rf-logs/email-deliveries?uploadId={{uploadId}}
+Cookie: st.auth={{authCookie}}; st.csrf={{csrfToken}}
+
+### Company admin: retry a dead-letter email without regenerating the PDF.
+POST {{baseUrl}}/api/rf-logs/email-deliveries/{{deliveryId}}/retry
+Cookie: st.auth={{authCookie}}; st.csrf={{csrfToken}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+### Company admin: unsubscribe and cancel queued emails.
+DELETE {{baseUrl}}/api/rf-logs/recipients/{{recipientId}}
+Cookie: st.auth={{authCookie}}; st.csrf={{csrfToken}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+### 1. Existing logged-in app requests a private upload URL. Use REAL session/project IDs.
+# Login remains POST /api/auth/login; reuse its cookies. User/company come from the login.
+POST {{baseUrl}}/api/rf-logs/uploads
+Cookie: st.auth={{authCookie}}; st.csrf={{csrfToken}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: application/json
+
+{
+  "uploadId": "{{uploadId}}",
+  "fileName": "drive-test.zip",
+  "fileSizeBytes": 524293392,
+  "sessionId": 4266,
+  "subSessionId": "20",
+  "projectId": 123
+}
+
+### 2. PUT ZIP bytes to uploadUrl from response (outside this backend).
+# PUT <uploadUrl>
+# Content-Type: application/zip
+# Body: raw binary ZIP, not multipart/form-data. Do not attach API-key headers.
+
+### 3. Call only after the PUT succeeds. Retries use the SAME uploadId.
+POST {{baseUrl}}/api/rf-logs/uploads/{{uploadId}}/complete
+Cookie: st.auth={{authCookie}}; st.csrf={{csrfToken}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+### 4. Uploader can query the accepted event/report status.
+GET {{baseUrl}}/api/rf-logs/uploads/{{uploadId}}
+Cookie: st.auth={{authCookie}}; st.csrf={{csrfToken}}
+
+### Optional: trusted server-to-server uploader (not mobile/browser). Company-scoped key.
+POST {{baseUrl}}/api/rf-logs/uploads
+X-RF-Client-Id: {{clientId}}
+X-RF-Api-Key: {{uploaderKey}}
+Content-Type: application/json
+
+{"uploadId":"{{uploadId}}","fileName":"drive.zip","fileSizeBytes":100,"sessionId":4266,"userId":456}
+
+### Reporting service: poll when an incoming webhook receiver is not configured.
+# For an external report engine, set AutomaticReportsEnabled=false; otherwise the built-in PDF worker consumes jobs.
+GET {{baseUrl}}/api/rf-logs/events?limit=25
+X-RF-Api-Key: {{reportingKey}}
+X-RF-Region: {{region}}
+
+### Reporting service: claim BEFORE generating a report.
+POST {{baseUrl}}/api/rf-logs/events/{{uploadId}}/claim
+X-RF-Api-Key: {{reportingKey}}
+X-RF-Region: {{region}}
+
+### Reporting service: get a fresh, short-lived download URL.
+GET {{baseUrl}}/api/rf-logs/events/{{uploadId}}/download
+X-RF-Api-Key: {{reportingKey}}
+X-RF-Region: {{region}}
+
+### Renew lease every <15 minutes during long jobs (same endpoint accepts completed/failed).
+POST {{baseUrl}}/api/rf-logs/events/{{uploadId}}/status
+X-RF-Api-Key: {{reportingKey}}
+X-RF-Region: {{region}}
+X-RF-Lease-Token: {{leaseToken}}
+Content-Type: application/json
+
+{"status":"processing"}
+
+### Record success. reportReference is an identifier/path, not a server-fetched URL.
+POST {{baseUrl}}/api/rf-logs/events/{{uploadId}}/status
+X-RF-Api-Key: {{reportingKey}}
+X-RF-Region: {{region}}
+X-RF-Lease-Token: {{leaseToken}}
+Content-Type: application/json
+
+{"status":"completed","reportReference":"reports/7d8d4442-21b3-4a60-a3dc-b7b96c9f062c.pdf"}
+
+### Delivery diagnostics.
+GET {{baseUrl}}/api/rf-logs/events/{{uploadId}}
+X-RF-Api-Key: {{reportingKey}}
+X-RF-Region: {{region}}
+
+### Re-deliver an upload notification (also works after automatic report completion).
+POST {{baseUrl}}/api/rf-logs/events/{{uploadId}}/notification-retry
+X-RF-Api-Key: {{reportingKey}}
+X-RF-Region: {{region}}
+
+### Logged-in uploader: download a completed automatic PDF.
+GET {{baseUrl}}/api/rf-logs/uploads/{{uploadId}}/report
+Cookie: st.auth={{authCookie}}; st.csrf={{csrfToken}}
+
+### Logged-in uploader: requeue a failed report.
+POST {{baseUrl}}/api/rf-logs/uploads/{{uploadId}}/report-retry
+Cookie: st.auth={{authCookie}}; st.csrf={{csrfToken}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+### Reporting service: download the completed automatic PDF.
+GET {{baseUrl}}/api/rf-logs/events/{{uploadId}}/report
+X-RF-Api-Key: {{reportingKey}}
+X-RF-Region: {{region}}
