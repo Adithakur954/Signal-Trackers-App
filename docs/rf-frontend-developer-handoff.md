@@ -6,7 +6,7 @@ Updated: 27 October 2026. Routes verified against backend source; production dep
 
 The existing frontend `.env.production` currently sets `VITE_CSHARP_API_URL=https://s-traccceer.vinfocom.co.in`. Use that backend origin only after deployment is confirmed. The existing API client in `src/api/apiService.js` already uses this setting and `withCredentials: true`; reuse its login, cookies and CSRF handling.
 
-For local testing, `rf-client-integration.http` defaults to `http://localhost:5224`; use that running backend rather than the production origin. For a locally running frontend, check its resolved `VITE_CSHARP_API_URL` as well: the browser page being on localhost does not itself select a local API. Local Development user-secrets do not configure a deployed server.
+The RF request examples use `https://s-traccceer.vinfocom.co.in` as the deployed backend origin. Confirm the frontend's resolved `VITE_CSHARP_API_URL` matches it and use that same origin for login and RF calls. Development user-secrets do not configure the deployed server.
 
 Existing login is `POST /api/auth/login` with `email`, `password`, `country_code` (`IN` / `TW`). The successful login's resolved `country` / `source_db` selects the region. Backend derives company/user from verified claims. Do not send a company ID or an RF service key to choose another company/region.
 

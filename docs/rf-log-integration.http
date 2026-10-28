@@ -1,4 +1,4 @@
-@baseUrl = https://YOUR-DEPLOYED-BACKEND
+@baseUrl = https://s-traccceer.vinfocom.co.in
 @clientId = drive-app
 @uploaderKey = REPLACE_SECURELY
 @reportingKey = REPLACE_SECURELY

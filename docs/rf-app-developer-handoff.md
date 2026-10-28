@@ -18,7 +18,7 @@ BASE_URL=https://s-traccceer.vinfocom.co.in
 
 Use the backend HTTPS origin that handles the existing app login. Confirm deployment of these routes before testing; this document does not confirm that the current production server has this release. The Ace Cloud storage endpoint is a different origin; use only the signed URL returned by the backend for ZIP upload.
 
-For this workspace's local testing, `rf-client-integration.http` defaults to `http://localhost:5224`. Start the backend with its Development launch profile (`dotnet run --launch-profile http`) so local user-secrets load. To test production, explicitly change the request file's `baseUrl` to the verified deployed origin. A local frontend page can still call production if its API base URL points there.
+Both `rf-client-integration.http` and `rf-log-integration.http` use `https://s-traccceer.vinfocom.co.in` as `baseUrl`. Use this same deployed origin for login and RF requests. Development user-secrets do not configure the deployed server; its RF settings and updated release must be installed there.
 
 Existing login:
 

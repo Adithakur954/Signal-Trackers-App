@@ -1,7 +1,5 @@
-# LOCAL testing: the running backend uses this port and Development user-secrets.
-@baseUrl = http://localhost:5224
-# For deployed testing, replace baseUrl with the verified production backend origin:
-# https://s-traccceer.vinfocom.co.in
+# Deployed backend. Its RF storage configuration and current release must be installed.
+@baseUrl = https://s-traccceer.vinfocom.co.in
 @appEmail = REPLACE_WITH_APP_USER_EMAIL
 @appPassword = REPLACE_PRIVATELY
 @region = IN
