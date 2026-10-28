@@ -67,6 +67,30 @@ public sealed class RfLogIntegrationService(IRfLogUploadStore store, IRfLogStora
     public Task<RfLogUpload> CompleteAsync(string clientId, string id, CancellationToken ct) =>
         CompleteAsync(ConfiguredActor(clientId), id, ct);
 
+    public async Task<RfLogUpload> UploadAsync(RfLogActor actor, RfLogUploadRequest metadata, Stream zip, CancellationToken ct)
+    {
+        var upload = await RegisterAsync(actor, metadata, ct);
+        if (upload.Status != "awaiting_upload") return upload;
+        // IFormFile is buffered by ASP.NET to a seekable stream, spilling large files
+        // to disk rather than allocating a ZIP-sized byte array.
+        if (!zip.CanSeek || zip.Length != metadata.FileSizeBytes)
+            throw new RfLogRequestException(400, "A complete ZIP file is required.");
+        var signature = new byte[4];
+        zip.Position = 0;
+        await zip.ReadExactlyAsync(signature, ct);
+        if (signature[0] != 0x50 || signature[1] != 0x4b
+            || !((signature[2] == 3 && signature[3] == 4) || (signature[2] == 5 && signature[3] == 6)))
+            throw new RfLogRequestException(400, "The file must have a ZIP signature.");
+        zip.Position = 0;
+        // Each request writes its own private immutable key. Concurrent retries
+        // cannot overwrite the input selected by the database's completion winner.
+        var key = $"rf-logs/ready/{upload.Region}/{upload.CompanyId}/{upload.Id}/{Guid.NewGuid():N}.zip";
+        await storage.UploadZipAsync(key, zip, ct);
+        var file = await storage.VerifyZipAsync(key, metadata.FileSizeBytes, ct);
+        await store.CompleteAsync(upload.Id, upload.Region, key, file, ct);
+        return await UploaderEventAsync(actor, upload.Id, ct);
+    }
+
     public async Task<RfLogUpload> CompleteAsync(RfLogActor actor, string id, CancellationToken ct)
     {
         var upload = await UploaderEventAsync(actor, id, ct);

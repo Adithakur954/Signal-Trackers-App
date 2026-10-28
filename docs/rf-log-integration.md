@@ -10,6 +10,7 @@ Use the deployed backend's HTTPS origin as `BASE_URL`. These routes are source-c
 
 | Method | Route | Caller | Purpose |
 | --- | --- | --- | --- |
+| POST | `/api/rf-logs/upload` | Logged-in app | One multipart call: upload final ZIP, verify and queue report/email |
 | POST | `/api/rf-logs/uploads` | Logged-in app | Register ZIP and obtain presigned PUT URL |
 | POST | `/api/rf-logs/uploads/{uploadId}/complete` | Same logged-in user | Verify uploaded ZIP and publish one event |
 | GET | `/api/rf-logs/uploads/{uploadId}` | Same logged-in user | Upload/report status |
@@ -29,6 +30,8 @@ Use the deployed backend's HTTPS origin as `BASE_URL`. These routes are source-c
 | POST | `/api/rf-logs/events/{eventId}/notification-retry` | Reporting operator | Retry the upload-complete notification |
 
 The upload ID is also the reporting event ID within its region. The globally scoped deduplication key is `eventKey` (`IN:<UUID>` or `TW:<UUID>`). Generate a UUID once per ZIP on the app and save it until completion is acknowledged. Keep the same ID and metadata across retries; new UUIDs intentionally create new jobs.
+
+The preferred one-call app endpoint is **POST `/api/rf-logs/upload`**, added 28 October 2026. Send multipart `file`, `uploadId`, `sessionId`, optional `subSessionId` / `projectId`, with existing login cookies/CSRF. The backend registers the ZIP, writes a unique private ready-object key, verifies it and atomically publishes completion; background PDF/email workers handle the rest. Filename/size come from the file. Retries after acceptance return the existing event without another object upload. Existing `Security:MaxUploadBytes`, multipart, IIS/proxy and RF ZIP limits apply (multipart overhead counts toward the HTTP cap). The default code HTTP cap is 100 MiB, configurable up to 500 MiB. See [single API contract](rf-app-single-api.md). The existing direct-to-S3 flow is an alternative, not a requirement for this route.
 
 ## Authentication and company ownership
 
@@ -232,3 +235,5 @@ dotnet CallAnalyzerRegression/buildcheck_rf_logs/CallAnalyzerRegression.dll --rf
 Regression tests use in-memory ownership/event/storage/mail fakes plus real local HTTP routes, AWS SDK presigning, the actual existing PDF generator and a loopback-only SMTP capture server. They cover credential separation, login-derived user/company, CSRF, scope rejection, repeated registration/completion, immutable snapshot selection, regional isolation, private download authorization, a ZIP-to-PDF worker round trip, admin-only recipient registration, PDF MIME attachments, recipient-specific retries and unsubscribe cancellation. They do not send external emails or replace a live Ace Cloud/SMTP round trip and the final deployed acceptance test with real login/session data.
 
 The explicit `--rf-log-email-db` regression mode exercises real MySQL registration, leases and retries using temporary UUID fixtures, and removes its own rows. It refuses an enabled integration or existing email/subscription data. It is for isolated setup validation, not a command to run against an active reporting system.
+
+On 28 October 2026, the single-call multipart route passed real loopback HTTP checks for authentication/CSRF, upload failure recovery, accepted-event retry deduplication, metadata conflicts, invalid ZIP signature, configured body-size rejection and company/IN/TW scope. The full existing RF/PDF/email suite also passed without external email sends. A Development Ace Cloud storage check exercised the new server ZIP upload using an actual IFormFile stream, verified content by GET and removed all temporary check objects; existing presigned/copy/PDF operations also passed. This does not establish production deployment or phone-to-inbox acceptance.

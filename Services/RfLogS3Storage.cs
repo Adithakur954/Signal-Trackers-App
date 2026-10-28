@@ -14,6 +14,7 @@ public interface IRfLogStorage
     Task CopyAsync(string source, string target, string etag, CancellationToken ct);
     Task DownloadToFileAsync(string key, string etag, long size, string path, CancellationToken ct);
     Task UploadReportAsync(string key, byte[] pdf, CancellationToken ct);
+    Task UploadZipAsync(string key, Stream zip, CancellationToken ct);
     Task<byte[]> ReadReportAsync(string key, long maxBytes, CancellationToken ct);
 }
 
@@ -101,6 +102,16 @@ public sealed class RfLogS3Storage(IOptions<RfLogIntegrationOptions> configurati
         {
             BucketName = Options.Bucket, Key = key, InputStream = stream, ContentType = "application/pdf",
             UseChunkEncoding = false
+        }, ct);
+    }
+
+    public async Task UploadZipAsync(string key, Stream zip, CancellationToken ct)
+    {
+        using var client = CreateClient();
+        await client.PutObjectAsync(new PutObjectRequest
+        {
+            BucketName = Options.Bucket, Key = key, InputStream = zip, ContentType = "application/zip",
+            UseChunkEncoding = false, AutoCloseStream = false
         }, ct);
     }
 

@@ -1,12 +1,12 @@
 # RF automatic reporting: app and frontend developer handoff
 
-Updated against the current backend source on 27 October 2026, including automatic company email. All paths below are relative to `BASE_URL`, the HTTPS origin of the backend that handles the existing login. The deployed origin and release availability must be confirmed before treating these as live endpoints. The Ace Cloud S3 endpoint is not `BASE_URL`.
+Updated against the current backend source on 28 October 2026, including automatic company email and the single-call app upload endpoint. All paths below are relative to `BASE_URL`, the HTTPS origin of the backend that handles the existing login. The deployed origin and release availability must be confirmed before treating these as live endpoints. The Ace Cloud S3 endpoint is not `BASE_URL`.
 
 Role-specific handoffs: [app developer](rf-app-developer-handoff.md) and [frontend developer](rf-frontend-developer-handoff.md). The checked frontend `.env.production` configures `https://s-traccceer.vinfocom.co.in` as the backend origin; this is configuration evidence, not confirmation that the new release is deployed.
 
 ## 1. Implemented behavior and verification
 
-The app registers the final drive ZIP, uploads its raw bytes directly to a private Ace Cloud S3 URL, then confirms completion with the backend. The backend verifies the uploaded object, creates a private snapshot, queues report generation in the correct regional database, uses the existing ZIP-to-PDF engine, saves the PDF privately and queues email delivery to the registered company profile email (`tbl_company.email`) plus optional additional report recipients. The app must automate this upload sequence after drive completion. See [automatic drive report workflow](rf-drive-auto-report.md).
+The app sends its final drive ZIP with one multipart call to **POST `/api/rf-logs/upload`**. The backend registers/uploads/verifies the ZIP, records completion in the regional DB and queues the existing PDF/email pipeline. The PDF goes to the registered company profile email (`tbl_company.email`) plus eligible optional report recipients. See [forwardable single API contract](rf-app-single-api.md). The existing register -> signed S3 PUT -> complete flow remains an optional direct-to-S3 alternative.
 
 | Item | Current state |
 | --- | --- |
@@ -50,17 +50,18 @@ Mobile/browser clients receive temporary signed URLs. Keep S3 access keys, SMTP 
 
 ## 3. App developer: upload and report endpoints
 
-All five endpoints below require the existing logged-in user. Status, completion, report download and report retry are restricted to the same uploader identity that registered the upload, in the same company and region. A company-admin role alone does not override this uploader restriction.
+All six endpoints below require the existing logged-in user. Status, completion, report download and report retry are restricted to the same uploader identity that registered the upload, in the same company and region. A company-admin role alone does not override this uploader restriction.
 
 | Method | Endpoint | Request | Success |
 | --- | --- | --- | --- |
+| POST | `/api/rf-logs/upload` | Multipart file/uploadId/sessionId; optional subSessionId/projectId | 200: accepted event; PDF/email continue in background |
 | POST | `/api/rf-logs/uploads` | Registration JSON below | 200: upload registration and signed PUT URL |
 | POST | `/api/rf-logs/uploads/{uploadId}/complete` | Empty body, after successful S3 PUT | 200: event/status JSON |
 | GET | `/api/rf-logs/uploads/{uploadId}` | No body | 200: event/status JSON |
 | GET | `/api/rf-logs/uploads/{uploadId}/report` | No body | 200: signed PDF download information; 409 if unavailable |
 | POST | `/api/rf-logs/uploads/{uploadId}/report-retry` | Empty body | 200: updated event; only a failed report can be requeued |
 
-### A. Register the ZIP
+### Optional direct-to-S3 flow A. Register the ZIP
 
 Generate one UUID per ZIP and persist it across retries, app restarts and offline recovery. Replace all sample IDs and the byte length below with actual values.
 

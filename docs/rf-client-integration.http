@@ -18,7 +18,30 @@ Content-Type: application/json
 
 {"email":"{{appEmail}}","password":"{{appPassword}}","country_code":"{{region}}"}
 
-### APP 1: after drive ends, register its final ZIP. Replace IDs and exact byte size.
+### APP: ONE-CALL upload after drive ends (deploy this backend release first).
+# Replace the final file path and IDs. The client must generate a multipart boundary.
+# This alternative performs registration + S3 upload + completion on the backend.
+POST {{baseUrl}}/api/rf-logs/upload
+Cookie: st.auth={{authCookie}}; st.csrf={{csrfToken}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: multipart/form-data; boundary=RfZipBoundary
+
+--RfZipBoundary
+Content-Disposition: form-data; name="uploadId"
+
+{{uploadId}}
+--RfZipBoundary
+Content-Disposition: form-data; name="sessionId"
+
+4266
+--RfZipBoundary
+Content-Disposition: form-data; name="file"; filename="drive-test.zip"
+Content-Type: application/zip
+
+< C:/REPLACE-WITH-YOUR-FILE/drive-test.zip
+--RfZipBoundary--
+
+### OPTIONAL DIRECT-TO-S3 FLOW 1: register ZIP instead of using the one-call route.
 POST {{baseUrl}}/api/rf-logs/uploads
 Cookie: st.auth={{authCookie}}; st.csrf={{csrfToken}}
 X-CSRF-TOKEN: {{csrfToken}}

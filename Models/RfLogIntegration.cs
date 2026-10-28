@@ -105,6 +105,16 @@ public sealed record RfLogUploadRequest
     [Range(1, int.MaxValue)] public int? UserId { get; init; }
 }
 
+public sealed class RfLogDirectUploadRequest
+{
+    public Guid UploadId { get; set; }
+    [Range(1, int.MaxValue)] public int SessionId { get; set; }
+    [Required] public IFormFile File { get; set; } = null!;
+    [StringLength(100)] public string? SubSessionId { get; set; }
+    [Range(1, int.MaxValue)] public int? ProjectId { get; set; }
+    [Range(1, int.MaxValue)] public int? UserId { get; set; }
+}
+
 public sealed record RfLogReportResult
 {
     [Required, RegularExpression("^(processing|completed|failed)$")] public string Status { get; init; } = "";

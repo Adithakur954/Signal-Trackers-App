@@ -28,7 +28,7 @@ public static class RfLogStorageCheck
         using var client = storage.CreateClient();
         using var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(60) };
         var prefix = $"rf-logs/checks/{Guid.NewGuid():N}";
-        var keys = new[] { $"{prefix}/input.zip", $"{prefix}/snapshot.zip", $"{prefix}/report.pdf" };
+        var keys = new[] { $"{prefix}/input.zip", $"{prefix}/snapshot.zip", $"{prefix}/report.pdf", $"{prefix}/direct.zip" };
         var possibleObjects = new HashSet<string>();
         var failed = false;
         try
@@ -40,6 +40,15 @@ public static class RfLogStorageCheck
                 writer.Write("SignalTracker storage deployment check");
             }
             var bytes = buffer.ToArray();
+            possibleObjects.Add(keys[3]);
+            await using (var directBuffer = new MemoryStream(bytes, writable: false))
+            await using (var directStream = new FormFile(directBuffer, 0, bytes.Length, "file", "check.zip").OpenReadStream())
+                await storage.UploadZipAsync(keys[3], directStream, ct);
+            await storage.VerifyZipAsync(keys[3], bytes.Length, ct);
+            using (var directGet = await http.GetAsync(await storage.DownloadUrlAsync(keys[3]), ct))
+                if (!directGet.IsSuccessStatusCode || !(await directGet.Content.ReadAsByteArrayAsync(ct)).SequenceEqual(bytes))
+                    throw new InvalidOperationException("Server-uploaded ZIP did not match the multipart file bytes.");
+            Console.WriteLine("RF storage: server-side ZIP stream PUT, verification and GET passed.");
             using var body = new ByteArrayContent(bytes);
             body.Headers.ContentType = new MediaTypeHeaderValue("application/zip");
             possibleObjects.Add(keys[0]);

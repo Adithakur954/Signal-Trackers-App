@@ -119,7 +119,7 @@ Use the same uploader identity/company/region that registered the upload. A comp
 
 `reportStatus` values: awaiting_upload, ready, processing, completed, failed. Poll reasonably (e.g. 5-10 seconds while active, with backoff); enable Download only when completed. The report endpoint returns `eventId`, `region`, `contentType`, `downloadUrl`, `expiresAtUtc`. Open/download the signed URL with no backend cookies or auth headers. It expires after 10 minutes by default; fetch a fresh URL when needed. `reportReference` is a private object key, not a public download URL.
 
-If the browser itself uploads a ZIP, follow the app handoff's register -> S3 raw PUT -> complete sequence, with an unauthenticated S3 HTTP client and configured bucket CORS.
+If the browser itself uploads a ZIP, it may use POST `/api/rf-logs/upload` with multipart file/uploadId/sessionId and optional subSessionId/projectId. Backend handles storage/completion. Existing request size limits and login/CSRF apply. The app handoff also documents the optional register -> S3 raw PUT -> complete alternative, which uses an unauthenticated S3 HTTP client and configured bucket CORS.
 
 ## Wi-Fi details in existing GetNetworkLog
 

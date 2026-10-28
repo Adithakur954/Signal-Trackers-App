@@ -18,6 +18,21 @@ public sealed class RfLogIntegrationController(RfLogIntegrationService service, 
     private RfLogActor Actor => (RfLogActor)HttpContext.Items[RfLogApiKeyAttribute.ClientItem]!;
     private string ReportingRegion => (string)HttpContext.Items[RfLogApiKeyAttribute.RegionItem]!;
 
+    [HttpPost("upload"), RfLogApiKey, Consumes("multipart/form-data")]
+    [RequestSizeLimit(524_288_000), RfLogDirectUploadLimits]
+    public async Task<IActionResult> Upload([FromForm] RfLogDirectUploadRequest request, CancellationToken ct)
+    {
+        if (request.File.Length > options.Value.MaxZipBytes)
+            throw new RfLogRequestException(413, "ZIP exceeds the configured RF upload size limit.");
+        await using var zip = request.File.OpenReadStream();
+        return Ok(service.Event(await service.UploadAsync(Actor, new RfLogUploadRequest
+        {
+            UploadId = request.UploadId, SessionId = request.SessionId, FileName = request.File.FileName,
+            FileSizeBytes = request.File.Length, SubSessionId = request.SubSessionId,
+            ProjectId = request.ProjectId, UserId = request.UserId
+        }, zip, ct)));
+    }
+
     [HttpPost("uploads"), RfLogApiKey]
     public async Task<IActionResult> Create(RfLogUploadRequest request, CancellationToken ct)
     {
@@ -93,6 +108,29 @@ public sealed class RfLogIntegrationController(RfLogIntegrationService service, 
         await store.RetryNotificationAsync(id.ToString("D"), ReportingRegion, ct);
         return Ok(service.Event(await service.GetAsync(id.ToString("D"), ReportingRegion, ct)));
     }
+}
+
+// Runs before form model binding. Honor the existing configured HTTP body cap,
+// including multipart overhead, while overriding this controller's 16 KiB JSON cap.
+public sealed class RfLogDirectUploadLimitsAttribute : Attribute, IResourceFilter
+{
+    public void OnResourceExecuting(ResourceExecutingContext context)
+    {
+        var configured = context.HttpContext.RequestServices.GetRequiredService<IConfiguration>()
+            .GetValue<long?>("Security:MaxUploadBytes") ?? 104_857_600L;
+        var limit = configured is > 0 and <= 524_288_000L ? configured : 104_857_600L;
+        var feature = context.HttpContext.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpMaxRequestBodySizeFeature>();
+        if (feature is { IsReadOnly: false }) feature.MaxRequestBodySize = limit;
+        if (context.HttpContext.Request.ContentLength > limit)
+        {
+            // The oversized body is deliberately not read; do not reuse its HTTP/1
+            // connection while Kestrel closes/drains the rejected request.
+            if (context.HttpContext.Request.Protocol.StartsWith("HTTP/1.", StringComparison.Ordinal))
+                context.HttpContext.Response.Headers.Connection = "close";
+            context.Result = new ObjectResult(new { message = "Request exceeds Security:MaxUploadBytes, including multipart overhead." }) { StatusCode = 413 };
+        }
+    }
+    public void OnResourceExecuted(ResourceExecutedContext context) { }
 }
 
 public sealed class RfLogErrorFilter(ILogger<RfLogErrorFilter> logger) : IExceptionFilter

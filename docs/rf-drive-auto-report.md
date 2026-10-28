@@ -4,13 +4,15 @@ When a user finishes a drive, the app uploads the final RF log ZIP and notifies 
 
 ## App developer
 
-Using the existing authenticated user session, automate these steps after drive completion:
+Using the existing authenticated user session, call **POST `/api/rf-logs/upload`** after drive completion. Send multipart `file` (final ZIP), `uploadId` (stable UUID), `sessionId`, and optional `subSessionId` / `projectId`. The backend handles S3 upload and completion internally, then queues PDF/email processing. See [single API handoff](rf-app-single-api.md). Existing HTTP/multipart/IIS size limits apply.
+
+The optional direct-to-S3 alternative remains supported:
 
 1. `POST /api/rf-logs/uploads` with a stable UUID for the final ZIP, its filename/size and the real session ID (optional sub-session/project IDs).
 2. `PUT` the raw ZIP bytes to the response's signed `uploadUrl`, with `Content-Type: application/zip`.
 3. After successful PUT, `POST /api/rf-logs/uploads/{uploadId}/complete` with no body.
 
-Preserve the upload UUID and original metadata across retries. Registration and completion are idempotent; don't create a new UUID for a retry. Submit the final drive ZIP once, rather than registering multiple partial ZIPs for one report. Upload failures must not call complete until corrected.
+Use one approach per ZIP. Preserve the upload UUID and original metadata across retries; don't create a new UUID for a retry. Submit the final drive ZIP once, rather than registering multiple partial ZIPs for one report. In the optional direct-to-S3 approach, upload failures must not call complete until corrected.
 
 Optional progress: `GET /api/rf-logs/uploads/{uploadId}`. `reportStatus=completed` means PDF generation finished; email status is tracked separately. The app never needs SMTP credentials, a recipient address, S3 credentials or a report-generation API call. It must still implement this drive-end upload sequence; backend changes alone cannot trigger phone-side code.
 

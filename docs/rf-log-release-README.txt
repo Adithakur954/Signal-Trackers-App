@@ -44,10 +44,13 @@ rf-logs/checks/<random-id>/; allow DeleteObject on that check prefix.
    Alternatively, existing active m_email_setting settings in EACH DB are reused.
    The PDF is emailed as an attachment (default cap 20 MiB). See docs for delivery
    diagnostics, unsubscribe and per-recipient retries. No SMTP credentials are in this package.
-7. Give the app team these two endpoints on the deployed HTTPS origin:
-     POST /api/rf-logs/uploads
-     POST /api/rf-logs/uploads/{uploadId}/complete
-   Existing email login determines user/company/region. See docs for PUT sequence.
+7. Give the app team ONE endpoint on the deployed HTTPS origin:
+     POST /api/rf-logs/upload
+   Multipart form-data: file (ZIP), uploadId (UUID), sessionId; optional
+   subSessionId/projectId. Existing login/cookies and CSRF determine scope.
+   Backend handles S3 upload/verification/completion, then queues PDF/email.
+   See docs/rf-app-single-api.md. HTTP/multipart/IIS limits apply, including overhead.
+   The older /uploads -> signed S3 PUT -> /complete flow is still an alternative.
 8. Poll GET /api/rf-logs/uploads/{uploadId}; when reportStatus=completed, use
    GET /api/rf-logs/uploads/{uploadId}/report for a short-lived PDF download link.
 

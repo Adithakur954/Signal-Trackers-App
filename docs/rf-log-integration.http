@@ -39,7 +39,11 @@ DELETE {{baseUrl}}/api/rf-logs/recipients/{{recipientId}}
 Cookie: st.auth={{authCookie}}; st.csrf={{csrfToken}}
 X-CSRF-TOKEN: {{csrfToken}}
 
-### 1. Existing logged-in app requests a private upload URL. Use REAL session/project IDs.
+### One-call app route: POST /api/rf-logs/upload, multipart file/uploadId/sessionId.
+# See rf-client-integration.http for its complete request and rf-app-single-api.md for the contract.
+# Backend uploads to S3 and records completion; do not also run the flow below for that ZIP.
+
+### Optional direct-to-S3 flow 1. Existing logged-in app requests a private upload URL. Use REAL session/project IDs.
 # Login remains POST /api/auth/login; reuse its cookies. User/company come from the login.
 POST {{baseUrl}}/api/rf-logs/uploads
 Cookie: st.auth={{authCookie}}; st.csrf={{csrfToken}}

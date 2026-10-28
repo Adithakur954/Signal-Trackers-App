@@ -1,6 +1,12 @@
 # App developer handoff: automatic drive PDF and company email
 
-Updated: 27 October 2026. API contracts verified against this backend source. The production deployment and phone-side implementation still need acceptance testing.
+Updated: 28 October 2026. API contracts verified against this backend source. The production deployment and phone-side implementation still need acceptance testing.
+
+## Preferred app integration: one upload API
+
+Use **POST `/api/rf-logs/upload`** with multipart form-data: `file` (final ZIP), `uploadId` (stable UUID), `sessionId` (existing session), and optional `subSessionId` / `projectId`. Existing login cookies and required CSRF header apply. The backend handles S3 upload, verification, completion and automatic PDF/email queuing. No separate S3 PUT or `/complete` call is needed for this route. Full forwardable contract: [single API handoff](rf-app-single-api.md).
+
+This request goes through the backend and honors the existing configured HTTP/multipart/IIS size limits, including overhead. PDF/email generation stays asynchronous. The older direct-to-S3 option below remains supported for clients that prefer it.
 
 ## Connection and authentication
 
@@ -27,7 +33,7 @@ Content-Type: application/json
 
 Use `TW` for Taiwan. Use the successful login's resolved `country` / `source_db`. Preserve all login cookies in the app cookie jar, including `st.auth` and session cookies. Send `X-CSRF-TOKEN` matching `st.csrf` for authenticated backend POST requests when CSRF is enabled. Existing login determines user, company and region; omit `companyId`, destination email and credentials from RF upload requests. No separate RF API key is needed with a valid login.
 
-## Required drive-end sequence
+## Optional direct-to-S3 drive-end sequence
 
 When the drive ends, close/finish writing the final ZIP, persist a stable UUID and its metadata, then run these steps automatically. A user should not have to press Generate PDF or Send Email.
 

@@ -26,6 +26,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $sourceRoot 'docs/rf-log-integration.http') -Destination (Join-Path $releaseRoot 'docs')
     Copy-Item -LiteralPath (Join-Path $sourceRoot 'docs/rf-log-developer-handoff.md') -Destination (Join-Path $releaseRoot 'docs')
     Copy-Item -LiteralPath (Join-Path $sourceRoot 'docs/rf-app-developer-handoff.md') -Destination (Join-Path $releaseRoot 'docs')
+    Copy-Item -LiteralPath (Join-Path $sourceRoot 'docs/rf-app-single-api.md') -Destination (Join-Path $releaseRoot 'docs')
     Copy-Item -LiteralPath (Join-Path $sourceRoot 'docs/rf-frontend-developer-handoff.md') -Destination (Join-Path $releaseRoot 'docs')
     Copy-Item -LiteralPath (Join-Path $sourceRoot 'docs/rf-client-integration.http') -Destination (Join-Path $releaseRoot 'docs')
     Copy-Item -LiteralPath (Join-Path $sourceRoot 'docs/rf-drive-auto-report.md') -Destination (Join-Path $releaseRoot 'docs')

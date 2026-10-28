@@ -264,7 +264,8 @@ internal static class RfLogIntegrationRegression
     {
         var builder = WebApplication.CreateBuilder();
         builder.Configuration.Sources.Clear();
-        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?> { ["Security:RequireCsrfHeader"] = "true" });
+        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+            { ["Security:RequireCsrfHeader"] = "true", ["Security:MaxUploadBytes"] = "65536" });
         builder.Logging.ClearProviders();
         builder.WebHost.UseUrls("http://127.0.0.1:0");
         builder.Services.AddControllers().AddApplicationPart(typeof(RfLogIntegrationController).Assembly)
@@ -273,7 +274,8 @@ internal static class RfLogIntegrationRegression
         var httpStore = new MemoryStore();
         builder.Services.AddSingleton<IRfLogUploadStore>(httpStore);
         builder.Services.AddSingleton<IRfLogEmailStore>(new RfLogEmailRegression.MemoryEmailStore(httpStore, options));
-        builder.Services.AddSingleton<IRfLogStorage>(new FakeStorage());
+        var httpStorage = new FakeStorage();
+        builder.Services.AddSingleton<IRfLogStorage>(httpStorage);
         builder.Services.AddScoped<RfLogIntegrationService>();
         builder.Services.AddScoped<RfLogErrorFilter>();
         builder.Services.AddAuthentication("test").AddScheme<AuthenticationSchemeOptions, TestLoginHandler>("test", _ => { });
@@ -289,11 +291,60 @@ internal static class RfLogIntegrationRegression
         var metadata = new { uploadId = Guid.NewGuid(), fileName = "drive.zip", fileSizeBytes = 100, sessionId = 20, projectId = 30 };
         using var anonymous = await http.PostAsJsonAsync("/api/rf-logs/uploads", metadata);
         Check(anonymous.StatusCode == HttpStatusCode.Unauthorized, "HTTP upload fails closed without credentials");
+        var directId = Guid.NewGuid();
+        var directZip = new byte[20000];
+        "PK\x03\x04"u8.CopyTo(directZip);
+        MultipartFormDataContent DirectForm(Guid uuid, byte[]? bytes = null)
+        {
+            var form = new MultipartFormDataContent();
+            form.Add(new StringContent(uuid.ToString("D")), "uploadId");
+            form.Add(new StringContent("20"), "sessionId");
+            form.Add(new ByteArrayContent(bytes ?? directZip), "file", "drive.zip");
+            return form;
+        }
+        using (var form = DirectForm(directId))
+        using (var response = await http.PostAsync("/api/rf-logs/upload", form))
+            Check(response.StatusCode == HttpStatusCode.Unauthorized, "single-call ZIP upload requires authenticated identity");
         http.DefaultRequestHeaders.Add("X-Test-Login", "true");
         using var csrfDenied = await http.PostAsJsonAsync("/api/rf-logs/uploads", metadata);
         Check(csrfDenied.StatusCode == HttpStatusCode.BadRequest, "cookie-authenticated upload still requires CSRF protection");
+        using (var form = DirectForm(directId))
+        using (var response = await http.PostAsync("/api/rf-logs/upload", form))
+            Check(response.StatusCode == HttpStatusCode.BadRequest, "single-call ZIP upload requires CSRF with cookies");
         http.DefaultRequestHeaders.Add("Cookie", "st.csrf=test-csrf");
         http.DefaultRequestHeaders.Add("X-CSRF-TOKEN", "test-csrf");
+        httpStorage.FailZipUpload = true;
+        using (var form = DirectForm(directId))
+        using (var response = await http.PostAsync("/api/rf-logs/upload", form))
+            Check(response.StatusCode == HttpStatusCode.InternalServerError
+                && httpStore.Rows[("IN", directId.ToString("D"))].Status == "awaiting_upload", "failed single-call storage upload leaves a retryable record and never queues PDF/email");
+        httpStorage.FailZipUpload = false;
+        using (var form = DirectForm(directId))
+        using (var response = await http.PostAsync("/api/rf-logs/upload", form))
+        {
+            using var directResult = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            Check(response.IsSuccessStatusCode && directResult.RootElement.GetProperty("uploadStatus").GetString() == "completed"
+                && directResult.RootElement.GetProperty("reportStatus").GetString() == "ready"
+                && directResult.RootElement.GetProperty("userId").GetInt32() == 10,
+                "one multipart call above the JSON 16 KiB cap uploads ZIP and queues report with login identity");
+        }
+        using (var form = DirectForm(directId))
+        using (var response = await http.PostAsync("/api/rf-logs/upload", form))
+            Check(response.IsSuccessStatusCode && httpStorage.UploadedZips.Count == 1, "single-call retries return accepted event without uploading/regenerating again");
+        using (var form = DirectForm(directId, new byte[19999]))
+        using (var response = await http.PostAsync("/api/rf-logs/upload", form))
+            Check(response.StatusCode == HttpStatusCode.Conflict, "changed single-call metadata cannot reuse an accepted UUID");
+        using (var form = DirectForm(Guid.NewGuid(), "not-zip"u8.ToArray()))
+        using (var response = await http.PostAsync("/api/rf-logs/upload", form))
+            Check(response.StatusCode == HttpStatusCode.BadRequest && httpStorage.UploadedZips.Count == 1, "invalid ZIP signature is rejected before S3 upload");
+        using (var form = DirectForm(Guid.NewGuid(), new byte[70000]))
+        using (var response = await http.PostAsync("/api/rf-logs/upload", form))
+            Check(response.StatusCode == HttpStatusCode.RequestEntityTooLarge && httpStorage.UploadedZips.Count == 1, "single-call endpoint honors configured request body size before form binding");
+        httpStore.Owner = false;
+        using (var form = DirectForm(Guid.NewGuid()))
+        using (var response = await http.PostAsync("/api/rf-logs/upload", form))
+            Check(response.StatusCode == HttpStatusCode.Forbidden && httpStorage.UploadedZips.Count == 1, "single-call endpoint checks session/company ownership before S3 upload");
+        httpStore.Owner = true;
         using var created = await http.PostAsJsonAsync("/api/rf-logs/uploads", metadata);
         Check(created.IsSuccessStatusCode, "logged-in HTTP upload accepts metadata without user/company fields");
         using var json = JsonDocument.Parse(await created.Content.ReadAsStringAsync());
@@ -322,6 +373,15 @@ internal static class RfLogIntegrationRegression
         http.DefaultRequestHeaders.Add("X-Test-Region", "TW");
         http.DefaultRequestHeaders.Add("Cookie", "st.csrf=test-csrf");
         http.DefaultRequestHeaders.Add("X-CSRF-TOKEN", "test-csrf");
+        using (var form = DirectForm(directId))
+        using (var response = await http.PostAsync("/api/rf-logs/upload", form))
+        {
+            using var directTw = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            Check(response.IsSuccessStatusCode && directTw.RootElement.GetProperty("region").GetString() == "TW"
+                && httpStorage.UploadedZips.Count == 2
+                && httpStore.Rows[("IN", directId.ToString("D"))].ObjectKey != httpStore.Rows[("TW", directId.ToString("D"))].ObjectKey,
+                "same single-call UUID in Taiwan uses only Taiwan records/private ZIP namespace");
+        }
         // Reuse the same upload UUID: the Taiwan login must select a different DB.
         using var createdTw = await http.PostAsJsonAsync("/api/rf-logs/uploads", metadata);
         Check(createdTw.IsSuccessStatusCode, "Taiwan login registers independently from India");
@@ -354,6 +414,8 @@ internal static class RfLogIntegrationRegression
     {
         public byte[]? ZipContent;
         public Dictionary<string, byte[]> Reports { get; } = new();
+        public Dictionary<string, byte[]> UploadedZips { get; } = new();
+        public bool FailZipUpload;
         public bool FailVerification;
         public int Copies;
         public string? LastDownloadKey;
@@ -368,6 +430,13 @@ internal static class RfLogIntegrationRegression
         public Task DownloadToFileAsync(string key, string etag, long size, string path, CancellationToken ct) =>
             File.WriteAllBytesAsync(path, ZipContent ?? throw new InvalidDataException("Missing test ZIP"), ct);
         public Task UploadReportAsync(string key, byte[] pdf, CancellationToken ct) { Reports[key] = pdf; return Task.CompletedTask; }
+        public async Task UploadZipAsync(string key, Stream zip, CancellationToken ct)
+        {
+            if (FailZipUpload) throw new IOException("Simulated storage outage");
+            using var buffer = new MemoryStream();
+            await zip.CopyToAsync(buffer, ct);
+            UploadedZips[key] = buffer.ToArray();
+        }
         public Task<byte[]> ReadReportAsync(string key, long maxBytes, CancellationToken ct) => Task.FromResult(Reports[key]);
     }
 
