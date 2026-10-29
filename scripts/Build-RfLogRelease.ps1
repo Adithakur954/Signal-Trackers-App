@@ -20,6 +20,7 @@ try {
         New-Item -ItemType Directory -Path (Join-Path $releaseRoot $folder) -Force | Out-Null
     }
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Configure-RfLogIntegration.ps1') -Destination (Join-Path $releaseRoot 'scripts')
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Repair-RfLogStorage.ps1') -Destination (Join-Path $releaseRoot 'scripts')
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Configure-RfLogReportEmail.ps1') -Destination (Join-Path $releaseRoot 'scripts')
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Deploy-RfLogIntegration.ps1') -Destination (Join-Path $releaseRoot 'scripts')
     Copy-Item -LiteralPath (Join-Path $sourceRoot 'docs/rf-log-integration.md') -Destination (Join-Path $releaseRoot 'docs')

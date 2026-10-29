@@ -1,5 +1,15 @@
 # RF ZIP upload and reporting integration (Ace Cloud S3)
 
+## Repair upload HTTP 503: storage integration not configured
+
+This response is produced before ZIP upload when `RfLogIntegrationOptions.IsConfigured` is false. On the IIS server, run administrator PowerShell against the actual published API folder:
+
+```powershell
+.\scripts\Repair-RfLogStorage.ps1 -BackendPath 'C:\inetpub\wwwroot\Backend'
+```
+
+Replace the example folder with the site's physical API directory. The script enables RF storage, sets the configured Ace Cloud endpoint/bucket/signing region, and uses existing IIS/process credentials or prompts privately for a matching S3 key pair. Use `-ReplaceCredentials` to replace an invalid existing pair. Endpoint, bucket and region can be overridden for another storage deployment. It preserves existing reporting/uploader keys and SMTP settings. It runs the deployed storage round-trip check before changing live settings, creates an administrator-only configuration backup, and saves `web.config` to trigger an IIS reload. The check writes disposable S3 objects and needs DeleteObject on `rf-logs/checks/*` for cleanup. Retry the upload after restart; subsequent authentication, database or report errors require their own investigation. No successful production repair is established until this server-side command passes and the app upload is retried.
+
 This integration accepts private ZIP uploads into Ace Cloud S3, records upload-complete events in the user's regional database, generates PDF reports automatically using the existing ZIP report engine, and emails the PDF to the company's registered profile email (`tbl_company.email`) plus any optional additional report recipients. Short-lived report download links, optional outbound webhooks and an external reporting API are also available. Existing network-log APIs, frontend, and report calculations are unchanged.
 
 For the app/frontend handoff with current readiness, all endpoint contracts, request/response examples and client responsibilities, use [RF developer handoff](rf-log-developer-handoff.md).
