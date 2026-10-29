@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="1280" viewBox="0 0 1280 1280" role="img" aria-labelledby="title desc">
+<title id="title">Stracer backend testing process</title><desc id="desc">Run checks against the exact release artifact; keep test evidence for every promotion decision.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 10 5 0 10Z" fill="#526581"/></marker><style>text{font-family:Segoe UI,Arial,sans-serif;fill:#172b4d}.head{font-size:19px;font-weight:650}.body{font-size:15px}.small{font-size:14px;fill:#526581}.line{fill:none;stroke:#526581;stroke-width:2;marker-end:url(#arrow)}</style></defs>
+<rect width="1280" height="1280" fill="#f5f8fc"/>
+<text x="42" y="52" font-size="30" font-weight="700">Stracer backend testing process</text>
+<text x="42" y="84" class="body">Run checks against the exact release artifact; keep test evidence for every promotion decision.</text>
+<rect x="42" y="120" width="800" height="88" rx="13" fill="#ffffff" stroke="#a5b9d6" stroke-width="1.5"/>
+<text x="64" y="149" class="head">1. Build and static review</text>
+<text x="64" y="174" class="body">Restore / Release build; dependency and secret review; inspect open security findings.</text>
+<text x="64" y="196" class="small">Existing vapt-baseline.ps1 produces reports; a zero audit exit code does not prove no findings.</text>
+<path d="M442 208V232" class="line"/>
+<rect x="42" y="235" width="800" height="88" rx="13" fill="#eaf1ff" stroke="#8eacd8" stroke-width="1.5"/>
+<text x="64" y="264" class="head">2. Logic and parser regressions</text>
+<text x="64" y="289" class="body">Diagnostic timing, site CSV validation, L3 summaries, network fallback and fixtures.</text>
+<text x="64" y="311" class="small">Console runner: CallAnalyzerRegression; dotnet test alone does not execute its modes.</text>
+<path d="M442 323V347" class="line"/>
+<rect x="42" y="350" width="800" height="88" rx="13" fill="#e5f7f3" stroke="#7cbcae" stroke-width="1.5"/>
+<text x="64" y="379" class="head">3. Session, cache, and RF regressions</text>
+<text x="64" y="404" class="body">Select session-continuity, sessions-pagination, network-log-cache and RF modes.</text>
+<text x="64" y="426" class="small">Review each mode?s fixtures and external requirements; flags select separate execution paths.</text>
+<path d="M442 438V462" class="line"/>
+<rect x="42" y="465" width="800" height="88" rx="13" fill="#ffffff" stroke="#a5b9d6" stroke-width="1.5"/>
+<text x="64" y="494" class="head">4. Staging database and integration checks</text>
+<text x="64" y="519" class="body">IN/TW persistence, Redis, S3, SMTP / webhook delivery, Python bridge read and save.</text>
+<text x="64" y="541" class="small">Use designated disposable test data; database-backed modes may modify their test databases.</text>
+<path d="M442 553V577" class="line"/>
+<rect x="42" y="580" width="800" height="88" rx="13" fill="#eaf1ff" stroke="#8eacd8" stroke-width="1.5"/>
+<text x="64" y="609" class="head">5. API, security, and end-to-end tests</text>
+<text x="64" y="634" class="body">Login ? scoped data; upload ? dashboard; RF ZIP ? PDF ? download; WebSockets.</text>
+<text x="64" y="656" class="small">Test role / company / region isolation, API-key rejection, CSRF, cookies, logout and reset.</text>
+<path d="M442 668V692" class="line"/>
+<rect x="42" y="695" width="800" height="88" rx="13" fill="#e5f7f3" stroke="#7cbcae" stroke-width="1.5"/>
+<text x="64" y="724" class="head">6. Performance and recovery tests</text>
+<text x="64" y="749" class="body">Representative concurrency / data; DB and Redis outages; worker leases and retries.</text>
+<text x="64" y="771" class="small">Agree latency / error targets; GET-only load script is not a complete workload test.</text>
+<path d="M442 783V807" class="line"/>
+<rect x="42" y="810" width="800" height="88" rx="13" fill="#ffffff" stroke="#a5b9d6" stroke-width="1.5"/>
+<text x="64" y="839" class="head">7. Staging acceptance and promotion</text>
+<text x="64" y="864" class="body">Record expected versus actual data, reports, permissions and integration behavior.</text>
+<text x="64" y="886" class="small">Promote only when agreed gates pass; retain artifact hash, logs and acceptance evidence.</text>
+<path d="M442 898V922" class="line"/>
+<rect x="42" y="925" width="800" height="88" rx="13" fill="#eaf1ff" stroke="#8eacd8" stroke-width="1.5"/>
+<text x="64" y="954" class="head">8. Production smoke validation</text>
+<text x="64" y="979" class="body">API-key health probes, Redis verification, IN/TW login, scoped reads and workers.</text>
+<text x="64" y="1001" class="small">Readiness can return HTTP 200 while Redis is unavailable: inspect checks and test login.</text>
+<path d="M442 1013V1037" class="line"/>
+<rect x="42" y="1040" width="800" height="88" rx="13" fill="#e5f7f3" stroke="#7cbcae" stroke-width="1.5"/>
+<text x="64" y="1069" class="head">9. Monitor after rollout</text>
+<text x="64" y="1094" class="body">Watch application errors / latency, DB / Redis, queued jobs and delivery failures.</text>
+<text x="64" y="1116" class="small">Investigate regressions promptly; trigger rollback / recovery if production gates fail.</text>
+<rect x="900" y="235" width="338" height="570" rx="16" fill="#fff0ed" stroke="#d79a8b" stroke-width="1.5"/>
+<text x="922" y="271" class="head">On any failed check</text>
+<text x="922" y="308" class="body">Capture reproducible inputs,</text>
+<text x="922" y="335" class="body">expected / actual results and logs.</text>
+<text x="922" y="362" class="body"></text>
+<text x="922" y="389" class="body">Classify code, configuration,</text>
+<text x="922" y="416" class="body">schema, fixture or infrastructure.</text>
+<text x="922" y="443" class="body"></text>
+<text x="922" y="470" class="body">Fix the failing condition.</text>
+<text x="922" y="497" class="body">Rebuild / repackage if changed.</text>
+<text x="922" y="524" class="body"></text>
+<text x="922" y="551" class="body">Rerun affected checks plus</text>
+<text x="922" y="578" class="body">release gates impacted by the fix.</text>
+<text x="922" y="605" class="body"></text>
+<text x="922" y="632" class="body">Do not promote a failed artifact.</text>
+<text x="922" y="659" class="body">Production failure: follow the</text>
+<text x="922" y="686" class="body">rollback / recovery flow.</text>
+<text x="922" y="713" class="body"></text>
+<text x="922" y="740" class="body">Never report unrun tests as passed.</text>
+<path d="M842 279H895" class="line"/>
+<text x="853" y="265" class="small">Fail</text>
+<path d="M1069 805V875H849" class="line"/>
+<text x="917" y="855" class="small">Revalidate after recovery</text>
+<text x="42" y="1191" class="small">Existing automation covers selected regression modes; HTTP integration, recovery and acceptance need explicit execution.</text>
+<text x="42" y="1217" class="small">Health endpoints use /healthz, not the load script?s default /health path; configure authentication explicitly.</text>
+<text x="42" y="1243" class="small">Documentation only: this update did not execute the application build, test suite, or staging / production checks.</text>
+</svg>

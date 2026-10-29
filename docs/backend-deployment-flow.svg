@@ -1,0 +1,178 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="2110" viewBox="0 0 1600 2110" role="img" aria-labelledby="title desc">
+<title id="title">Stracer backend deployment: build, validate, release and recover</title><desc id="desc">A deployment flow with separate preparation, staging and production lanes. Three explicit decision gates route failures to fixes or recovery. Supporting cards document the IIS helper, dependencies and Docker alternative.</desc>
+<defs>
+<marker id="blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 10 5 0 10Z" fill="#4a6b98"/></marker>
+<marker id="red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 10 5 0 10Z" fill="#b95b50"/></marker>
+<marker id="green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 10 5 0 10Z" fill="#26806c"/></marker>
+<style>text{font-family:Segoe UI,Arial,sans-serif;fill:#192e4c}.title{font-size:38px;font-weight:700;letter-spacing:-.5px}.subtitle{font-size:18px;fill:#556b88}.head{font-size:20px;font-weight:650}.body{font-size:16px;fill:#435873}.label{font-size:13px;font-weight:700;letter-spacing:1.4px;fill:#54719a}.redlabel{font-size:13px;font-weight:700;letter-spacing:1.4px;fill:#a34f45}.phase{font-size:25px;font-weight:700}.number{font-size:13px;font-weight:700;fill:#315c99}.gate{font-size:17px;font-weight:650}.small{font-size:14px;fill:#556b88}.link{fill:none;stroke-width:2.2;stroke-linejoin:round}.blue{stroke:#4a6b98}.red{stroke:#b95b50}.green{stroke:#26806c}</style></defs>
+<rect width="1600" height="2110" fill="#f5f7fb"/>
+<rect x="40" y="36" width="1520" height="125" rx="20" fill="#152d50" stroke="#152d50" stroke-width="1.5"/>
+<text x="70" y="89" style="font-family:Segoe UI,Arial,sans-serif;font-size:38px;font-weight:700;fill:white">Stracer backend deployment</text>
+<text x="72" y="126" style="font-family:Segoe UI,Arial,sans-serif;font-size:18px;fill:#ccd9ed">C# / ASP.NET Core on .NET 8   |   Build once, validate in staging, promote the same artifact</text>
+<rect x="40" y="190" width="1520" height="540" rx="20" fill="#edf2f9" stroke="#e3eaf4" stroke-width="1.5"/>
+<text x="64" y="230" class="label">01</text>
+<text x="64" y="266" class="phase">PREPARE</text>
+<text x="64" y="296" class="body">Source, build and package</text>
+<rect x="40" y="750" width="1520" height="470" rx="20" fill="#edf2f9" stroke="#e3eaf4" stroke-width="1.5"/>
+<text x="64" y="790" class="label">02</text>
+<text x="64" y="826" class="phase">VALIDATE</text>
+<text x="64" y="856" class="body">Deploy to staging and accept</text>
+<rect x="40" y="1240" width="1520" height="610" rx="20" fill="#edf2f9" stroke="#e3eaf4" stroke-width="1.5"/>
+<text x="64" y="1280" class="label">03</text>
+<text x="64" y="1316" class="phase">RELEASE</text>
+<text x="64" y="1346" class="body">Install, verify and monitor</text>
+<rect x="540" y="220" width="520" height="100" rx="16" fill="#ffffff" stroke="#d8e1ef" stroke-width="1.5"/>
+<circle cx="570" cy="249" r="14" fill="#eaf1ff"/>
+<text x="570" y="254" class="number" text-anchor="middle">1</text>
+<text x="595" y="255" class="head">Select the release</text>
+<text x="564" y="283" class="body">Pin source revision and release ID.</text>
+<text x="564" y="304" class="body">Retain previous artifact and data recovery points.</text>
+<path d="M800 320V352" class="link blue" marker-end="url(#blue)"/>
+<rect x="540" y="355" width="520" height="100" rx="16" fill="#ffffff" stroke="#d8e1ef" stroke-width="1.5"/>
+<circle cx="570" cy="384" r="14" fill="#eaf1ff"/>
+<text x="570" y="389" class="number" text-anchor="middle">2</text>
+<text x="595" y="390" class="head">Restore, build and test</text>
+<text x="564" y="418" class="body">Restore packages; build Release.</text>
+<text x="564" y="439" class="body">Run selected regressions and review security findings.</text>
+<path d="M800 455V487" class="link blue" marker-end="url(#blue)"/>
+<rect x="540" y="490" width="520" height="100" rx="16" fill="#ffffff" stroke="#d8e1ef" stroke-width="1.5"/>
+<circle cx="570" cy="519" r="14" fill="#eaf1ff"/>
+<text x="570" y="524" class="number" text-anchor="middle">3</text>
+<text x="595" y="525" class="head">Package the release</text>
+<text x="564" y="553" class="body">IIS: versioned release ZIP and SHA-256 hash.</text>
+<text x="564" y="574" class="body">Inspect contents; retain the exact tested artifact.</text>
+<path d="M800 590V610" class="link blue" marker-end="url(#blue)"/>
+<path d="M800 612 L950 667 L800 722 L650 667 Z" fill="#fff8e6" stroke="#c99830" stroke-width="1.8"/>
+<text x="800" y="673" class="gate" text-anchor="middle">Build / checks pass?</text>
+<path d="M800 722V794" class="link green" marker-end="url(#green)"/>
+<text x="816" y="766" class="label">PASS</text>
+<rect x="540" y="797" width="520" height="100" rx="16" fill="#ffffff" stroke="#d8e1ef" stroke-width="1.5"/>
+<circle cx="570" cy="826" r="14" fill="#eaf1ff"/>
+<text x="570" y="831" class="number" text-anchor="middle">4</text>
+<text x="595" y="832" class="head">Deploy to staging</text>
+<text x="564" y="860" class="body">Configure test secrets, IN/TW MySQL and Redis.</text>
+<text x="564" y="881" class="body">Review schemas; deploy the versioned artifact.</text>
+<path d="M800 897V929" class="link blue" marker-end="url(#blue)"/>
+<rect x="540" y="932" width="520" height="100" rx="16" fill="#ffffff" stroke="#d8e1ef" stroke-width="1.5"/>
+<circle cx="570" cy="961" r="14" fill="#eaf1ff"/>
+<text x="570" y="966" class="number" text-anchor="middle">5</text>
+<text x="595" y="967" class="head">Validate complete workflows</text>
+<text x="564" y="995" class="body">Test roles, regions, uploads, bridge and reports.</text>
+<text x="564" y="1016" class="body">Verify security, performance and outage recovery.</text>
+<path d="M800 1032V1060" class="link blue" marker-end="url(#blue)"/>
+<path d="M800 1062 L950 1117 L800 1172 L650 1117 Z" fill="#fff8e6" stroke="#c99830" stroke-width="1.8"/>
+<text x="800" y="1123" class="gate" text-anchor="middle">Staging accepted?</text>
+<path d="M800 1172V1282" class="link green" marker-end="url(#green)"/>
+<text x="816" y="1210" class="label">PASS</text>
+<rect x="540" y="1285" width="520" height="100" rx="16" fill="#ffffff" stroke="#d8e1ef" stroke-width="1.5"/>
+<circle cx="570" cy="1314" r="14" fill="#eaf1ff"/>
+<text x="570" y="1319" class="number" text-anchor="middle">6</text>
+<text x="595" y="1320" class="head">Install on production IIS</text>
+<text x="564" y="1348" class="body">Back up full prior release; stop application pool.</text>
+<text x="564" y="1369" class="body">Copy binaries; preserve settings, uploads and keys.</text>
+<path d="M800 1385V1417" class="link blue" marker-end="url(#blue)"/>
+<rect x="540" y="1420" width="520" height="100" rx="16" fill="#ffffff" stroke="#d8e1ef" stroke-width="1.5"/>
+<circle cx="570" cy="1449" r="14" fill="#eaf1ff"/>
+<text x="570" y="1454" class="number" text-anchor="middle">7</text>
+<text x="595" y="1455" class="head">Migrate, check and start</text>
+<text x="564" y="1483" class="body">Run regional RF migrations and storage check.</text>
+<text x="564" y="1504" class="body">Start pool and initialize hosted workers.</text>
+<path d="M800 1520V1548" class="link blue" marker-end="url(#blue)"/>
+<rect x="540" y="1551" width="520" height="100" rx="16" fill="#ffffff" stroke="#d8e1ef" stroke-width="1.5"/>
+<circle cx="570" cy="1580" r="14" fill="#eaf1ff"/>
+<text x="570" y="1585" class="number" text-anchor="middle">8</text>
+<text x="595" y="1586" class="head">Run production smoke checks</text>
+<text x="564" y="1614" class="body">Health API key; IN/TW login; Redis; scoped reads.</text>
+<text x="564" y="1635" class="body">Verify workers, enabled integrations and reports.</text>
+<path d="M800 1651V1667" class="link blue" marker-end="url(#blue)"/>
+<path d="M800 1669 L950 1724 L800 1779 L650 1724 Z" fill="#fff8e6" stroke="#c99830" stroke-width="1.8"/>
+<text x="800" y="1730" class="gate" text-anchor="middle">Smoke checks pass?</text>
+<path d="M800 1779V1887" class="link green" marker-end="url(#green)"/>
+<text x="816" y="1820" class="label">PASS</text>
+<rect x="540" y="1890" width="520" height="100" rx="16" fill="#e4f4ed" stroke="#83b9a4" stroke-width="1.5"/>
+<text x="565" y="1925" class="head">Release accepted - monitor</text>
+<text x="565" y="1953" class="body">Track errors, latency, dependencies and queued jobs.</text>
+<text x="565" y="1976" class="body">Retain rollback artifacts until release acceptance.</text>
+<rect x="1180" y="580" width="350" height="140" rx="16" fill="#fff2f0" stroke="#e7b3ab" stroke-width="1.5"/>
+<text x="1202" y="609" class="redlabel">FAIL / STOP PROMOTION</text>
+<text x="1202" y="639" class="head">Fix build or package</text>
+<text x="1202" y="667" class="body">Capture failure; correct the issue.</text>
+<text x="1202" y="690" class="body">Rebuild and rerun checks.</text>
+<path d="M950 667H1175" class="link red" marker-end="url(#red)"/>
+<text x="1020" y="652" class="redlabel">FAIL</text>
+<path d="M1355 580V405H1065" class="link red" marker-end="url(#red)" stroke-dasharray="7 6"/>
+<rect x="1180" y="1030" width="350" height="145" rx="16" fill="#fff2f0" stroke="#e7b3ab" stroke-width="1.5"/>
+<text x="1202" y="1059" class="redlabel">FAIL / KEEP PRODUCTION AS IS</text>
+<text x="1202" y="1089" class="head">Resolve staging failure</text>
+<text x="1202" y="1117" class="body">Fix code, configuration or schemas.</text>
+<text x="1202" y="1140" class="body">Rerun the affected release gates.</text>
+<path d="M950 1117H1175" class="link red" marker-end="url(#red)"/>
+<text x="1020" y="1102" class="redlabel">FAIL</text>
+<path d="M1355 1030V847H1065" class="link red" marker-end="url(#red)" stroke-dasharray="7 6"/>
+<rect x="1180" y="1530" width="350" height="275" rx="16" fill="#fff2f0" stroke="#e7b3ab" stroke-width="1.5"/>
+<text x="1202" y="1559" class="redlabel">FAIL / RECOVER</text>
+<text x="1202" y="1589" class="head">Rollback or forward fix</text>
+<text x="1202" y="1617" class="body">Stop rollout; preserve evidence.</text>
+<text x="1202" y="1640" class="body">IIS pool may remain stopped.</text>
+<text x="1202" y="1663" class="body"></text>
+<text x="1202" y="1686" class="body">Check schema compatibility.</text>
+<text x="1202" y="1709" class="body">Restore previous full artifact and</text>
+<text x="1202" y="1732" class="body">compatible settings, or plan a</text>
+<text x="1202" y="1755" class="body">reviewed database recovery.</text>
+<text x="1202" y="1778" class="body">Restart and repeat smoke checks.</text>
+<path d="M950 1724H1175" class="link red" marker-end="url(#red)"/>
+<text x="1020" y="1709" class="redlabel">FAIL</text>
+<path d="M1060 1470H1144V1605H1175" class="link red" marker-end="url(#red)"/>
+<text x="1080" y="1451" class="redlabel">Error</text>
+<path d="M1355 1805V1840H1105V1601H1065" class="link red" marker-end="url(#red)" stroke-dasharray="7 6"/>
+<rect x="64" y="350" width="400" height="255" rx="16" fill="#ffffff" stroke="#d8e1ef" stroke-width="1.5"/>
+<text x="86" y="379" class="label">RELEASE OUTPUT</text>
+<text x="86" y="409" class="head">One immutable artifact</text>
+<text x="86" y="437" class="body">IIS package:</text>
+<text x="86" y="460" class="body">Build-RfLogRelease.ps1</text>
+<text x="86" y="483" class="body"></text>
+<text x="86" y="506" class="body">The server keeps its live settings.</text>
+<text x="86" y="529" class="body">The package includes deployment tools</text>
+<text x="86" y="552" class="body">and the RF schema scripts.</text>
+<text x="86" y="575" class="body"></text>
+<text x="86" y="598" class="body">Promote the same ZIP from staging.</text>
+<rect x="64" y="900" width="400" height="280" rx="16" fill="#ffffff" stroke="#d8e1ef" stroke-width="1.5"/>
+<text x="86" y="929" class="label">ENVIRONMENT CHECKLIST</text>
+<text x="86" y="959" class="head">Configure before deployment</text>
+<text x="86" y="987" class="body">.NET 8 host and HTTPS / proxy trust</text>
+<text x="86" y="1010" class="body">Both regional MySQL connections</text>
+<text x="86" y="1033" class="body">Redis and backend API keys</text>
+<text x="86" y="1056" class="body">S3-compatible storage; SMTP / webhooks</text>
+<text x="86" y="1079" class="body">Persistent keys, uploads and permissions</text>
+<text x="86" y="1102" class="body">CORS / CSRF and frontend origin</text>
+<text x="86" y="1125" class="body"></text>
+<text x="86" y="1148" class="body">Keep staging integrations separate.</text>
+<rect x="64" y="1385" width="400" height="250" rx="16" fill="#ffffff" stroke="#d8e1ef" stroke-width="1.5"/>
+<text x="86" y="1414" class="label">EXISTING IIS HELPER</text>
+<text x="86" y="1444" class="head">Deployment behavior</text>
+<text x="86" y="1472" class="body">Deploy-RfLogIntegration.ps1</text>
+<text x="86" y="1495" class="body">Requires an existing configured site.</text>
+<text x="86" y="1518" class="body"></text>
+<text x="86" y="1541" class="body">Stops pool during copy / validation.</text>
+<text x="86" y="1564" class="body">RF migration covers schemas 003-005.</text>
+<text x="86" y="1587" class="body">Storage check performs a round trip.</text>
+<text x="86" y="1610" class="body">No automatic application rollback.</text>
+<rect x="64" y="1660" width="400" height="155" rx="16" fill="#ffffff" stroke="#d8e1ef" stroke-width="1.5"/>
+<text x="86" y="1689" class="label">PRODUCTION HEALTH</text>
+<text x="86" y="1719" class="head">Check Redis separately</text>
+<text x="86" y="1747" class="body">/healthz/live and /healthz/ready</text>
+<text x="86" y="1770" class="body">Readiness HTTP 200 does not prove</text>
+<text x="86" y="1793" class="body">Redis or all integrations are healthy.</text>
+<rect x="64" y="1880" width="400" height="110" rx="16" fill="#ffffff" stroke="#d8e1ef" stroke-width="1.5"/>
+<text x="86" y="1911" class="label">DOCKER ALTERNATIVE</text>
+<text x="86" y="1938" class="body">Build with existing Dockerfile.</text>
+<text x="86" y="1961" class="body">Provide separate runtime / rollout setup.</text>
+<text x="86" y="1982" class="small">This flow details the existing IIS path.</text>
+<text x="1180" y="1900" class="label">HOW TO READ</text>
+<path d="M1180 1930H1235" class="link blue" marker-end="url(#blue)"/>
+<text x="1250" y="1935" class="small">Deployment sequence</text>
+<path d="M1180 1963H1235" class="link red" marker-end="url(#red)" stroke-dasharray="7 6"/>
+<text x="1250" y="1968" class="small">Fix and revalidate</text>
+<text x="60" y="2040" class="small">Source-based runbook: existing deployment tools plus proposed staging and promotion gates.</text>
+<text x="60" y="2067" class="small">No deployment or test execution is implied. Preserve full release backups; the IIS helper backs up configuration only.</text>
+</svg>

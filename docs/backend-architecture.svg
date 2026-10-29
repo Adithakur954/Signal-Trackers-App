@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="1100" viewBox="0 0 1280 1100" role="img" aria-labelledby="title desc">
+  <title id="title">Stracer backend architecture</title>
+  <desc id="desc">Portal and mobile clients call the ASP.NET Core backend. Security and controllers connect to services, Redis, regional MySQL databases, S3, and background workers. External Python analytics fetch inputs and save results through a secured bridge.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10Z" fill="#526581"/></marker>
+    <style>
+      text{font-family:Segoe UI,Arial,sans-serif;fill:#172b4d} .title{font-size:30px;font-weight:700} .head{font-size:19px;font-weight:650} .body{font-size:15px} .small{font-size:13px;fill:#526581} .line{fill:none;stroke:#526581;stroke-width:2;marker-end:url(#arrow)} .box{stroke-width:1.5;rx:14}
+    </style>
+  </defs>
+  <rect width="1280" height="1100" fill="#f5f8fc"/>
+  <text x="48" y="52" class="title">Stracer backend architecture</text>
+  <text x="48" y="81" class="body">C# / ASP.NET Core on .NET 8 · API, data, analytics, and reporting flow</text>
+
+  <rect x="50" y="118" width="350" height="100" class="box" fill="#fff" stroke="#a5b9d6"/>
+  <text x="74" y="150" class="head">React web portal</text>
+  <text x="74" y="178" class="body">Super admin / admin / dashboards</text>
+  <text x="74" y="200" class="small">Portal described in supplied workflow</text>
+  <rect x="460" y="118" width="350" height="100" class="box" fill="#fff" stroke="#a5b9d6"/>
+  <text x="484" y="150" class="head">Stracer app / data producers</text>
+  <text x="484" y="178" class="body">RF logs, file uploads, ingestion APIs</text>
+  <text x="484" y="200" class="small">Machine endpoints use API-key validation</text>
+  <path d="M225 218V284" class="line"/>
+  <text x="242" y="255" class="small">HTTPS + cookie</text>
+  <path d="M635 218V284" class="line"/>
+  <text x="652" y="255" class="small">HTTPS + API key</text>
+
+  <rect x="30" y="284" width="800" height="450" rx="20" fill="#eaf1ff" stroke="#8eacd8" stroke-width="2"/>
+  <text x="54" y="320" class="head">ASP.NET Core application server</text>
+  <rect x="54" y="340" width="750" height="84" class="box" fill="#fff" stroke="#b3c7e4"/>
+  <text x="74" y="370" class="head">1. Request security</text>
+  <text x="74" y="397" class="body">CORS · session / cookie auth · region · rate limits · CSRF · authorization</text>
+  <path d="M430 424V447" class="line"/>
+  <rect x="54" y="450" width="750" height="76" class="box" fill="#fff" stroke="#b3c7e4"/>
+  <text x="74" y="480" class="head">2. Controllers and application services</text>
+  <text x="74" y="507" class="body">User / license scope · imports · network analytics · predictions · reports</text>
+  <path d="M430 526V549" class="line"/>
+  <rect x="54" y="552" width="750" height="76" class="box" fill="#fff" stroke="#b3c7e4"/>
+  <text x="74" y="582" class="head">3. Data access and regional routing</text>
+  <text x="74" y="609" class="body">EF Core + Pomelo · Dapper / SQL · trusted IN / TW region selection</text>
+  <rect x="54" y="651" width="750" height="59" class="box" fill="#dce8ff" stroke="#b3c7e4"/>
+  <text x="74" y="676" class="body">Responses: JSON · files / reports · MVC views</text>
+  <text x="74" y="697" class="small">Live network-log notifications use authenticated WebSockets.</text>
+
+  <rect x="900" y="284" width="330" height="140" class="box" fill="#f2ecff" stroke="#b09ad8"/>
+  <text x="922" y="318" class="head">External Python analytics</text>
+  <text x="922" y="347" class="body">Fetch inputs / execute models</text>
+  <text x="922" y="372" class="body">Save prediction / optimization results</text>
+  <text x="922" y="401" class="small">Framework and job initiator unverified</text>
+  <path d="M900 363H830" class="line"/>
+  <text x="887" y="448" text-anchor="middle" class="small">Secured bridge APIs</text>
+
+  <rect x="900" y="476" width="330" height="110" class="box" fill="#fff6df" stroke="#d5b45f"/>
+  <text x="922" y="510" class="head">Redis</text>
+  <text x="922" y="539" class="body">Cache / login-state operations</text>
+  <text x="922" y="563" class="small">Fallback behavior depends on feature</text>
+  <path d="M804 488H860V526H900" class="line" marker-start="url(#arrow)"/>
+
+  <rect x="900" y="652" width="330" height="110" class="box" fill="#e5f7f3" stroke="#7cbcae"/>
+  <text x="922" y="686" class="head">Amazon S3</text>
+  <text x="922" y="715" class="body">Uploaded RF logs / generated PDFs</text>
+  <text x="922" y="739" class="small">AWSSDK.S3</text>
+  <path d="M804 506H850V708H900" class="line"/>
+
+  <path d="M275 628V785H225V814" class="line"/>
+  <path d="M560 628V785H630V814" class="line"/>
+  <rect x="50" y="817" width="350" height="108" class="box" fill="#e5f7f3" stroke="#7cbcae"/>
+  <text x="74" y="852" class="head">Main / India MySQL</text>
+  <text x="74" y="881" class="body">Connection: MySqlConnection</text>
+  <text x="74" y="905" class="small">Users, companies, projects, logs, results</text>
+  <rect x="460" y="817" width="350" height="108" class="box" fill="#e5f7f3" stroke="#7cbcae"/>
+  <text x="484" y="852" class="head">Taiwan MySQL</text>
+  <text x="484" y="881" class="body">Connection: MySqlConnection2</text>
+  <text x="484" y="905" class="small">Regional application records</text>
+
+  <rect x="900" y="817" width="330" height="150" class="box" fill="#fff" stroke="#a5b9d6"/>
+  <text x="922" y="850" class="head">Background workers</text>
+  <text x="922" y="880" class="body">Regional job records / report leases</text>
+  <text x="922" y="905" class="body">PDF processing / email / webhooks</text>
+  <text x="922" y="938" class="small">Use regional MySQL and S3</text>
+  <path d="M1065 817V762" class="line"/>
+  <path d="M900 892H813" class="line"/>
+
+  <path d="M54 682H12V166H47" class="line" stroke-dasharray="6 5"/>
+  <text x="48" y="1020" class="body">Arrows show request / dependency direction; dashed arrow shows the portal response.</text>
+  <text x="48" y="1047" class="small">Python calls the bridge to read inputs and persist outputs. MySQL also supplies query results to the backend.</text>
+  <text x="48" y="1072" class="small">Source-based view · deployment instance sizes are documented separately · 29 October 2026</text>
+</svg>

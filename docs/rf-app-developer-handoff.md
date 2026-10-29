@@ -1,5 +1,7 @@
 # App developer handoff: automatic drive PDF and company email
 
+**Android phone/company-code login:** follow [RF mobile upload without portal login](rf-mobile-upload.md). The mobile app uses an installation-specific bearer credential on the existing upload endpoint; the portal email/password and cookie instructions below are for portal-authenticated integrations, not the mobile login screen.
+
 Updated: 28 October 2026. API contracts verified against this backend source. The production deployment and phone-side implementation still need acceptance testing.
 
 ## Preferred app integration: one upload API

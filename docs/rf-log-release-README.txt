@@ -10,16 +10,19 @@ Both regional DB connection strings must already be configured on the server:
 3. Open PowerShell as Administrator in the extracted package folder.
 4. Run (replace YOUR_ACTUAL_POOL_NAME with the name from step 2):
 
-   .\scripts\Deploy-RfLogIntegration.ps1 -PackagePath .\backend -BackendPath 'C:\inetpub\wwwroot\Backend' -AppPoolName 'YOUR_ACTUAL_POOL_NAME' -ConfigureStorage
+   .\scripts\Deploy-RfLogIntegration.ps1 -PackagePath .\backend -BackendPath 'C:\inetpub\wwwroot\Backend' -AppPoolName 'YOUR_ACTUAL_POOL_NAME'
 
-   The script privately prompts for NEW rotated Ace Cloud S3 credentials.
+   Existing storage/SMTP settings are preserved. Only add -ConfigureStorage for
+   initial storage setup or intentional rotation of the integration configuration.
+   With that flag, the script prompts privately for Ace Cloud S3 credentials and
+   regenerates reporting/webhook keys; do not use it merely to update binaries.
    Signing region is ap-south-noi-1, confirmed in this bucket's configuration screen.
    For a different endpoint, pass its actual region with -SigningRegion.
    Credentials from chat must be rotated before use. Do not paste replacement secrets in chat.
 
 The script backs up live configuration (not old binaries), stops only the selected
 pool, copies the release, creates/grants access to writable folders, applies and
-checks RF migrations 003/004/005 in BOTH databases (CREATE/ALTER permission needed), checks a real S3 upload/copy/download/report
+checks RF migrations 003/004/005/006 in BOTH databases (CREATE/ALTER permission needed), checks a real S3 upload/copy/download/report
 round trip, then starts the pool. A failed check leaves the pool stopped; correct
 the stated issue and rerun. Check objects are created and deleted only under
 rf-logs/checks/<random-id>/; allow DeleteObject on that check prefix.
@@ -47,7 +50,12 @@ rf-logs/checks/<random-id>/; allow DeleteObject on that check prefix.
 7. Give the app team ONE endpoint on the deployed HTTPS origin:
      POST /api/rf-logs/upload
    Multipart form-data: file (ZIP), uploadId (UUID), sessionId; optional
-   subSessionId/projectId. Existing login/cookies and CSRF determine scope.
+   subSessionId/projectId. For phone/company-code Android users, provision a
+   distinct installation credential with scripts/New-RfMobileUploadCredential.ps1
+   and send Authorization: Bearer <uploadToken>. No portal cookie/CSRF is needed
+   for bearer-only requests. Never hardcode a shared credential in the APK.
+   See docs/rf-mobile-upload.md for setup, revocation, expiry and the app contract.
+   Existing portal login/cookie/CSRF uploads remain supported separately.
    Backend handles S3 upload/verification/completion, then queues PDF/email.
    See docs/rf-app-single-api.md. HTTP/multipart/IIS limits apply, including overhead.
    The older /uploads -> signed S3 PUT -> /complete flow is still an alternative.

@@ -16,6 +16,12 @@ if (args.FirstOrDefault() == "--wifi-plot-db")
     return;
 }
 
+if (args.FirstOrDefault() == "--rf-mobile-upload")
+{
+    await RfMobileUploadRegression.RunAsync();
+    return;
+}
+
 if (args.FirstOrDefault() == "--rf-log-integration")
 {
     await RfLogIntegrationRegression.RunAsync();

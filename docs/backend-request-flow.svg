@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="940" viewBox="0 0 1000 940" role="img" aria-labelledby="title desc">
+  <title id="title">Stracer backend request flow</title>
+  <desc id="desc">A client request passes through middleware, endpoint security, controller and business logic, data access, and response serialization. Security failures can return early.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 10 5 0 10Z" fill="#526581"/></marker>
+    <style>text{font-family:Segoe UI,Arial,sans-serif;fill:#172b4d}.head{font-size:19px;font-weight:650}.body{font-size:15px}.line{fill:none;stroke:#526581;stroke-width:2;marker-end:url(#arrow)}.box{fill:#fff;stroke:#a5b9d6;stroke-width:1.5;rx:12}</style>
+  </defs>
+  <rect width="1000" height="940" fill="#f5f8fc"/>
+  <text x="40" y="50" font-size="29" font-weight="700">Backend request → response flow</text>
+  <text x="40" y="80" class="body">Typical protected API request; endpoint requirements determine which checks apply.</text>
+  <rect x="40" y="115" width="660" height="65" class="box"/>
+  <text x="64" y="145" class="head">1. Client sends an HTTPS request</text>
+  <text x="64" y="168" class="body">Portal cookie or machine API credentials, plus request data</text>
+  <path d="M370 180V207" class="line"/>
+  <rect x="40" y="210" width="660" height="85" class="box"/>
+  <text x="64" y="240" class="head">2. Transport, routing, and session middleware</text>
+  <text x="64" y="265" class="body">Forwarded / security headers, HTTPS, routing, CORS, cookies, session</text>
+  <text x="64" y="285" class="body">Static files and route rewriting can handle special paths earlier.</text>
+  <path d="M370 295V322" class="line"/>
+  <rect x="40" y="325" width="660" height="85" rx="12" fill="#eaf1ff" stroke="#8eacd8" stroke-width="1.5"/>
+  <text x="64" y="355" class="head">3. Authenticate and enforce security</text>
+  <text x="64" y="380" class="body">Cookie authentication → region → rate limit → CSRF → authorization</text>
+  <text x="64" y="400" class="body">Endpoint filters validate Python / RF API keys where required.</text>
+  <path d="M700 368H750" class="line"/>
+  <rect x="753" y="325" width="210" height="85" rx="12" fill="#fff0ed" stroke="#d79a8b"/>
+  <text x="773" y="355" class="head">Early response</text>
+  <text x="773" y="381" class="body">401 / 403 / 429, etc.</text>
+  <path d="M370 410V437" class="line"/>
+  <rect x="40" y="440" width="660" height="70" class="box"/>
+  <text x="64" y="470" class="head">4. Execute controller and business logic</text>
+  <text x="64" y="495" class="body">Validate input, user/company scope, license, and requested operation</text>
+  <path d="M370 510V537" class="line"/>
+  <rect x="40" y="540" width="660" height="85" rx="12" fill="#e5f7f3" stroke="#7cbcae" stroke-width="1.5"/>
+  <text x="64" y="570" class="head">5. Read or write data</text>
+  <text x="64" y="595" class="body">Redis when applicable; regional MySQL via EF Core / Dapper / SQL</text>
+  <text x="64" y="615" class="body">Use S3 for supported files; persist jobs for background processing.</text>
+  <path d="M370 625V652" class="line"/>
+  <rect x="40" y="655" width="660" height="70" class="box"/>
+  <text x="64" y="685" class="head">6. Build the response</text>
+  <text x="64" y="710" class="body">Serialize JSON or return a downloadable file / MVC response</text>
+  <path d="M370 725V752" class="line"/>
+  <rect x="40" y="755" width="660" height="70" class="box"/>
+  <text x="64" y="785" class="head">7. Client receives the result</text>
+  <text x="64" y="810" class="body">Update dashboard, display status, or download the report</text>
+  <text x="40" y="880" class="body">Long-running reports: accept upload → worker processes job → client checks status / downloads output.</text>
+  <text x="40" y="910" class="body">Request order is based on Program.cs and the endpoint security filters.</text>
+</svg>

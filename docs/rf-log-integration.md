@@ -1,5 +1,7 @@
 # RF ZIP upload and reporting integration (Ace Cloud S3)
 
+Phone/company-code mobile clients can now use administrator-provisioned installation bearer credentials. See [mobile setup, deployment migration and Android request contract](rf-mobile-upload.md). These credentials are scoped to an existing user/company/region and cannot access reporting-service or administrator APIs.
+
 ## Repair upload HTTP 503: storage integration not configured
 
 This response is produced before ZIP upload when `RfLogIntegrationOptions.IsConfigured` is false. On the IIS server, run administrator PowerShell against the actual published API folder:

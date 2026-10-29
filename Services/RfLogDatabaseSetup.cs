@@ -21,7 +21,7 @@ public static class RfLogDatabaseSetup
                 await connection.OpenAsync(ct);
                 if (apply)
                 {
-                    foreach (var resourceName in new[] { "SignalTracker.RfLogSchema.sql", "SignalTracker.RfLogEmailSchema.sql" })
+                    foreach (var resourceName in new[] { "SignalTracker.RfLogSchema.sql", "SignalTracker.RfLogEmailSchema.sql", "SignalTracker.RfMobileCredentialSchema.sql" })
                     {
                         using var resource = typeof(RfLogDatabaseSetup).Assembly.GetManifestResourceStream(resourceName)
                             ?? throw new InvalidOperationException("Embedded RF schema is missing.");
@@ -49,7 +49,8 @@ public static class RfLogDatabaseSetup
                 foreach (var (table, requiredColumns) in new[]
                 {
                     ("rf_log_report_recipients", new[] { "id", "region", "company_id", "email", "name", "enabled", "company_default", "created_at" }),
-                    ("rf_log_email_deliveries", new[] { "id", "upload_id", "recipient_id", "region", "company_id", "report_reference", "status", "attempts", "next_attempt", "lease_token", "lease_until", "created_at", "sent_at", "last_error" })
+                    ("rf_log_email_deliveries", new[] { "id", "upload_id", "recipient_id", "region", "company_id", "report_reference", "status", "attempts", "next_attempt", "lease_token", "lease_until", "created_at", "sent_at", "last_error" }),
+                    ("rf_mobile_upload_credentials", new[] { "id", "region", "company_id", "user_id", "mobile_number", "company_code", "device_label", "token_hash", "created_at", "expires_at", "revoked_at" })
                 })
                 {
                     var actual = (await connection.QueryAsync<string>(new CommandDefinition("SELECT column_name FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name=@table", new { table }, cancellationToken: ct))).ToHashSet(StringComparer.OrdinalIgnoreCase);

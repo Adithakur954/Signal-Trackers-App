@@ -287,6 +287,9 @@ internal class Program
         builder.Services.AddSingleton<IRfLogStorage, RfLogS3Storage>();
         builder.Services.AddScoped<IRfLogUploadStore, RfLogUploadStore>();
         builder.Services.AddScoped<RfLogIntegrationService>();
+        builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
+        builder.Services.AddScoped<IRfMobileCredentialStore, RfMobileCredentialStore>();
+        builder.Services.AddScoped<RfMobileCredentialService>();
         builder.Services.AddScoped<SignalTracker.Controllers.RfLogErrorFilter>();
         builder.Services.PostConfigure<RfLogIntegrationOptions>(options =>
         {

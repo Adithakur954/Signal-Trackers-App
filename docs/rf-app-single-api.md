@@ -1,5 +1,7 @@
 # App developer: one API for automatic RF reports
 
+**Phone/company-code Android app:** use the [mobile upload contract](rf-mobile-upload.md). It adds administrator-provisioned installation bearer credentials to this same upload endpoint without requiring portal login on the phone. The cookie/CSRF flow below continues to apply to portal-authenticated callers only.
+
 Updated 28 October 2026. Deploy this backend release before using the new route.
 
 After the drive ends, finish writing its final ZIP and call this API once using the existing logged-in user's session:

@@ -277,6 +277,9 @@ internal static class RfLogIntegrationRegression
         var httpStorage = new FakeStorage();
         builder.Services.AddSingleton<IRfLogStorage>(httpStorage);
         builder.Services.AddScoped<RfLogIntegrationService>();
+        builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
+        builder.Services.AddSingleton<IRfMobileCredentialStore, RfMobileUploadRegression.MemoryCredentials>();
+        builder.Services.AddScoped<RfMobileCredentialService>();
         builder.Services.AddScoped<RfLogErrorFilter>();
         builder.Services.AddAuthentication("test").AddScheme<AuthenticationSchemeOptions, TestLoginHandler>("test", _ => { });
         builder.Services.AddAuthorization();
@@ -390,6 +393,7 @@ internal static class RfLogIntegrationRegression
         Check(completedTw.IsSuccessStatusCode && twEvent.RootElement.GetProperty("region").GetString() == "TW"
             && twEvent.RootElement.GetProperty("blobPath").GetString()!.Contains("/TW/7/"), "Taiwan completion uses only Taiwan records and storage namespace");
         await RfLogEmailRegression.CheckHttpAsync(http);
+        await RfMobileUploadRegression.CheckHttpAsync(http, httpStore, httpStorage);
         await app.StopAsync();
         Console.WriteLine("RF HTTP contract passed: API routes, login identity, CSRF, upload-complete callback and reporting download authorization.");
     }

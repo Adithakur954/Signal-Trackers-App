@@ -18,7 +18,7 @@ public sealed class RfLogIntegrationController(RfLogIntegrationService service, 
     private RfLogActor Actor => (RfLogActor)HttpContext.Items[RfLogApiKeyAttribute.ClientItem]!;
     private string ReportingRegion => (string)HttpContext.Items[RfLogApiKeyAttribute.RegionItem]!;
 
-    [HttpPost("upload"), RfLogApiKey, Consumes("multipart/form-data")]
+    [HttpPost("upload"), RfLogUploader, Consumes("multipart/form-data")]
     [RequestSizeLimit(524_288_000), RfLogDirectUploadLimits]
     public async Task<IActionResult> Upload([FromForm] RfLogDirectUploadRequest request, CancellationToken ct)
     {
@@ -33,7 +33,7 @@ public sealed class RfLogIntegrationController(RfLogIntegrationService service, 
         }, zip, ct)));
     }
 
-    [HttpPost("uploads"), RfLogApiKey]
+    [HttpPost("uploads"), RfLogUploader]
     public async Task<IActionResult> Create(RfLogUploadRequest request, CancellationToken ct)
     {
         var upload = await service.RegisterAsync(Actor, request, ct);
@@ -48,19 +48,19 @@ public sealed class RfLogIntegrationController(RfLogIntegrationService service, 
         });
     }
 
-    [HttpPost("uploads/{id:guid}/complete"), RfLogApiKey]
+    [HttpPost("uploads/{id:guid}/complete"), RfLogUploader]
     public async Task<IActionResult> Complete(Guid id, CancellationToken ct) =>
         Ok(service.Event(await service.CompleteAsync(Actor, id.ToString("D"), ct)));
 
-    [HttpGet("uploads/{id:guid}"), RfLogApiKey]
+    [HttpGet("uploads/{id:guid}"), RfLogUploader]
     public async Task<IActionResult> UploadStatus(Guid id, CancellationToken ct) =>
         Ok(service.Event(await service.UploaderEventAsync(Actor, id.ToString("D"), ct)));
 
-    [HttpGet("uploads/{id:guid}/report"), RfLogApiKey]
+    [HttpGet("uploads/{id:guid}/report"), RfLogUploader]
     public async Task<IActionResult> UserReport(Guid id, CancellationToken ct) =>
         Ok(await service.ReportDownloadAsync(await service.UploaderEventAsync(Actor, id.ToString("D"), ct), ct));
 
-    [HttpPost("uploads/{id:guid}/report-retry"), RfLogApiKey]
+    [HttpPost("uploads/{id:guid}/report-retry"), RfLogUploader]
     public async Task<IActionResult> UserRetryReport(Guid id, CancellationToken ct)
     {
         await service.UploaderEventAsync(Actor, id.ToString("D"), ct);
