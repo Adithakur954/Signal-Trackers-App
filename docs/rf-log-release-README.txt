@@ -51,7 +51,8 @@ rf-logs/checks/<random-id>/; allow DeleteObject on that check prefix.
      POST /api/rf-logs/upload
    Multipart form-data: file (ZIP), uploadId (UUID), sessionId; optional
    subSessionId/projectId. For phone/company-code Android users, provision a
-   distinct installation credential with scripts/New-RfMobileUploadCredential.ps1
+   distinct installation credential on the IIS server in Administrator PowerShell
+   with scripts/New-RfMobileUploadCredential.ps1 (no portal email/password prompt)
    and send Authorization: Bearer <uploadToken>. No portal cookie/CSRF is needed
    for bearer-only requests. Never hardcode a shared credential in the APK.
    See docs/rf-mobile-upload.md for setup, revocation, expiry and the app contract.

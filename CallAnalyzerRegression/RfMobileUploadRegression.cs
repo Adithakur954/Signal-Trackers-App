@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Microsoft.Extensions.Configuration;
 using SignalTracker.Models;
 using SignalTracker.Services;
 
@@ -14,6 +15,7 @@ internal static class RfMobileUploadRegression
 
     internal static async Task RunAsync()
     {
+        CheckLocalOperatorArguments();
         var clock = new TestClock();
         var store = new MemoryCredentials();
         var service = new RfMobileCredentialService(store, clock);
@@ -55,6 +57,33 @@ internal static class RfMobileUploadRegression
         await store.RevokeAsync("IN", 7, issued.Credential.Id, default);
         Check(await service.AuthenticateAsync(issued.Token, default) == null, "revocation takes effect without restart");
         Console.WriteLine("RF mobile credentials passed: scoped issuance, tamper rejection, expiration, revocation and secret-safe metadata.");
+    }
+
+    private static void CheckLocalOperatorArguments()
+    {
+        var values = new Dictionary<string, string?>
+        {
+            ["rf-mobile-number"] = "9000000000", ["rf-mobile-company-code"] = "TEST-COMPANY",
+            ["rf-mobile-device-label"] = "Test installation", ["rf-mobile-user-id"] = "10"
+        };
+        var request = RfMobileCredentialConsole.ReadRequest(new ConfigurationBuilder().AddInMemoryCollection(values).Build());
+        Check(request.UserId == 10 && request.ValidDays == 90, "local provisioning accepts identifiers without portal credentials");
+        foreach (var (key, badValue) in new[]
+        {
+            ("rf-mobile-user-id", "0"), ("rf-mobile-user-id", "-1"), ("rf-mobile-user-id", "invalid"),
+            ("rf-mobile-valid-days", "366"), ("rf-mobile-valid-days", "0"), ("rf-mobile-valid-days", "9999999999999"),
+            ("rf-mobile-number", ""), ("rf-mobile-company-code", ""), ("rf-mobile-device-label", "")
+        })
+        {
+            var invalid = new Dictionary<string, string?>(values) { [key] = badValue };
+            try
+            {
+                RfMobileCredentialConsole.ReadRequest(new ConfigurationBuilder().AddInMemoryCollection(invalid).Build());
+                throw new Exception("Expected invalid local provisioning arguments to fail.");
+            }
+            catch (RfLogRequestException ex) { Check(ex.Status == 400, "invalid local arguments rejected before database access"); }
+        }
+        Console.WriteLine("RF local operator argument validation passed; no email/password fields required.");
     }
 
     internal static async Task CheckHttpAsync(HttpClient http, RfLogIntegrationRegression.MemoryStore uploads,

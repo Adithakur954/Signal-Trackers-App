@@ -1,65 +1,62 @@
+# Local IIS-server provisioning. No portal login or HTTP request is performed.
 param(
     [Parameter(Mandatory = $true)][string]$MobileNumber,
     [Parameter(Mandatory = $true)][string]$CompanyCode,
     [Parameter(Mandatory = $true)][string]$DeviceLabel,
-    [string]$BaseUrl = 'https://s-traccceer.vinfocom.co.in',
+    [string]$BackendPath = 'C:\inetpub\wwwroot\Backend',
     [ValidateSet('IN', 'TW')][string]$Region = 'IN',
     [ValidateRange(1, 365)][int]$ValidDays = 90,
     [ValidateRange(1, 2147483647)][int]$UserId
 )
 $ErrorActionPreference = 'Stop'
-$apiUri = $null
-if (![uri]::TryCreate($BaseUrl, [UriKind]::Absolute, [ref]$apiUri) -or
-    $apiUri.Scheme -ne 'https' -or $apiUri.UserInfo -or $apiUri.Query -or $apiUri.Fragment -or $apiUri.AbsolutePath -ne '/') {
-    throw 'BaseUrl must be the HTTPS backend origin without a path, credentials, query or fragment.'
-}
-$BaseUrl = $BaseUrl.TrimEnd('/')
-$adminEmail = Read-Host 'Company administrator portal email'
-$adminPassword = Read-Host 'Company administrator portal password' -AsSecureString
-$loginBody = $null
-$issueResponse = $null
-$result = $null
+$operatorIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
 try {
-    $loginBody = @{
-        email = $adminEmail
-        password = [Net.NetworkCredential]::new('', $adminPassword).Password
-        country_code = $Region
-    } | ConvertTo-Json -Compress
-    # No ForceLogin: this tool must not silently take over an existing portal session.
-    $null = Invoke-WebRequest -Uri "$BaseUrl/api/auth/login" -Method Post -ContentType 'application/json' `
-        -Body $loginBody -SessionVariable rfAdminSession -UseBasicParsing -MaximumRedirection 0
-    $loginBody = $null
-    $csrf = $rfAdminSession.Cookies.GetCookies($apiUri) | Where-Object Name -eq 'st.csrf' | Select-Object -First 1
-    if (!$csrf) { throw 'Login did not return the st.csrf cookie. No mobile credential was requested.' }
-    $requestBody = @{
-        mobileNumber = $MobileNumber
-        companyCode = $CompanyCode
-        deviceLabel = $DeviceLabel
-        validDays = $ValidDays
+    $isAdministrator = ([Security.Principal.WindowsPrincipal]::new($operatorIdentity)).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
+} finally { $operatorIdentity.Dispose() }
+if (!$isAdministrator) { throw 'Open PowerShell as Administrator on the backend server. No portal email/password is needed.' }
+$backendRoot = (Resolve-Path -LiteralPath $BackendPath).Path
+$assemblyPath = Join-Path $backendRoot 'SignalTracker.dll'
+$webConfigPath = Join-Path $backendRoot 'web.config'
+if (!(Test-Path -LiteralPath $assemblyPath) -or !(Test-Path -LiteralPath $webConfigPath)) {
+    throw 'BackendPath must be the deployed API folder containing SignalTracker.dll and web.config.'
+}
+# Old binaries must not start the web host when given an unknown CLI flag.
+$assemblyBytes = [IO.File]::ReadAllBytes($assemblyPath)
+$supportsCommand = [Text.Encoding]::Unicode.GetString($assemblyBytes).Contains('--rf-mobile-credential-create')
+if (!$supportsCommand -and $assemblyBytes.Length -gt 1) {
+    $supportsCommand = [Text.Encoding]::Unicode.GetString($assemblyBytes, 1, $assemblyBytes.Length - 1).Contains('--rf-mobile-credential-create')
+}
+if (!$supportsCommand) { throw 'Deploy the updated backend with the server-local credential command first. Replacing the script alone is insufficient.' }
+$null = Get-Command dotnet -ErrorAction Stop
+[xml]$web = Get-Content -LiteralPath $webConfigPath -Raw
+$hosting = $web.SelectSingleNode('/configuration/system.webServer/aspNetCore')
+if (!$hosting) { throw 'The deployed web.config has no aspNetCore hosting element.' }
+$savedEnvironment = @{}
+try {
+    # IIS variables are not otherwise visible to this CLI subprocess.
+    foreach ($item in $hosting.SelectNodes('environmentVariables/environmentVariable')) {
+        $name = $item.GetAttribute('name')
+        if (!$savedEnvironment.ContainsKey($name)) {
+            $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+        }
+        [Environment]::SetEnvironmentVariable($name, $item.GetAttribute('value'), 'Process')
     }
-    if ($PSBoundParameters.ContainsKey('UserId')) { $requestBody.userId = $UserId }
-    $issueResponse = Invoke-WebRequest -Uri "$BaseUrl/api/rf-logs/mobile-credentials" -Method Post `
-        -ContentType 'application/json' -Headers @{ 'X-CSRF-TOKEN' = $csrf.Value } `
-        -Body ($requestBody | ConvertTo-Json -Compress) -WebSession $rfAdminSession -UseBasicParsing -MaximumRedirection 0
-    $result = $issueResponse.Content | ConvertFrom-Json
-    Write-Host 'Installation credential issued. Transfer it privately to this app installation; do not commit it or put it in the APK.'
-    Write-Host ('Credential ID: ' + $result.credential.credentialId)
-    Write-Host ('User ID: ' + $result.credential.userId)
-    Write-Host ('Company ID: ' + $result.credential.companyId)
-    Write-Host ('Region: ' + $result.credential.region)
-    Write-Host ('Expires: ' + $result.credential.expiresAtUtc)
-    # This one-time output is intentional. The server stores only its digest.
-    Write-Host ('Upload token (shown once): ' + $result.uploadToken)
+    $commandArgs = @($assemblyPath, '--rf-mobile-credential-create', '--environment', 'Production',
+        '--rf-mobile-number', $MobileNumber, '--rf-mobile-company-code', $CompanyCode,
+        '--rf-mobile-device-label', $DeviceLabel, '--rf-mobile-region', $Region,
+        '--rf-mobile-valid-days', [string]$ValidDays)
+    if ($PSBoundParameters.ContainsKey('UserId')) { $commandArgs += @('--rf-mobile-user-id', [string]$UserId) }
+    Write-Host 'Creating an installation-specific upload credential using the server database settings.'
+    Write-Host 'The uploadToken is shown once. Transfer it privately; do not log, commit or share it in chat.'
+    Push-Location -LiteralPath $backendRoot
+    try {
+        & dotnet @commandArgs
+        if ($LASTEXITCODE -ne 0) { throw 'Credential creation failed. Follow the error above; no portal login is required.' }
+    } finally { Pop-Location }
 } finally {
-    $loginBody = $null
-    $adminPassword = $null
-    $result = $null
-    $issueResponse = $null
-    if ($null -ne $rfAdminSession) {
-        try {
-            $csrf = $rfAdminSession.Cookies.GetCookies($apiUri) | Where-Object Name -eq 'st.csrf' | Select-Object -First 1
-            $null = Invoke-WebRequest -Uri "$BaseUrl/api/auth/logout" -Method Post -WebSession $rfAdminSession `
-                -Headers @{ 'X-CSRF-TOKEN' = $csrf.Value } -UseBasicParsing -MaximumRedirection 0
-        } catch { Write-Warning 'Could not close the provisioning portal session; sign out through the portal.' }
+    foreach ($name in $savedEnvironment.Keys) {
+        [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], 'Process')
     }
+    $web = $null
 }

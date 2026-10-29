@@ -243,7 +243,14 @@ internal class Program
         var rfDatabaseCheck = args.Contains("--rf-log-db-check", StringComparer.Ordinal);
         var rfDatabaseMigrate = args.Contains("--rf-log-db-migrate", StringComparer.Ordinal);
         var rfStorageCheck = args.Contains("--rf-log-storage-check", StringComparer.Ordinal);
-        var builder = WebApplication.CreateBuilder(args.Where(arg => arg != "--rf-log-db-check" && arg != "--rf-log-db-migrate" && arg != "--rf-log-storage-check").ToArray());
+        var rfMobileCredentialCreate = args.Contains("--rf-mobile-credential-create", StringComparer.Ordinal);
+        if (new[] { rfDatabaseCheck, rfDatabaseMigrate, rfStorageCheck, rfMobileCredentialCreate }.Count(selected => selected) > 1)
+        {
+            Console.Error.WriteLine("Run only one RF operator command at a time.");
+            Environment.ExitCode = 1;
+            return;
+        }
+        var builder = WebApplication.CreateBuilder(args.Where(arg => arg != "--rf-log-db-check" && arg != "--rf-log-db-migrate" && arg != "--rf-log-storage-check" && arg != "--rf-mobile-credential-create").ToArray());
 
         if (builder.Environment.IsDevelopment())
         {
@@ -255,6 +262,12 @@ internal class Program
                 "secrets.json");
 
             builder.Configuration.AddJsonFile(userSecretsPath, optional: true, reloadOnChange: true);
+        }
+
+        if (rfMobileCredentialCreate)
+        {
+            Environment.ExitCode = RfMobileCredentialConsole.RunAsync(builder.Configuration).GetAwaiter().GetResult();
+            return;
         }
 
         if (rfDatabaseCheck || rfDatabaseMigrate)

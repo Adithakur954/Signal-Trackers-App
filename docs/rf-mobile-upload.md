@@ -1,13 +1,13 @@
 # Android RF upload without portal login
 
-The mobile user keeps the existing mobile-number/company-code entry flow. The Android app does **not** call `/api/auth/login`, send a portal password, or receive storage/SMTP keys for RF uploads. The upload authorization is a separate, administrator-provisioned credential for each app installation/user. This is now supported in backend source; the updated binaries and migration must be deployed before use.
+The mobile user keeps the existing mobile-number/company-code entry flow. The Android app does **not** call `/api/auth/login`, send a portal password, or receive storage/SMTP keys for RF uploads. Upload authorization uses a separate credential for each app installation/user. A Windows server administrator can now issue it locally without any portal email/password. This requires the updated backend binary and script; copying the script alone will not update an older deployed binary.
 
 ## 1. Server deployment and one-time enrollment
 
 1. Build/deploy the updated backend using the existing RF release process. Preserve live `web.config`, S3, SMTP and database settings.
 2. Apply migration `006_rf_mobile_upload_credentials.sql` to **both** regional databases. The existing `dotnet SignalTracker.dll --rf-log-db-migrate --environment Production` command now includes it, and `--rf-log-db-check` checks the new table. Under IIS, run through `scripts/Deploy-RfLogIntegration.ps1`, which imports the site's environment variables for the CLI checks. Plain CLI commands do not automatically read IIS `web.config` variables.
 3. Ensure the existing mobile user is active and belongs to the intended company in the correct regional database. The company code and mobile number must match the existing database records (surrounding whitespace is ignored). Provisioning does not create users or reassign company ownership.
-4. A company administrator issues a distinct upload credential for each installation/user. The operator can use:
+4. On the Windows IIS server, open **PowerShell as Administrator** and issue a distinct upload credential for each installation/user:
 
 ```powershell
 .\scripts\New-RfMobileUploadCredential.ps1 `
@@ -17,9 +17,9 @@ The mobile user keeps the existing mobile-number/company-code entry flow. The An
   -Region IN
 ```
 
-The operator is prompted privately for **administrator portal credentials**. These are used only by the provisioning tool, not by mobile users or the Android app. Portal login/licensing and single-session rules still apply. The tool signs out after provisioning. Use `-UserId <existing user ID>` when multiple registered users match the same mobile/company. The credential defaults to 90 days; `-ValidDays` accepts 1–365. The raw token is shown once, so run without shell transcription/screensharing and transfer it privately to the intended app installation.
+**No portal email/password is requested by this script.** It runs the new server-local `--rf-mobile-credential-create` command and imports the existing IIS database configuration for that subprocess. Windows administrator permissions and local access to the deployed backend authorize this operator action. `-BackendPath` defaults to `C:\inetpub\wwwroot\Backend`; set it to the actual API directory if different. The script preserves configuration and restores its temporary process environment. It performs no portal login, changes no portal session, and does not create/reassign user/company records. Use `-UserId <existing user ID>` when multiple registered users match the same mobile/company. The credential defaults to 90 days; `-ValidDays` accepts 1–365. The raw token is shown once, so run without shell transcription/screensharing or output redirection and transfer it privately to the intended app installation.
 
-The equivalent administrator API is `POST /api/rf-logs/mobile-credentials` using the administrator's existing portal cookie and `X-CSRF-TOKEN` matching `st.csrf`:
+An optional portal-administrator API remains available: `POST /api/rf-logs/mobile-credentials`, using an existing administrator portal cookie and `X-CSRF-TOKEN` matching `st.csrf`. The server-local script does not use this API. Its request format is:
 
 ```json
 {
@@ -32,7 +32,7 @@ The equivalent administrator API is `POST /api/rf-logs/mobile-credentials` using
 
 The response contains `credential`, `tokenType: "Bearer"` and `uploadToken`. Only a SHA-256 digest is stored. `GET /api/rf-logs/mobile-credentials` lists safe credential metadata for the administrator's company. `DELETE /api/rf-logs/mobile-credentials/{credentialId}` revokes a credential. Phone number/company code alone cannot call these APIs. They remain administrator-only and CSRF-protected. Existing reporting-service keys cannot provision credentials.
 
-This enrollment step is required because the existing number/company-code entry does not prove phone ownership. No OTP or portal login is added to the mobile user journey. Provisioning is an operator step; implement a secure installation-specific setup/import mechanism in the app. A device label is metadata, not hardware attestation. The secret's possession authorizes the uploader: never hardcode one shared token in all APKs or expose an unauthenticated token lookup by phone/company. On reinstall, account/company switch or credential expiry, provision the appropriate replacement. Revoke old credentials promptly when a device is lost or access is removed.
+This enrollment step is required because the existing number/company-code entry does not prove phone ownership. No OTP or portal login is added to the mobile user journey. Provisioning is a trusted operator step; implement a secure installation-specific setup/import mechanism in the app. The local command is not exposed as an HTTP route and does not make phone/company-only public token issuance available. A device label is metadata, not hardware attestation. The secret's possession authorizes the uploader: never hardcode one shared token in all APKs or expose an unauthenticated token lookup by phone/company. On reinstall, account/company switch or credential expiry, provision the appropriate replacement. Revoke old credentials promptly when a device is lost or access is removed.
 
 ## 2. What the Android developer implements
 
