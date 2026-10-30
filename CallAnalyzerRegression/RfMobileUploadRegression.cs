@@ -16,6 +16,7 @@ internal static class RfMobileUploadRegression
     internal static async Task RunAsync()
     {
         await RfMobileEnrollmentRegression.RunAsync();
+        await RfTrustedMobileLoginRegression.RunAsync();
         CheckLocalOperatorArguments();
         var clock = new TestClock();
         var store = new MemoryCredentials();

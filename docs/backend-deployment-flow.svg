@@ -142,7 +142,7 @@
 <text x="86" y="987" class="body">.NET 8 host and HTTPS / proxy trust</text>
 <text x="86" y="1010" class="body">Both regional MySQL connections</text>
 <text x="86" y="1033" class="body">Redis and backend API keys</text>
-<text x="86" y="1056" class="body">S3-compatible storage; SMTP / webhooks</text>
+<text x="86" y="1056" class="body">Ace Cloud S3; SMTP / webhooks</text>
 <text x="86" y="1079" class="body">Persistent keys, uploads and permissions</text>
 <text x="86" y="1102" class="body">CORS / CSRF and frontend origin</text>
 <text x="86" y="1125" class="body"></text>
@@ -154,7 +154,7 @@
 <text x="86" y="1495" class="body">Requires an existing configured site.</text>
 <text x="86" y="1518" class="body"></text>
 <text x="86" y="1541" class="body">Stops pool during copy / validation.</text>
-<text x="86" y="1564" class="body">RF migration covers schemas 003-005.</text>
+<text x="86" y="1564" class="body">RF migration covers schemas 003-007.</text>
 <text x="86" y="1587" class="body">Storage check performs a round trip.</text>
 <text x="86" y="1610" class="body">No automatic application rollback.</text>
 <rect x="64" y="1660" width="400" height="155" rx="16" fill="#ffffff" stroke="#d8e1ef" stroke-width="1.5"/>

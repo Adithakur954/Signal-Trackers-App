@@ -20,7 +20,7 @@ The project has controllers, services, DTOs, models, middleware, and security he
 | Cache and login state | Redis plus application fallback paths |
 | External analytics integration | Secured Python bridge HTTP APIs |
 | Live updates | ASP.NET Core WebSockets |
-| Object storage integration | Amazon S3 |
+| Object storage integration | Ace Cloud S3-compatible storage (`dcra-bucket`) |
 | API documentation | Swagger / OpenAPI in development |
 | Container packaging | Multi-stage Docker build using .NET 8 images |
 
@@ -50,7 +50,7 @@ These are direct package references in `SignalTracker.csproj`. A package referen
 | NetTopologySuite | 2.6.0 | Spatial geometry dependency |
 | System.Text.Json | 10.0.8 | JSON serialization |
 | Newtonsoft.Json | 13.0.3 | Additional JSON support |
-| AWSSDK.S3 | 4.0.104.6 | RF log and report object storage |
+| AWSSDK.S3 | 4.0.104.6 | S3-compatible client for RF logs and reports stored in Ace Cloud; the SDK name does not identify the storage provider |
 | MailKit | 4.18.2 | SMTP delivery for RF report emails |
 | Swashbuckle.AspNetCore | 6.6.2 | Swagger/OpenAPI generation |
 | BuildBundlerMinifier | 3.2.449 | Static asset build tooling |
@@ -77,7 +77,7 @@ flowchart TD
     DB --> TW[(Taiwan MySQL)]
     CTRL <--> CACHE[(Redis)]
     PY[External Python analytics] -->|Fetch inputs / save results through secured bridge| API
-    CTRL --> STORE[(S3 log and report storage)]
+    CTRL --> STORE[(Ace Cloud S3 log and report storage)]
     WORK[Background report and notification workers] --> STORE
     WORK --> DB
     WORK --> MAIL[Email / webhook delivery]

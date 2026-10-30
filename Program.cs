@@ -306,6 +306,8 @@ internal class Program
         builder.Services.AddScoped<RfMobileCredentialService>();
         builder.Services.AddScoped<IRfMobileEnrollmentStore, RfMobileEnrollmentStore>();
         builder.Services.AddScoped<RfMobileEnrollmentService>();
+        builder.Services.Configure<RfTrustedMobileLoginOptions>(builder.Configuration.GetSection(RfTrustedMobileLoginOptions.Section));
+        builder.Services.AddScoped<RfTrustedMobileLoginService>();
         builder.Services.AddScoped<SignalTracker.Controllers.RfLogErrorFilter>();
         builder.Services.PostConfigure<RfLogIntegrationOptions>(options =>
         {

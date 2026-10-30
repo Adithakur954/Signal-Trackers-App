@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="1100" viewBox="0 0 1280 1100" role="img" aria-labelledby="title desc">
   <title id="title">Stracer backend architecture</title>
-  <desc id="desc">Portal and mobile clients call the ASP.NET Core backend. Security and controllers connect to services, Redis, regional MySQL databases, S3, and background workers. External Python analytics fetch inputs and save results through a secured bridge.</desc>
+  <desc id="desc">Portal and mobile clients call the ASP.NET Core backend. Security and controllers connect to services, Redis, regional MySQL databases, Ace Cloud S3-compatible storage, and background workers. External Python analytics fetch inputs and save results through a secured bridge.</desc>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10Z" fill="#526581"/></marker>
     <style>
@@ -56,9 +56,9 @@
   <path d="M804 488H860V526H900" class="line" marker-start="url(#arrow)"/>
 
   <rect x="900" y="652" width="330" height="110" class="box" fill="#e5f7f3" stroke="#7cbcae"/>
-  <text x="922" y="686" class="head">Amazon S3</text>
+  <text x="922" y="686" class="head">Ace Cloud S3</text>
   <text x="922" y="715" class="body">Uploaded RF logs / generated PDFs</text>
-  <text x="922" y="739" class="small">AWSSDK.S3</text>
+  <text x="922" y="739" class="small">dcra-bucket · S3-compatible API</text>
   <path d="M804 506H850V708H900" class="line"/>
 
   <path d="M275 628V785H225V814" class="line"/>

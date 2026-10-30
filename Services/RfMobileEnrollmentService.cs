@@ -78,6 +78,28 @@ public sealed class RfMobileEnrollmentService(IRfMobileEnrollmentStore store, Ti
         return result.Enrollment;
     }
 
+    // Called only after the trusted-login signature and installation binding are verified.
+    internal async Task<RfMobileEnrollment> ApproveTrustedAsync(RfVerifiedMobileLogin identity, string proof, CancellationToken ct)
+    {
+        var now = clock.GetUtcNow().UtcDateTime;
+        var result = await store.MutateAsync(identity.Region, identity.EnrollmentId.ToString("N"), (row, credential) =>
+        {
+            CheckProof(row, proof);
+            if (!row.OwnerActive || row.UserId != identity.UserId || row.CompanyId != identity.CompanyId
+                || row.MobileNumber != identity.MobileNumber || row.CompanyCode != identity.CompanyCode)
+                throw new RfLogRequestException(403, "Verified mobile identity no longer matches an active enrollment owner.");
+            if (credential?.RevokedAtUtc != null)
+                throw new RfLogRequestException(401, "Installation credential is revoked.");
+            // Replays are idempotent for this exact installation. Never extend approval,
+            // resurrect denied/revoked devices or rotate a token through this endpoint.
+            if (row.Status == "approved" && row.ApprovalExpiresAtUtc > now) return new(row);
+            if (row.Status != "pending" || row.RequestExpiresAtUtc <= now)
+                throw new RfLogRequestException(409, "Enrollment is denied or expired. A new verified enrollment is required.");
+            return new(row with { Status = "approved", ApprovedAtUtc = now, ApprovalExpiresAtUtc = now.AddDays(365) });
+        }, ct);
+        return result.Enrollment;
+    }
+
     public async Task<object> TokenAsync(Guid id, RfMobileRenewalRequest request, string proof, CancellationToken ct)
     {
         if (id == Guid.Empty || request.RenewalId == Guid.Empty || request.PreviousRenewalId == Guid.Empty || request.Region is not ("IN" or "TW") || !ValidProof(proof))

@@ -1,6 +1,6 @@
 # Backend deployment and testing flow
 
-This runbook describes the repository's existing deployment tools and a proposed release process around them. The diagrams are documentation, not evidence of a completed deployment or passing tests. Production infrastructure and credentials were not accessed. Read alongside [backend architecture](backend-architecture-flow.md) and [existing security deployment gates](security/DEPLOYMENT.md).
+This runbook describes the repository's existing deployment tools and a proposed release process around them. The diagrams are documentation, not evidence of a completed deployment or passing tests. This is a source-based process description, not a blanket statement that the current production release has passed every gate. For the detailed corrected workflow, encryption/salt explanation and current limitations, see [STracer Deployment Workflow and Data Protection](STracer_Deployment_Workflow_and_Data_Protection.md). Read alongside [backend architecture](backend-architecture-flow.md) and [existing security deployment gates](security/DEPLOYMENT.md).
 
 ## Deployment process diagram
 
@@ -20,7 +20,7 @@ flowchart TD
     App --> IN[(Main / India MySQL)]
     App --> TW[(Taiwan MySQL)]
     App --> Redis[(Redis)]
-    App --> S3[(S3-compatible object storage)]
+    App --> S3[(Ace Cloud S3-compatible object storage)]
     App --> Keys[Persistent Data Protection keys and upload volumes]
     Python[External Python analytics] -->|Secured bridge APIs| Proxy
     App --> Workers[Hosted report / email / notification workers]
@@ -57,7 +57,7 @@ The regression project is a console application. Use its supported arguments wit
 ### Existing IIS release package
 
 ```powershell
-./scripts/Build-RfLogRelease.ps1 -ReleaseName stracer-release-20261029-01
+./scripts/Build-RfLogRelease.ps1 -ReleaseName stracer-release-20261030-01
 ```
 
 Choose a new release name each time. This script publishes the backend, removes published `appsettings*.json`, bundles RF deployment/configuration scripts and SQL, creates a ZIP under `artifacts`, and prints a SHA-256 hash. It uses `--no-restore`, so restore first. Inspect the resulting package for unintended local data before distribution.
@@ -65,7 +65,7 @@ Choose a new release name each time. This script publishes the backend, removes 
 ### Docker alternative
 
 ```powershell
-docker build -t signaltracker:release-20261029-01 .
+docker build -t signaltracker:release-20261030-01 .
 ```
 
 The existing multi-stage Dockerfile restores and publishes with the .NET 8 SDK, then runs `SignalTracker.dll` on the .NET 8 ASP.NET runtime image. Before using it for deployment, review the build context and packaged files, supply production configuration at runtime, set the container's listen address/port, and mount persistent keys/uploads where required. Configure HTTPS termination, trusted proxy addresses, restart behavior, logs, and monitoring in the hosting platform. Run explicit schema checks/migrations as a release step. No container orchestration, registry push, or automatic rollback is supplied by this Dockerfile.
@@ -103,7 +103,7 @@ For an existing configured IIS installation, use the packaged script with actual
 
 ```powershell
 # Example placeholders: replace these values for the target server.
-./scripts/Deploy-RfLogIntegration.ps1 -PackagePath 'C:\Releases\stracer-release-20261029-01\backend' -BackendPath 'C:\Sites\SignalTracker' -AppPoolName 'SignalTracker'
+./scripts/Deploy-RfLogIntegration.ps1 -PackagePath 'C:\Releases\stracer-release-20261030-01\backend' -BackendPath 'C:\Sites\SignalTracker' -AppPoolName 'SignalTracker'
 ```
 
 `PackagePath` points to the extracted **backend directory containing `SignalTracker.dll`**, not the outer release directory. The script expects an existing IIS application pool and live `appsettings.json`. It is not a first-install provisioning script.
@@ -149,7 +149,7 @@ The IIS helper stops the app pool during copying and validation, so plan for a m
 | Build and dependency review | Release compilation, dependency findings, no leaked credentials/artifacts | `dotnet build`, `scripts/vapt-baseline.ps1`; review its reports, not only exit codes |
 | Logic / parser regressions | Diagnostic timing, CSV validation, L3 summaries, network fallback | Runner modes `--diagnostic-time-index`, `--site-csv`, `--l3-report`, `--network-fallback` |
 | Session and cache regressions | Cookie/session continuity, pagination, cache behavior | `--session-continuity`, `--sessions-pagination`, `--network-log-cache` |
-| RF integration regressions | Upload/report state behavior and configured integrations | `--rf-log-integration`; inspect fixture/environment needs before running |
+| RF integration regressions | Upload/report state, mobile enrollment and renewal, authorization and configured integrations | `--rf-mobile-upload`, `--rf-log-integration`; inspect fixture/environment needs before running |
 | Database-backed regressions | Wi-Fi and email persistence against disposable staging data | `--wifi-plot-db`, `--rf-log-email-db`, `--rf-log-company-email-db`; inspect their connection/fixture requirements first |
 | API and regional isolation | IN/TW login, overlapping IDs, role/company boundaries, rejected cross-region access | Real HTTP requests against staging with seeded accounts |
 | End-to-end workflow | Upload → DB → dashboard; bridge read/save → result; RF upload → report → download | Staging API flows and expected row/report assertions |

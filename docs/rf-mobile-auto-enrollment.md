@@ -1,5 +1,7 @@
 # STracer Android: automatic upload-token enrollment and renewal
 
+**Integration update, 30 October 2026:** A separate [trusted-login enrollment endpoint](rf-mobile-trusted-login.md) now supports automatic first-time authorization when the mobile-login server supplies a valid, installation-bound RSA-signed assertion after trusted ownership/device verification. That mode is disabled by default and requires changes in the external login backend and Android app. The approval-based flow below remains the fallback; it has not been changed to trust anonymous mobile-number/company-code requests.
+
 Updated 30 October 2026. This is the recommended setup for new app installations. Backend code and migration 007 must be deployed before app acceptance testing. Existing portal login, manual upload credentials, S3/PDF processing and company email delivery remain supported.
 
 ## Expected user experience

@@ -282,6 +282,7 @@ internal static class RfLogIntegrationRegression
         builder.Services.AddScoped<RfMobileCredentialService>();
         builder.Services.AddSingleton<IRfMobileEnrollmentStore,RfMobileEnrollmentRegression.MemoryEnrollments>();
         builder.Services.AddScoped<RfMobileEnrollmentService>();
+        RfTrustedMobileLoginRegression.ConfigureHttp(builder.Services);
         builder.Services.AddRateLimiter(o => o.AddPolicy("PublicApi", _ => System.Threading.RateLimiting.RateLimitPartition.GetNoLimiter("test")));
         builder.Services.AddScoped<RfLogErrorFilter>();
         builder.Services.AddAuthentication("test").AddScheme<AuthenticationSchemeOptions, TestLoginHandler>("test", _ => { });
@@ -399,6 +400,7 @@ internal static class RfLogIntegrationRegression
         await RfLogEmailRegression.CheckHttpAsync(http);
         await RfMobileUploadRegression.CheckHttpAsync(http, httpStore, httpStorage);
         await RfMobileEnrollmentRegression.CheckHttpAsync(http, httpStore);
+        await RfTrustedMobileLoginRegression.CheckHttpAsync(http);
         await app.StopAsync();
         Console.WriteLine("RF HTTP contract passed: API routes, login identity, CSRF, upload-complete callback and reporting download authorization.");
     }

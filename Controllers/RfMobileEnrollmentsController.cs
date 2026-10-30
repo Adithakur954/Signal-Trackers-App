@@ -9,7 +9,7 @@ namespace SignalTracker.Controllers;
 
 [ApiController, AllowAnonymous, Route("api/rf-logs/mobile-enrollments")]
 [ServiceFilter(typeof(RfLogErrorFilter)), RequestSizeLimit(16384), EnableRateLimiting("PublicApi")]
-public sealed class RfMobileEnrollmentsController(RfMobileEnrollmentService service) : ControllerBase
+public sealed class RfMobileEnrollmentsController(RfMobileEnrollmentService service, RfTrustedMobileLoginService trustedLogin) : ControllerBase
 {
     private string Proof()
     {
@@ -23,6 +23,16 @@ public sealed class RfMobileEnrollmentsController(RfMobileEnrollmentService serv
     [HttpPost]
     public async Task<IActionResult> RequestEnrollment(RfMobileEnrollmentRequest request, CancellationToken ct) =>
         StatusCode(202, service.Metadata(await service.RequestAsync(request, Proof(), ct)));
+
+    [HttpPost("trusted")]
+    public async Task<IActionResult> TrustedEnrollment(RfMobileEnrollmentRequest request, CancellationToken ct)
+    {
+        var proof = Proof();
+        var values = Request.Headers["X-RF-Login-Assertion"];
+        if (values.Count != 1 || string.IsNullOrWhiteSpace(values[0]))
+            throw new RfLogRequestException(401, "A trusted mobile login assertion is required.");
+        return Ok(service.Metadata(await trustedLogin.EnrollAsync(request, proof, values[0]!, ct)));
+    }
 
     [HttpGet("{id:guid}")]
     public async Task<IActionResult> Status(Guid id, [FromQuery] string region, CancellationToken ct) =>
