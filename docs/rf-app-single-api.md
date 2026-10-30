@@ -1,5 +1,7 @@
 # App developer: one API for automatic RF reports
 
+**Automatic Android enrollment:** follow [device enrollment and token renewal](rf-mobile-auto-enrollment.md). An approved installation retrieves and renews its own upload token; no manual token handoff is needed. Upload still uses this same multipart endpoint.
+
 **Phone/company-code Android app:** use the [mobile upload contract](rf-mobile-upload.md). It adds administrator-provisioned installation bearer credentials to this same upload endpoint without requiring portal login on the phone. The cookie/CSRF flow below continues to apply to portal-authenticated callers only.
 
 Updated 28 October 2026. Deploy this backend release before using the new route.

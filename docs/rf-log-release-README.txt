@@ -22,7 +22,7 @@ Both regional DB connection strings must already be configured on the server:
 
 The script backs up live configuration (not old binaries), stops only the selected
 pool, copies the release, creates/grants access to writable folders, applies and
-checks RF migrations 003/004/005/006 in BOTH databases (CREATE/ALTER permission needed), checks a real S3 upload/copy/download/report
+checks RF migrations 003/004/005/006/007 in BOTH databases (CREATE/ALTER permission needed), checks a real S3 upload/copy/download/report
 round trip, then starts the pool. A failed check leaves the pool stopped; correct
 the stated issue and rerun. Check objects are created and deleted only under
 rf-logs/checks/<random-id>/; allow DeleteObject on that check prefix.
@@ -50,10 +50,14 @@ rf-logs/checks/<random-id>/; allow DeleteObject on that check prefix.
 7. Give the app team ONE endpoint on the deployed HTTPS origin:
      POST /api/rf-logs/upload
    Multipart form-data: file (ZIP), uploadId (UUID), sessionId; optional
-   subSessionId/projectId. For phone/company-code Android users, provision a
-   distinct installation credential on the IIS server in Administrator PowerShell
-   with scripts/New-RfMobileUploadCredential.ps1 (no portal email/password prompt)
-   and send Authorization: Bearer <uploadToken>. No portal cookie/CSRF is needed
+   subSessionId/projectId. For phone/company-code Android users, enroll an
+   installation through the automatic enrollment flow in docs/rf-mobile-auto-enrollment.md.
+   The app generates its own secret and requests enrollment. The administrator
+   approves the recognized device once using the portal approval API or server-local
+   scripts/Review-RfMobileEnrollment.ps1 (no portal email/password prompt).
+   The app retrieves/renews its own bearer token automatically. No manual token
+   sharing is needed. Existing manual credentials remain supported separately.
+   Send Authorization: Bearer <uploadToken>. No portal cookie/CSRF is needed
    for bearer-only requests. Never hardcode a shared credential in the APK.
    See docs/rf-mobile-upload.md for setup, revocation, expiry and the app contract.
    Existing portal login/cookie/CSRF uploads remain supported separately.

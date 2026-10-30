@@ -244,13 +244,14 @@ internal class Program
         var rfDatabaseMigrate = args.Contains("--rf-log-db-migrate", StringComparer.Ordinal);
         var rfStorageCheck = args.Contains("--rf-log-storage-check", StringComparer.Ordinal);
         var rfMobileCredentialCreate = args.Contains("--rf-mobile-credential-create", StringComparer.Ordinal);
-        if (new[] { rfDatabaseCheck, rfDatabaseMigrate, rfStorageCheck, rfMobileCredentialCreate }.Count(selected => selected) > 1)
+        var rfMobileEnrollmentReview = args.Contains("--rf-mobile-enrollment-review", StringComparer.Ordinal);
+        if (new[] { rfDatabaseCheck, rfDatabaseMigrate, rfStorageCheck, rfMobileCredentialCreate, rfMobileEnrollmentReview }.Count(selected => selected) > 1)
         {
             Console.Error.WriteLine("Run only one RF operator command at a time.");
             Environment.ExitCode = 1;
             return;
         }
-        var builder = WebApplication.CreateBuilder(args.Where(arg => arg != "--rf-log-db-check" && arg != "--rf-log-db-migrate" && arg != "--rf-log-storage-check" && arg != "--rf-mobile-credential-create").ToArray());
+        var builder = WebApplication.CreateBuilder(args.Where(arg => arg != "--rf-log-db-check" && arg != "--rf-log-db-migrate" && arg != "--rf-log-storage-check" && arg != "--rf-mobile-credential-create" && arg != "--rf-mobile-enrollment-review").ToArray());
 
         if (builder.Environment.IsDevelopment())
         {
@@ -264,9 +265,9 @@ internal class Program
             builder.Configuration.AddJsonFile(userSecretsPath, optional: true, reloadOnChange: true);
         }
 
-        if (rfMobileCredentialCreate)
+        if (rfMobileCredentialCreate || rfMobileEnrollmentReview)
         {
-            Environment.ExitCode = RfMobileCredentialConsole.RunAsync(builder.Configuration).GetAwaiter().GetResult();
+            Environment.ExitCode = RfMobileCredentialConsole.RunAsync(builder.Configuration, reviewEnrollment: rfMobileEnrollmentReview).GetAwaiter().GetResult();
             return;
         }
 
@@ -303,6 +304,8 @@ internal class Program
         builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
         builder.Services.AddScoped<IRfMobileCredentialStore, RfMobileCredentialStore>();
         builder.Services.AddScoped<RfMobileCredentialService>();
+        builder.Services.AddScoped<IRfMobileEnrollmentStore, RfMobileEnrollmentStore>();
+        builder.Services.AddScoped<RfMobileEnrollmentService>();
         builder.Services.AddScoped<SignalTracker.Controllers.RfLogErrorFilter>();
         builder.Services.PostConfigure<RfLogIntegrationOptions>(options =>
         {

@@ -1,5 +1,7 @@
 # App developer handoff: automatic drive PDF and company email
 
+**Current recommended mobile setup:** [automatic device enrollment/token renewal](rf-mobile-auto-enrollment.md). This replaces manual token distribution for newly enrolled installations, with a one-time trusted device approval.
+
 **Android phone/company-code login:** follow [RF mobile upload without portal login](rf-mobile-upload.md). The mobile app uses an installation-specific bearer credential on the existing upload endpoint; the portal email/password and cookie instructions below are for portal-authenticated integrations, not the mobile login screen.
 
 Updated: 28 October 2026. API contracts verified against this backend source. The production deployment and phone-side implementation still need acceptance testing.

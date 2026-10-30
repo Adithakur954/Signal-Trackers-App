@@ -280,11 +280,15 @@ internal static class RfLogIntegrationRegression
         builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
         builder.Services.AddSingleton<IRfMobileCredentialStore, RfMobileUploadRegression.MemoryCredentials>();
         builder.Services.AddScoped<RfMobileCredentialService>();
+        builder.Services.AddSingleton<IRfMobileEnrollmentStore,RfMobileEnrollmentRegression.MemoryEnrollments>();
+        builder.Services.AddScoped<RfMobileEnrollmentService>();
+        builder.Services.AddRateLimiter(o => o.AddPolicy("PublicApi", _ => System.Threading.RateLimiting.RateLimitPartition.GetNoLimiter("test")));
         builder.Services.AddScoped<RfLogErrorFilter>();
         builder.Services.AddAuthentication("test").AddScheme<AuthenticationSchemeOptions, TestLoginHandler>("test", _ => { });
         builder.Services.AddAuthorization();
         await using var app = builder.Build();
         app.UseRouting();
+        app.UseRateLimiter();
         app.UseAuthentication();
         app.UseMiddleware<CsrfProtectionMiddleware>();
         app.UseAuthorization();
@@ -394,6 +398,7 @@ internal static class RfLogIntegrationRegression
             && twEvent.RootElement.GetProperty("blobPath").GetString()!.Contains("/TW/7/"), "Taiwan completion uses only Taiwan records and storage namespace");
         await RfLogEmailRegression.CheckHttpAsync(http);
         await RfMobileUploadRegression.CheckHttpAsync(http, httpStore, httpStorage);
+        await RfMobileEnrollmentRegression.CheckHttpAsync(http, httpStore);
         await app.StopAsync();
         Console.WriteLine("RF HTTP contract passed: API routes, login identity, CSRF, upload-complete callback and reporting download authorization.");
     }

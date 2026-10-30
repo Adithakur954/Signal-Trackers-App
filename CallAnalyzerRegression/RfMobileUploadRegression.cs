@@ -15,6 +15,7 @@ internal static class RfMobileUploadRegression
 
     internal static async Task RunAsync()
     {
+        await RfMobileEnrollmentRegression.RunAsync();
         CheckLocalOperatorArguments();
         var clock = new TestClock();
         var store = new MemoryCredentials();
@@ -195,7 +196,7 @@ internal static class RfMobileUploadRegression
     {
         internal List<RfMobileOwner> Owners = [new(10, 7)];
         internal bool ActiveOwner = true;
-        private readonly Dictionary<(string Region, string Id), RfMobileCredential> rows = new();
+        internal readonly Dictionary<(string Region, string Id), RfMobileCredential> rows = new();
         public Task<IReadOnlyList<RfMobileOwner>> FindOwnersAsync(string region, int companyId, RfMobileCredentialRequest request, CancellationToken ct) => Task.FromResult<IReadOnlyList<RfMobileOwner>>(Owners);
         public Task InsertAsync(RfMobileCredential credential, CancellationToken ct)
         { rows.Add((credential.Region, credential.Id), credential); return Task.CompletedTask; }

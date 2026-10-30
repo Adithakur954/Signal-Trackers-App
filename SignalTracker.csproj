@@ -44,6 +44,7 @@
     <EmbeddedResource Include="Database\Migrations\004_rf_log_report_email.sql" LogicalName="SignalTracker.RfLogEmailSchema.sql" />
     <EmbeddedResource Include="Database\Migrations\005_rf_log_company_email.sql" LogicalName="SignalTracker.RfLogCompanyEmailSchema.sql" />
     <EmbeddedResource Include="Database\Migrations\006_rf_mobile_upload_credentials.sql" LogicalName="SignalTracker.RfMobileCredentialSchema.sql" />
+    <EmbeddedResource Include="Database\Migrations\007_rf_mobile_enrollments.sql" LogicalName="SignalTracker.RfMobileEnrollmentSchema.sql" />
   </ItemGroup>
   <!-- Packages (single group) -->
   <ItemGroup>

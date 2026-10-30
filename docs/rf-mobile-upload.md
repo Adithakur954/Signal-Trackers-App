@@ -1,5 +1,7 @@
 # Android RF upload without portal login
 
+**Recommended automatic setup:** use [automatic enrollment and token renewal](rf-mobile-auto-enrollment.md). The app creates a pending installation request, an administrator approves the recognized device once, and the app obtains/renews its own tokens. Manual token copying is no longer required for this flow. Deploy migration 007 and the updated backend first. The manual credential setup below remains an optional compatibility path.
+
 The mobile user keeps the existing mobile-number/company-code entry flow. The Android app does **not** call `/api/auth/login`, send a portal password, or receive storage/SMTP keys for RF uploads. Upload authorization uses a separate credential for each app installation/user. A Windows server administrator can now issue it locally without any portal email/password. This requires the updated backend binary and script; copying the script alone will not update an older deployed binary.
 
 ## 1. Server deployment and one-time enrollment

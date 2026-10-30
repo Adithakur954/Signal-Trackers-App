@@ -31,7 +31,7 @@ public static class RfMobileCredentialConsole
         return request;
     }
 
-    public static async Task<int> RunAsync(IConfiguration configuration, CancellationToken ct = default)
+    public static async Task<int> RunAsync(IConfiguration configuration, CancellationToken ct = default, bool reviewEnrollment = false)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -48,6 +48,20 @@ public static class RfMobileCredentialConsole
         {
             var region = configuration["rf-mobile-region"];
             if (region is not ("IN" or "TW")) throw new RfLogRequestException(400, "Specify rf-mobile-region as IN or TW.");
+            if (reviewEnrollment)
+            {
+                if (!Guid.TryParse(configuration["rf-mobile-enrollment-id"], out var enrollmentId) || enrollmentId == Guid.Empty)
+                    throw new RfLogRequestException(400, "Supply a valid rf-mobile-enrollment-id.");
+                var decision = configuration["rf-mobile-enrollment-decision"] ?? "approve";
+                var enrollmentStore = new RfMobileEnrollmentStore(configuration);
+                var row = await enrollmentStore.GetAsync(region, enrollmentId.ToString("N"), ct)
+                    ?? throw new RfLogRequestException(404, "Enrollment not found.");
+                var enrollmentService = new RfMobileEnrollmentService(enrollmentStore, TimeProvider.System);
+                var reviewed = await enrollmentService.DecideAsync(new RfLogActor("local-server-administrator", row.CompanyId, null, region), enrollmentId, decision, ct);
+                Console.WriteLine(JsonSerializer.Serialize(enrollmentService.Metadata(reviewed), new JsonSerializerOptions { WriteIndented = true }));
+                Console.WriteLine("Device decision saved. The app retrieves/renews its own token; no token needs to be copied or shared.");
+                return 0;
+            }
             var request = ReadRequest(configuration);
             var connectionString = configuration.GetConnectionString(RfLogUploadStore.ConnectionStringName(region));
             if (string.IsNullOrWhiteSpace(connectionString)) throw new RfLogRequestException(503, "The selected regional database is not configured.");

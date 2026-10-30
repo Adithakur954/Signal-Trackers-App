@@ -22,6 +22,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Configure-RfLogIntegration.ps1') -Destination (Join-Path $releaseRoot 'scripts')
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Repair-RfLogStorage.ps1') -Destination (Join-Path $releaseRoot 'scripts')
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'New-RfMobileUploadCredential.ps1') -Destination (Join-Path $releaseRoot 'scripts')
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Review-RfMobileEnrollment.ps1') -Destination (Join-Path $releaseRoot 'scripts')
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Configure-RfLogReportEmail.ps1') -Destination (Join-Path $releaseRoot 'scripts')
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Deploy-RfLogIntegration.ps1') -Destination (Join-Path $releaseRoot 'scripts')
     Copy-Item -LiteralPath (Join-Path $sourceRoot 'docs/rf-log-integration.md') -Destination (Join-Path $releaseRoot 'docs')
@@ -30,6 +31,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $sourceRoot 'docs/rf-app-developer-handoff.md') -Destination (Join-Path $releaseRoot 'docs')
     Copy-Item -LiteralPath (Join-Path $sourceRoot 'docs/rf-app-single-api.md') -Destination (Join-Path $releaseRoot 'docs')
     Copy-Item -LiteralPath (Join-Path $sourceRoot 'docs/rf-mobile-upload.md') -Destination (Join-Path $releaseRoot 'docs')
+    Copy-Item -LiteralPath (Join-Path $sourceRoot 'docs/rf-mobile-auto-enrollment.md') -Destination (Join-Path $releaseRoot 'docs')
     Copy-Item -LiteralPath (Join-Path $sourceRoot 'docs/rf-frontend-developer-handoff.md') -Destination (Join-Path $releaseRoot 'docs')
     Copy-Item -LiteralPath (Join-Path $sourceRoot 'docs/rf-client-integration.http') -Destination (Join-Path $releaseRoot 'docs')
     Copy-Item -LiteralPath (Join-Path $sourceRoot 'docs/rf-drive-auto-report.md') -Destination (Join-Path $releaseRoot 'docs')
@@ -40,6 +42,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $sourceRoot 'Database/Migrations/004_rf_log_report_email.sql') -Destination (Join-Path $releaseRoot 'database')
     Copy-Item -LiteralPath (Join-Path $sourceRoot 'Database/Migrations/005_rf_log_company_email.sql') -Destination (Join-Path $releaseRoot 'database')
     Copy-Item -LiteralPath (Join-Path $sourceRoot 'Database/Migrations/006_rf_mobile_upload_credentials.sql') -Destination (Join-Path $releaseRoot 'database')
+    Copy-Item -LiteralPath (Join-Path $sourceRoot 'Database/Migrations/007_rf_mobile_enrollments.sql') -Destination (Join-Path $releaseRoot 'database')
     Copy-Item -LiteralPath (Join-Path $sourceRoot 'appsettings.Production.example.json') -Destination $releaseRoot
     Copy-Item -LiteralPath (Join-Path $sourceRoot 'docs/rf-log-release-README.txt') -Destination (Join-Path $releaseRoot 'README.txt')
     $zipPath = Join-Path $sourceRoot "artifacts/$ReleaseName.zip"
